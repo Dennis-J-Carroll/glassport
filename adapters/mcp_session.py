@@ -84,8 +84,13 @@ def from_mcp_session(
                    metadata={"role": "mcp_server"})
 
     events: list[Event] = []
-    # request id -> (event_id of the TOOL_CALL, tool name)
-    pending: dict[Any, tuple[str, str]] = {}
+    # JSON-RPC ids are per-sender: the client and the server each run
+    # their own id sequence over the same pipe, so id 1 from the client
+    # and id 1 from the server are different requests. Two pending maps,
+    # one per direction, keep them from cross-pairing.
+    # request id -> (event_id of the request event, tool/<method> name)
+    pending: dict[Any, tuple[str, str]] = {}        # client-initiated
+    pending_s2c: dict[Any, tuple[str, str]] = {}    # server-initiated
     declared: list[dict] = []                   # accumulates tools/list tools
     final_state: Optional[TaskState] = None
     last_event_id: Optional[str] = None         # rough causal spine
@@ -120,6 +125,14 @@ def from_mcp_session(
 
         # ── client → server ─────────────────────────────────────────
         if direction == "c2s":
+            # the initialize request carries the client's granted
+            # capabilities — the context the server is allowed to use
+            if method == "initialize":
+                params = frame.get("params") or {}
+                client.metadata["capabilities"] = params.get("capabilities") or {}
+                client.metadata["client_info"] = params.get("clientInfo")
+                client.metadata["protocol_version"] = params.get("protocolVersion")
+
             if method == "tools/call":
                 params = frame.get("params") or {}
                 name = params.get("name", "?")
@@ -147,6 +160,22 @@ def from_mcp_session(
                 events.append(ev)
                 last_event_id = ev.id
 
+            elif method is None and ("result" in frame or "error" in frame):
+                # client's reply to a server-initiated request
+                parent_eid, req_method = pending_s2c.pop(rid, (None, None)) \
+                    if rid is not None else (None, None)
+                ev = Event(
+                    id=_new_id("evt"), timestamp=ts, actor_id=client.id,
+                    kind=EventKind.MESSAGE, target_id=server.id,
+                    parts=[Part(kind=PartKind.JSON, content=frame)],
+                    parent_event_id=parent_eid or last_event_id,
+                    metadata={"seq": seq, "jsonrpc_id": rid,
+                              "responds_to": req_method,
+                              "orphaned": parent_eid is None and rid is not None},
+                )
+                events.append(ev)
+                last_event_id = ev.id
+
             else:
                 # other request methods (initialize, tools/list, ping…)
                 ev = Event(
@@ -164,6 +193,26 @@ def from_mcp_session(
 
         # ── server → client ─────────────────────────────────────────
         elif direction == "s2c":
+            if method is not None:
+                # server-initiated traffic: a request (sampling/createMessage,
+                # roots/list, ping, …) or a notification. Never a response,
+                # so it must not consume the client's pending map.
+                ev = Event(
+                    id=_new_id("evt"), timestamp=ts, actor_id=server.id,
+                    kind=EventKind.MESSAGE, target_id=client.id,
+                    parts=[Part(kind=PartKind.JSON, content=frame)],
+                    parent_event_id=last_event_id,
+                    metadata={"seq": seq, "method": method,
+                              "server_initiated": True,
+                              "notification": is_notification,
+                              "jsonrpc_id": rid},
+                )
+                events.append(ev)
+                last_event_id = ev.id
+                if rid is not None:
+                    pending_s2c[rid] = (ev.id, f"<{method}>")
+                continue
+
             result = frame.get("result")
             error = frame.get("error")
 
@@ -175,6 +224,13 @@ def from_mcp_session(
 
             parent_eid, call_name = pending.pop(rid, (None, None)) \
                 if rid is not None else (None, None)
+
+            # the initialize result carries the server's declared
+            # capabilities and identity — stamp them on the server actor
+            if call_name == "<initialize>" and isinstance(result, dict):
+                server.metadata["capabilities"] = result.get("capabilities") or {}
+                server.metadata["server_info"] = result.get("serverInfo")
+                server.metadata["protocol_version"] = result.get("protocolVersion")
 
             if error is not None:
                 msg = (error or {}).get("message", str(error))

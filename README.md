@@ -35,6 +35,7 @@ report.
 | `glassport_tap` | Passive stdio relay + JSONL frame logging | ✅ **Built** |
 | `summarize` | Declared vs. called vs. fabricated delta per session, computed on an `InteractionTrace` | ✅ **Built** |
 | `from_mcp_session()` | Session log → `InteractionTrace` (Understanding Layer schema) | ✅ **Built** |
+| `detectors.py` | `fabricated_calls()` + `context_violations()` emitted as trace annotations | ✅ **Built** |
 | Session HTML report | Visual timeline with anomalies highlighted | 🔜 Planned (M3) |
 | Watch mode | Behavioral drift across sessions over time | 🔜 Planned (M4) |
 | Static audit tools | Pre-deployment dissection + scoring (`glassport_audit`, `glassport_dissect`) | 🔜 Planned — earlier v0.1 prototype being folded in |
@@ -136,6 +137,19 @@ the CLI report and the Understanding Layer read the wire through one
 code path, so they can never disagree about what a session contained.
 (Tap mode stays a standalone single file; only `summarize` needs the
 trace modules alongside it.)
+
+Detectors run on top of the trace and attach `Annotation` objects:
+
+```python
+from detectors import annotate
+
+annotate(trace)   # fabricated calls, schema violations, capability
+                  # violations, ordering violations, orphaned responses,
+                  # mid-session surface changes
+```
+
+Detectors only assert what the wire proves: no `initialize` captured
+means no capability claim, no `tools/list` seen means no schema check.
 
 ---
 

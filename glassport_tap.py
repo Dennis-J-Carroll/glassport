@@ -220,6 +220,7 @@ def summarize(log_path: Path) -> int:
     try:
         from adapters.mcp_session import from_mcp_session_file
         from interaction_trace import PartKind
+        from detectors import context_violations
     except ImportError:
         # Allow summarize to work when the tap is invoked from another
         # cwd or imported as a module: the repo root is this file's dir.
@@ -227,6 +228,7 @@ def summarize(log_path: Path) -> int:
         try:
             from adapters.mcp_session import from_mcp_session_file
             from interaction_trace import PartKind
+            from detectors import context_violations
         except ImportError:
             print("[glassport] summarize needs interaction_trace.py and "
                   "adapters/mcp_session.py alongside this script.\n"
@@ -269,6 +271,16 @@ def summarize(log_path: Path) -> int:
         print("fabricated calls: none")
     if errors:
         print(f"protocol errors:  {errors}")
+
+    violations = sorted(context_violations(trace),
+                        key=lambda a: (a.metadata.get("seq") or 0))
+    if violations:
+        print("CONTEXT VIOLATIONS:")
+        for a in violations:
+            print(f"  [sev {a.severity}] seq {a.metadata.get('seq')} "
+                  f"{a.subcategory}: {a.explanation}")
+    else:
+        print("context violations: none")
     return 0
 
 
@@ -278,7 +290,7 @@ def summarize(log_path: Path) -> int:
 USAGE = """\
 glassport_tap — passive MCP stdio proxy (M0)
 
-  tap (default):   glassport_tap.py [--log-dir DIR] -- <server command...>
+  wrap (default):  glassport_tap.py [wrap] [--log-dir DIR] -- <server command...>
   summarize:       glassport_tap.py summarize <session.jsonl>
 """
 
@@ -287,6 +299,14 @@ def main(argv: list[str]) -> int:
     if not argv or argv[0] in ("-h", "--help"):
         print(USAGE)
         return 0
+
+    # explicit subcommand alias for the default mode, so configs written
+    # as "wrap" today survive the day "gate" becomes a sibling (M5)
+    if argv[0] == "wrap":
+        argv = argv[1:]
+        if not argv:
+            print(USAGE)
+            return 2
 
     if argv[0] == "summarize":
         if len(argv) != 2:
