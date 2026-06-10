@@ -22,7 +22,7 @@ from __future__ import annotations
 
 from typing import Iterator, Optional
 
-from interaction_trace import (
+from glassport.interaction_trace import (
     Annotation, AnnotationKind, HallucinationCategory,
     ActorKind, EventKind, Event, InteractionTrace, PartKind,
     _new_id,

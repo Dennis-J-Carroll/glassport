@@ -10,9 +10,9 @@ Pure stdlib, run with:  python3 -m unittest tests.test_detectors
 import json
 import unittest
 
-from adapters.mcp_session import from_mcp_session
-from interaction_trace import AnnotationKind, EventKind
-import detectors
+from glassport.adapters.mcp_session import from_mcp_session
+from glassport.interaction_trace import AnnotationKind, EventKind
+from glassport import detectors
 
 
 def L(seq: int, direction: str, frame: dict) -> str:

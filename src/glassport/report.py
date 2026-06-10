@@ -29,7 +29,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from interaction_trace import (
+from glassport.interaction_trace import (
     ActorKind, Annotation, AnnotationKind, Event, EventKind,
     InteractionTrace, PartKind,
 )
@@ -228,8 +228,8 @@ def render_html(trace: InteractionTrace, source_name: str = "") -> str:
 def report(log_path: str | Path, out_path: Optional[str | Path] = None,
            server_name: str = "mcp_server") -> Path:
     """Full pipeline: tap log -> trace -> detectors -> HTML next to the log."""
-    from adapters.mcp_session import from_mcp_session_file
-    import detectors
+    from glassport.adapters.mcp_session import from_mcp_session_file
+    from glassport import detectors
 
     log_path = Path(log_path)
     trace = from_mcp_session_file(log_path, server_name=server_name)

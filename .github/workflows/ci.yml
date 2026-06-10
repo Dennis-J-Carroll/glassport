@@ -1,0 +1,34 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      # Zero dependencies is a design constraint: the suite must pass
+      # with nothing but the stdlib, straight from a clone.
+      - name: Run tests (stdlib only, no install)
+        run: python -m unittest discover -s tests -t . -v
+
+      - name: Install package
+        run: pip install .
+
+      - name: Smoke test console script
+        run: glassport --help
+
+      - name: Static audit smoke test (fake server is misbehaving by design)
+        run: glassport audit examples/fake_server.py || true

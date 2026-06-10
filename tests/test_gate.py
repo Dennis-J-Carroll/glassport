@@ -16,11 +16,11 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from adapters.mcp_session import from_mcp_session
-from interaction_trace import AnnotationKind, EventKind
-import detectors
-import report as report_mod
-from glassport_tap import Gate
+from glassport.adapters.mcp_session import from_mcp_session
+from glassport.interaction_trace import AnnotationKind, EventKind
+from glassport import detectors
+from glassport import report as report_mod
+from glassport.tap import Gate
 from tests.test_detectors import handshake
 
 REPO = Path(__file__).resolve().parent.parent

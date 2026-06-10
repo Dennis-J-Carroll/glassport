@@ -1,0 +1,485 @@
+#!/usr/bin/env python3
+"""
+glassport_tap — M0 of the Glassport active proxy.
+
+A passive stdio man-in-the-middle for MCP servers. Drop it between any
+MCP client (Claude Desktop, Cursor, Claude Code) and any stdio MCP
+server. It relays every byte faithfully and logs every JSON-RPC frame
+to a JSONL session file.
+
+    The glass before the port. Observe first. Enforce later.
+
+Usage (wrap mode — replaces the server command in your MCP config):
+
+    {
+      "mcpServers": {
+        "exa": {
+          "command": "python3",
+          "args": ["/path/to/glassport_tap.py", "--", "npx", "exa-mcp-server"]
+        }
+      }
+    }
+
+Usage (summarize mode — read a session log after the fact):
+
+    python3 glassport_tap.py summarize ~/.glassport/sessions/<file>.jsonl
+
+Design constraints honored:
+  * Zero dependencies. Pure stdlib. Runs in Termux.
+  * Byte-faithful relay. The tap must NEVER alter, reorder, or delay
+    frames beyond pipe latency. If logging fails, relaying continues.
+  * Newline-delimited JSON framing per MCP stdio transport. Lines that
+    don't parse as JSON are relayed verbatim and logged as raw.
+  * Crash-isolated: a logging bug must not kill the session.
+
+Frame log schema (one JSON object per line):
+  {
+    "schema_version": "0.1",
+    "seq":  int,            # monotonic per session, both directions
+    "ts":   str,            # ISO 8601 UTC
+    "dir":  "c2s" | "s2c",  # client→server or server→client
+    "frame": dict | null,   # parsed JSON-RPC frame, if parseable
+    "raw":  str | null      # raw line, only when parsing failed
+  }
+
+This log is the precursor wire format for InteractionTrace: the
+from_mcp_session() adapter consumes exactly these records, and the
+summarize command routes through that same adapter — one code path
+from wire to report.
+
+Author: Dennis J. Carroll · 2026 (skeleton drafted with Claude)
+"""
+from __future__ import annotations
+
+import json
+import os
+import shlex
+import signal
+import subprocess
+import sys
+import threading
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+
+SCHEMA_VERSION = "0.1"
+DEFAULT_LOG_DIR = Path(os.environ.get("GLASSPORT_LOG_DIR",
+                                      Path.home() / ".glassport" / "sessions"))
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+# ─────────────────────────────────────────────────────────────────
+# Session logger — append-only JSONL, thread-safe, failure-isolated.
+# ─────────────────────────────────────────────────────────────────
+class SessionLog:
+    def __init__(self, path: Path):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        # line-buffered text append; survives abrupt termination well
+        self._fh = open(path, "a", buffering=1, encoding="utf-8")
+        self._lock = threading.Lock()
+        self._seq = 0
+        self.path = path
+
+    def record(self, direction: str, line: bytes,
+               gate: dict | None = None) -> None:
+        """Log one wire line. Never raises — relay must outlive logging.
+
+        `gate` marks frames the gate acted on: {"action": "blocked"} on a
+        c2s frame the server never received, {"action": "injected"} on an
+        s2c frame the server never sent. Optional field — schema 0.1 logs
+        without it stay readable, readers without it stay correct.
+        """
+        try:
+            text = line.decode("utf-8", errors="replace").rstrip("\r\n")
+            frame, raw = None, None
+            try:
+                frame = json.loads(text)
+            except (json.JSONDecodeError, ValueError):
+                raw = text
+            with self._lock:
+                self._seq += 1
+                entry = {
+                    "schema_version": SCHEMA_VERSION,
+                    "seq": self._seq,
+                    "ts": _now_iso(),
+                    "dir": direction,
+                    "frame": frame,
+                    "raw": raw,
+                }
+                if gate is not None:
+                    entry["gate"] = gate
+                self._fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        except Exception:
+            pass  # logging is best-effort; the relay is sacred
+
+    def close(self) -> None:
+        try:
+            self._fh.close()
+        except Exception:
+            pass
+
+
+# ─────────────────────────────────────────────────────────────────
+# Gate — M5. Active enforcement on the c2s path. Opt-in, last, on
+# purpose: it ships only because the passive detectors came first.
+# ─────────────────────────────────────────────────────────────────
+class Gate:
+    """
+    Blocks c2s tools/call frames that name a tool outside the server's
+    declared surface. Everything else relays untouched.
+
+    The gate only blocks what the wire can prove. Until a tools/list
+    response has been seen there is no declaration to violate, so every
+    call is forwarded (the passive detectors still flag premature calls
+    after the fact). The latest tools/list result IS the contract: a
+    server that re-declares a smaller surface shrinks what it may be
+    asked to do.
+
+    A blocked request never reaches the server; the client receives a
+    synthesized JSON-RPC error (code -32000) whose error.data carries
+    {"glassport": "gate_blocked"} so callers can tell the gate's voice
+    from the server's. Both the blocked frame and the injected response
+    are logged with a "gate" marker — the session log records what each
+    side actually saw, and they legitimately differ.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._declared: set[str] | None = None   # None until tools/list seen
+        self.blocked_count = 0
+
+    def observe_s2c(self, line: bytes) -> None:
+        """Harvest tool declarations from server output. Never raises."""
+        try:
+            frame = json.loads(line)
+        except (json.JSONDecodeError, ValueError, UnicodeDecodeError):
+            return
+        if not isinstance(frame, dict):
+            return
+        result = frame.get("result")
+        if isinstance(result, dict) and isinstance(result.get("tools"), list):
+            names = {t["name"] for t in result["tools"]
+                     if isinstance(t, dict) and "name" in t}
+            with self._lock:
+                self._declared = names
+
+    def check_c2s(self, line: bytes
+                  ) -> tuple[str, bytes | None, dict | None]:
+        """
+        Decide one client→server line. Returns (action, response, info):
+        action "forward" relays the line untouched; "block" drops it,
+        sends `response` (bytes, or None for id-less calls) back to the
+        client, and logs `info` on the blocked entry.
+        """
+        try:
+            frame = json.loads(line)
+        except (json.JSONDecodeError, ValueError, UnicodeDecodeError):
+            return ("forward", None, None)   # not ours to judge
+        if not isinstance(frame, dict) or frame.get("method") != "tools/call":
+            return ("forward", None, None)
+
+        name = (frame.get("params") or {}).get("name")
+        with self._lock:
+            declared = self._declared
+        if declared is None or name in declared:
+            return ("forward", None, None)
+
+        self.blocked_count += 1
+        rid = frame.get("id")
+        response = None
+        if rid is not None:
+            response = (json.dumps({
+                "jsonrpc": "2.0", "id": rid,
+                "error": {
+                    "code": -32000,
+                    "message": (f"glassport gate: tools/call '{name}' "
+                                f"blocked — not in the declared tool "
+                                f"surface"),
+                    "data": {"glassport": "gate_blocked", "tool": name,
+                             "declared": sorted(declared)},
+                },
+            }, ensure_ascii=False) + "\n").encode("utf-8")
+        info = {"action": "blocked", "tool": name,
+                "declared": sorted(declared)}
+        return ("block", response, info)
+
+
+# ─────────────────────────────────────────────────────────────────
+# Pump — moves lines from one fd to another, tapping each line.
+# ─────────────────────────────────────────────────────────────────
+def pump(src, dst, log: SessionLog | None, direction: str,
+         gate: Gate | None = None, client_write=None,
+         dst_lock: threading.Lock | None = None) -> None:
+    """
+    Read newline-delimited lines from src, write them unmodified to dst,
+    and tap each into the session log. Binary-safe; preserves the exact
+    bytes including the newline.
+
+    With a gate: c2s lines are checked before forwarding — a blocked
+    line never reaches dst, and the synthesized error goes back to the
+    client via client_write. s2c lines feed the gate's view of the
+    declared surface. dst_lock serializes client-bound writes so an
+    injected error can't interleave with a real server response.
+    """
+    try:
+        for line in iter(src.readline, b""):
+            if gate is not None and direction == "c2s":
+                action, response, info = gate.check_c2s(line)
+                if action == "block" and info is not None:
+                    if log is not None:
+                        log.record(direction, line, gate=info)
+                    if response is not None and client_write is not None:
+                        client_write(response)
+                        if log is not None:
+                            log.record("s2c", response,
+                                       gate={"action": "injected",
+                                             "tool": info["tool"]})
+                    continue
+            elif gate is not None and direction == "s2c":
+                gate.observe_s2c(line)
+            if dst_lock is not None:
+                with dst_lock:
+                    dst.write(line)
+                    dst.flush()
+            else:
+                dst.write(line)
+                dst.flush()
+            if log is not None:
+                log.record(direction, line)
+    except (BrokenPipeError, ValueError, OSError):
+        pass  # one side hung up; let the session wind down
+    finally:
+        try:
+            dst.close()
+        except Exception:
+            pass
+
+
+def pump_stderr(src, dst) -> None:
+    """Pass the child's stderr through untouched (no framing assumed)."""
+    try:
+        for chunk in iter(lambda: src.read(4096), b""):
+            dst.write(chunk)
+            dst.flush()
+    except (BrokenPipeError, ValueError, OSError):
+        pass
+
+
+# ─────────────────────────────────────────────────────────────────
+# Tap mode — spawn the real server and sit in the middle.
+# ─────────────────────────────────────────────────────────────────
+def run_tap(server_cmd: list[str], log_dir: Path,
+            gate: Gate | None = None) -> int:
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    safe_name = "".join(c if c.isalnum() else "_" for c in server_cmd[0])[:32]
+    log_path = log_dir / f"{stamp}_{safe_name}_{os.getpid()}.jsonl"
+    log = SessionLog(log_path)
+
+    # Announce on stderr only — stdout belongs to the protocol.
+    print(f"[glassport] tapping: {shlex.join(server_cmd)}", file=sys.stderr)
+    print(f"[glassport] session log: {log_path}", file=sys.stderr)
+    if gate is not None:
+        print("[glassport] GATE ACTIVE: tools/call frames outside the "
+              "declared surface will be blocked", file=sys.stderr)
+
+    try:
+        child = subprocess.Popen(
+            server_cmd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            bufsize=0,  # unbuffered — frames must not sit in a buffer
+        )
+    except FileNotFoundError:
+        print(f"[glassport] command not found: {server_cmd[0]}", file=sys.stderr)
+        return 127
+
+    stdin_b = sys.stdin.buffer
+    stdout_b = sys.stdout.buffer
+
+    # One lock for everything client-bound: real server responses and
+    # gate-injected errors must never interleave mid-line.
+    out_lock = threading.Lock()
+
+    def client_write(data: bytes) -> None:
+        with out_lock:
+            stdout_b.write(data)
+            stdout_b.flush()
+
+    threads = [
+        threading.Thread(target=pump, daemon=True,
+                         args=(stdin_b, child.stdin, log, "c2s"),
+                         kwargs={"gate": gate, "client_write": client_write}),
+        threading.Thread(target=pump, daemon=True,
+                         args=(child.stdout, stdout_b, log, "s2c"),
+                         kwargs={"gate": gate, "dst_lock": out_lock}),
+        threading.Thread(target=pump_stderr, daemon=True,
+                         args=(child.stderr, sys.stderr.buffer)),
+    ]
+    for t in threads:
+        t.start()
+
+    # Forward termination signals to the child so configs behave normally.
+    def _forward(sig, _frame):
+        try:
+            child.send_signal(sig)
+        except Exception:
+            pass
+    for s in (signal.SIGINT, signal.SIGTERM):
+        signal.signal(s, _forward)
+
+    rc = child.wait()
+    time.sleep(0.1)  # let pumps drain their last lines
+    log.close()
+    suffix = f"; blocked {gate.blocked_count} call(s)" \
+        if gate is not None and gate.blocked_count else ""
+    print(f"[glassport] session ended (exit {rc}){suffix}; "
+          f"log: {log_path}", file=sys.stderr)
+    return rc
+
+
+# ─────────────────────────────────────────────────────────────────
+# Summarize mode — M2. Declared vs called vs delta, computed on an
+# InteractionTrace via adapters/mcp_session.py so this CLI and the
+# Understanding Layer read the wire through one code path.
+# ─────────────────────────────────────────────────────────────────
+def summarize(log_path: Path) -> int:
+    """
+    Render the declared/called/fabricated delta for one session log.
+
+    The log is first lifted into an InteractionTrace by the
+    from_mcp_session adapter; everything printed here is derived from
+    the trace, never from the raw JSONL. Tap mode stays standalone —
+    only summarize requires the Understanding Layer modules.
+    """
+    from glassport.adapters.mcp_session import from_mcp_session_file
+    from glassport.detectors import context_violations
+    from glassport.interaction_trace import PartKind
+
+    trace = from_mcp_session_file(log_path)
+
+    seq_of = {e.id: e.metadata.get("seq", -1) for e in trace.events}
+    # one event per parsed frame; raw wire lines carry the unparsed flag
+    frames = sum(1 for e in trace.events if not e.metadata.get("unparsed"))
+    declared = trace.declared_tools()
+    called = [(seq_of[eid], name) for eid, name in trace.called_tools()]
+    fabricated = [(seq_of[eid], name)
+                  for eid, name in trace.fabricated_tool_calls()]
+    unused = sorted(declared - {n for _, n in called})
+
+    errors: list[tuple[int, str]] = []          # (seq, message)
+    for e in trace.events:
+        for p in e.parts:
+            if p.kind == PartKind.ERROR:
+                errors.append((e.metadata.get("seq", -1),
+                               str(e.metadata.get("error_message", p.content))))
+            elif p.kind == PartKind.TOOL_RESULT and p.content.get("is_error"):
+                out = p.content.get("output")
+                msg = out.get("message", str(out)) if isinstance(out, dict) \
+                    else str(out)
+                errors.append((e.metadata.get("seq", -1), msg))
+
+    print(f"session: {log_path.name}")
+    print(f"frames parsed:    {frames}")
+    print(f"declared tools:   {sorted(declared) or '— (no tools/list seen)'}")
+    print(f"called tools:     {[n for _, n in called] or '—'}")
+    print(f"unused declared:  {unused or '—'}")
+    if fabricated:
+        print(f"FABRICATED CALLS: {fabricated}   <-- calls outside the "
+              f"declared surface")
+    else:
+        print("fabricated calls: none")
+    if errors:
+        print(f"protocol errors:  {errors}")
+
+    violations = sorted(context_violations(trace),
+                        key=lambda a: (a.metadata.get("seq") or 0))
+    if violations:
+        print("CONTEXT VIOLATIONS:")
+        for a in violations:
+            print(f"  [sev {a.severity}] seq {a.metadata.get('seq')} "
+                  f"{a.subcategory}: {a.explanation}")
+    else:
+        print("context violations: none")
+    return 0
+
+
+# ─────────────────────────────────────────────────────────────────
+# CLI
+# ─────────────────────────────────────────────────────────────────
+USAGE = """\
+glassport — passive MCP stdio proxy
+
+  wrap (default):  glassport [wrap] [--log-dir DIR] -- <server command...>
+  gate:            glassport gate [--log-dir DIR] -- <server command...>
+                   (active: blocks tools/call outside the declared surface)
+  audit:           glassport audit <path> [--json] | audit --rubric
+                   (static, pre-deployment: reads source, never runs it)
+  summarize:       glassport summarize <session.jsonl>
+  report:          glassport report <session.jsonl> [-o out.html]
+  watch:           glassport watch [log-dir] [--json]
+
+(`python3 glassport_tap.py ...` from a clone works identically.)
+"""
+
+
+def main(argv: list[str]) -> int:
+    if not argv or argv[0] in ("-h", "--help"):
+        print(USAGE)
+        return 0
+
+    # "wrap" stays the passive default forever; "gate" is the opt-in
+    # enforcing sibling it was reserved for (M5)
+    gate: Gate | None = None
+    if argv[0] == "wrap":
+        argv = argv[1:]
+    elif argv[0] == "gate":
+        gate = Gate()
+        argv = argv[1:]
+    if not argv:
+        print(USAGE)
+        return 2
+
+    if argv[0] == "summarize":
+        if len(argv) != 2:
+            print(USAGE)
+            return 2
+        return summarize(Path(argv[1]))
+
+    if argv[0] == "report":
+        # M3 — static HTML render. Lazy import keeps tap mode import-light.
+        from glassport import report as report_mod
+        return report_mod.main(argv[1:])
+
+    if argv[0] == "watch":
+        # M4 — drift across sessions. Same lazy-import contract.
+        from glassport import watch as watch_mod
+        return watch_mod.main(argv[1:])
+
+    if argv[0] == "audit":
+        # static pre-deployment audit; standalone module, no trace deps
+        from glassport import audit as audit_mod
+        return audit_mod.main(argv[1:])
+
+    log_dir = DEFAULT_LOG_DIR
+    if argv[0] == "--log-dir":
+        log_dir = Path(argv[1])
+        argv = argv[2:]
+    if argv and argv[0] == "--":
+        argv = argv[1:]
+    if not argv:
+        print(USAGE)
+        return 2
+    return run_tap(argv, log_dir, gate=gate)
+
+
+def cli() -> None:
+    """Console-script entry point (``glassport`` command)."""
+    sys.exit(main(sys.argv[1:]))
+
+
+if __name__ == "__main__":
+    cli()

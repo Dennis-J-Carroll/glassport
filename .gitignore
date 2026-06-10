@@ -2,3 +2,6 @@ __pycache__/
 *.pyc
 # generated session reports (regenerable from the .jsonl next to them)
 examples/*.html
+*.egg-info/
+dist/
+build/

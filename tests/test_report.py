@@ -14,9 +14,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from adapters.mcp_session import from_mcp_session
-import detectors
-import report as report_mod
+from glassport.adapters.mcp_session import from_mcp_session
+from glassport import detectors
+from glassport import report as report_mod
 from tests.test_detectors import handshake, call, result
 
 

@@ -43,7 +43,7 @@ import json
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
-from interaction_trace import (
+from glassport.interaction_trace import (
     Actor, Event, Part, InteractionTrace,
     ProtocolKind, ActorKind, EventKind, PartKind, TaskState,
     _new_id,

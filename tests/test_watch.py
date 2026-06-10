@@ -11,8 +11,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from adapters.mcp_session import from_mcp_session
-import watch
+from glassport.adapters.mcp_session import from_mcp_session
+from glassport import watch
 from tests.test_detectors import L, handshake, call, result
 
 

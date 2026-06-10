@@ -1,0 +1,49 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "glassport"
+version = "0.1.0"
+description = "Wire-level observability and enforcement for MCP servers: passive stdio tap, behavioral detectors, drift watch, and static audit. Zero dependencies."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.10"
+authors = [
+    { name = "Dennis J. Carroll", email = "denniscarroll93@gmail.com" },
+]
+keywords = [
+    "mcp",
+    "model-context-protocol",
+    "security",
+    "observability",
+    "proxy",
+    "json-rpc",
+    "audit",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Intended Audience :: System Administrators",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Security",
+    "Topic :: System :: Monitoring",
+]
+
+[project.urls]
+Homepage = "https://github.com/Dennis-J-Carroll/glassport"
+Repository = "https://github.com/Dennis-J-Carroll/glassport"
+Issues = "https://github.com/Dennis-J-Carroll/glassport/issues"
+
+[project.scripts]
+glassport = "glassport.tap:cli"
+
+[tool.setuptools.packages.find]
+where = ["src"]

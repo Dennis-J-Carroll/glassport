@@ -9,6 +9,7 @@
 </p>
 
 <p align="center">
+  <img alt="CI" src="https://github.com/Dennis-J-Carroll/glassport/actions/workflows/ci.yml/badge.svg">
   <img alt="Python 3.10+" src="https://img.shields.io/badge/python-3.10+-3b82f6?style=flat-square&logo=python&logoColor=white">
   <img alt="Zero dependencies" src="https://img.shields.io/badge/dependencies-zero-22c55e?style=flat-square">
   <img alt="Runs in Termux" src="https://img.shields.io/badge/runs%20in-Termux-a78bfa?style=flat-square">
@@ -106,6 +107,12 @@ If it's not marked Built, it doesn't run yet.
 ## Quick start
 
 Zero dependencies. Pure Python stdlib. Runs on Python 3.10+, including Termux.
+
+```bash
+pip install glassport     # installs the `glassport` command
+```
+
+or, equivalently — a bare clone is fully runnable, no install step:
 
 ```bash
 git clone https://github.com/Dennis-J-Carroll/glassport

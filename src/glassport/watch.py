@@ -35,7 +35,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Iterable
 
-from interaction_trace import InteractionTrace, PartKind
+from glassport.interaction_trace import InteractionTrace, PartKind
 
 FINGERPRINT_VERSION = "0.1"
 DEFAULT_LOG_DIR = Path.home() / ".glassport" / "sessions"
@@ -257,7 +257,7 @@ def watch_paths(paths: Iterable[str | Path]) -> dict[str, list[dict]]:
     each server's sessions in time order; the first session of a server
     is its baseline and carries no findings by construction.
     """
-    from adapters.mcp_session import from_mcp_session_file
+    from glassport.adapters.mcp_session import from_mcp_session_file
 
     fps: list[tuple[Path, dict]] = []
     for p in sorted(Path(p) for p in paths):

@@ -12,7 +12,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-import audit
+from glassport import audit
 
 
 def audit_files(files: dict[str, str]) -> "audit.Report":
