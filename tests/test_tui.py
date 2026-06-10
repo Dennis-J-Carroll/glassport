@@ -252,6 +252,16 @@ class TestReducer(unittest.TestCase):
         tui.reduce(self.st, "down", self.vm)
         self.assertLessEqual(self.st.selected, len(self.vm.findings) - 1)
 
+    def test_overlay_scroll_clamps_at_zero_and_grows(self):
+        tui.reduce(self.st, "enter", self.vm)      # open overlay
+        tui.reduce(self.st, "up", self.vm)
+        self.assertEqual(self.st.overlay_scroll, 0)   # clamped
+        tui.reduce(self.st, "down", self.vm)
+        tui.reduce(self.st, "down", self.vm)
+        self.assertEqual(self.st.overlay_scroll, 2)   # unbounded growth
+        self.assertTrue(self.st.overlay_open)         # still open
+        self.assertTrue(self.st.follow)               # untouched while overlay
+
 
 if __name__ == "__main__":
     unittest.main()

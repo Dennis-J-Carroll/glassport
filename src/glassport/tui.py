@@ -201,7 +201,8 @@ class UIState:
 
 
 def reduce(state: UIState, action: str, vm: ViewModel) -> UIState:
-    """Pure state transition for one semantic action."""
+    """Apply one semantic action to state, in place (curses-free and
+    deterministic; returns the same object for chaining)."""
     n = len(vm.rows) if state.focus == "timeline" else len(vm.findings)
     last = max(0, n - 1)
 
