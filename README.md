@@ -37,7 +37,7 @@ report.
 | `from_mcp_session()` | Session log → `InteractionTrace` (Understanding Layer schema) | ✅ **Built** |
 | `detectors.py` | `fabricated_calls()` + `context_violations()` emitted as trace annotations | ✅ **Built** |
 | `report.py` | Session timeline as self-contained static HTML, anomalies colored by severity, no JS | ✅ **Built** |
-| Watch mode | Behavioral drift across sessions over time | 🔜 Planned (M4) |
+| `watch.py` | Session fingerprints over time; drift alerts ("started calling a new domain on Tuesday") | ✅ **Built** |
 | Static audit tools | Pre-deployment dissection + scoring (`glassport_audit`, `glassport_dissect`) | 🔜 Planned — earlier v0.1 prototype being folded in |
 | Policy gate | Active enforcement: block calls outside declared scope | 🔜 Planned (M5) — the "port" in Glassport, last on purpose |
 
@@ -103,6 +103,29 @@ triggered them — colored by severity (1 worth a look, 2 should not
 happen, 3 hostile or hallucinated). Dark, green, zero JavaScript, no
 external resources. Everything that came off the wire is HTML-escaped,
 so a hostile server can't turn its own audit report into an exploit.
+
+And once a server has history, watch it for drift:
+
+```bash
+$ python3 glassport_tap.py watch    # defaults to ~/.glassport/sessions
+
+exa-search — 3 session(s)
+  20260608T..._exa_100.jsonl  baseline established · 1 declared tool(s) · hosts: api.exa.ai
+  20260609T..._exa_101.jsonl  no drift
+  20260610T..._exa_102.jsonl
+    [sev 3] new_fabricated_tool: tools/call 'shadow_fetch' outside any declared surface, first time in this server's history
+    [sev 2] new_server_request: server-initiated request 'sampling/createMessage' never seen before
+    [sev 2] new_host: new host in wire traffic: collect.evil-analytics.io
+```
+
+Every session is reduced to a fingerprint — declared surface, schema
+hashes, called tools, hostnames seen in wire traffic, server-initiated
+request methods, server identity — and compared against the merged
+baseline of every prior session for that server. Only novelty is
+reported. Watch is stateless: the baseline is rebuilt from the logs on
+every run, so every drift claim traces back to a `.jsonl` on disk.
+`--json` for machines; exit code 1 when drift of severity ≥ 2 is
+present, so a cron job can page you.
 
 ---
 
@@ -203,14 +226,12 @@ instrument).
 
 ## Roadmap
 
-1. **M4 — Watch mode.** Fingerprint sessions over time; alert when a
-   server's behavior drifts ("started calling a new tool on Tuesday").
-2. **Static audit (folded in).** The earlier v0.1 dissector/static-audit
+1. **Static audit (folded in).** The earlier v0.1 dissector/static-audit
    prototype returns as `glassport audit` — the pre-deployment
    complement to the runtime tap. Scores, when they ship, will publish
    the rubric that produced them; an unexplained trust score is the
    opacity this project exists to fight.
-3. **M5 — The gate.** Opt-in enforcement: block `tools/call` frames
+2. **M5 — The gate.** Opt-in enforcement: block `tools/call` frames
    outside the declared surface. Last, on purpose.
 
 ---

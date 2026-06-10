@@ -293,6 +293,7 @@ glassport_tap — passive MCP stdio proxy (M0)
   wrap (default):  glassport_tap.py [wrap] [--log-dir DIR] -- <server command...>
   summarize:       glassport_tap.py summarize <session.jsonl>
   report:          glassport_tap.py report <session.jsonl> [-o out.html]
+  watch:           glassport_tap.py watch [log-dir] [--json]
 """
 
 
@@ -331,6 +332,21 @@ def main(argv: list[str]) -> int:
                       file=sys.stderr)
                 return 1
         return report_mod.main(argv[1:])
+
+    if argv[0] == "watch":
+        # M4 — drift across sessions. Same lazy-import contract.
+        try:
+            import watch as watch_mod
+        except ImportError:
+            sys.path.insert(0, str(Path(__file__).resolve().parent))
+            try:
+                import watch as watch_mod
+            except ImportError:
+                print("[glassport] watch needs watch.py, "
+                      "interaction_trace.py and adapters/mcp_session.py "
+                      "alongside this script.", file=sys.stderr)
+                return 1
+        return watch_mod.main(argv[1:])
 
     log_dir = DEFAULT_LOG_DIR
     if argv[0] == "--log-dir":
