@@ -5,7 +5,7 @@
 <h1 align="center">glassport</h1>
 
 <p align="center">
-  <strong>The glass before the port. Observe first. Enforce later.</strong>
+  <strong>Clear vision port to port. Observe first. Enforce later.</strong>
 </p>
 
 <p align="center">
