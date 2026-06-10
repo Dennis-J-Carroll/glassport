@@ -230,7 +230,33 @@ def fabricated_calls(trace: InteractionTrace) -> list[Annotation]:
     return out
 
 
-DETECTORS = [fabricated_calls, context_violations]
+def gate_actions(trace: InteractionTrace) -> list[Annotation]:
+    """
+    Gate enforcement (M5) surfaced as INFO annotations — the record that
+    a frame was stopped at the glass, not a judgment about it (the call
+    itself is still judged by fabricated_calls / context_violations).
+    """
+    out: list[Annotation] = []
+    for e in trace.events:
+        g = e.metadata.get("gate")
+        if not isinstance(g, dict):
+            continue
+        if g.get("action") == "blocked":
+            out.append(_ann(
+                e, AnnotationKind.INFO, "gate_blocked",
+                f"gate blocked tools/call '{g.get('tool')}' — outside the "
+                f"declared surface; the server never saw this frame",
+                severity=1, tool=g.get("tool")))
+        elif g.get("action") == "injected":
+            out.append(_ann(
+                e, AnnotationKind.INFO, "gate_injected_response",
+                f"error response synthesized by the gate for blocked call "
+                f"'{g.get('tool')}'; the server never sent this frame",
+                severity=1, tool=g.get("tool")))
+    return out
+
+
+DETECTORS = [fabricated_calls, context_violations, gate_actions]
 
 
 def annotate(trace: InteractionTrace) -> list[Annotation]:

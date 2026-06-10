@@ -94,8 +94,15 @@ def from_mcp_session(
     declared: list[dict] = []                   # accumulates tools/list tools
     final_state: Optional[TaskState] = None
     last_event_id: Optional[str] = None         # rough causal spine
+    gate_by_seq: dict[Any, dict] = {}           # gate actions, keyed by seq
 
     for entry in _iter_entries(log_lines):
+        # gate markers (M5) ride on the entry, not the frame: "blocked"
+        # frames never reached the server, "injected" ones never left it.
+        # Stamped onto the matching events after the loop, by seq.
+        if isinstance(entry.get("gate"), dict) and entry.get("seq") is not None:
+            gate_by_seq[entry["seq"]] = entry["gate"]
+
         frame = entry.get("frame")
         if not isinstance(frame, dict):
             # raw/unparseable wire line — preserve it as a MESSAGE so no
@@ -289,6 +296,12 @@ def from_mcp_session(
                 )
                 events.append(ev)
                 last_event_id = ev.id
+
+    if gate_by_seq:
+        for ev in events:
+            g = gate_by_seq.get(ev.metadata.get("seq"))
+            if g is not None:
+                ev.metadata["gate"] = g
 
     # stamp the server's declared tool surface. declared_tools() reads the
     # AGENT's agent_card.skills, so we expose the observed tools there. The

@@ -30,7 +30,8 @@ from pathlib import Path
 from typing import Optional
 
 from interaction_trace import (
-    ActorKind, Annotation, Event, EventKind, InteractionTrace, PartKind,
+    ActorKind, Annotation, AnnotationKind, Event, EventKind,
+    InteractionTrace, PartKind,
 )
 
 VERDICTS = {
@@ -80,6 +81,9 @@ pre { background: var(--bg); border: 1px solid var(--line);
 .ann[data-sev="1"] { border-color: var(--sev1); color: var(--sev1); }
 .ann[data-sev="2"] { border-color: var(--sev2); color: var(--sev2); }
 .ann[data-sev="3"] { border-color: var(--sev3); color: var(--sev3); }
+/* info (e.g. gate enforcement) is a record, not an alarm — keep it green;
+   placed after the sev rules so it wins at equal specificity */
+.ann[data-kind="info"] { border-color: var(--green); color: var(--green); }
 footer { color: var(--dim); border-top: 1px solid var(--line);
          margin-top: 2rem; padding-top: .5rem; font-size: .85em; }
 """
@@ -138,7 +142,10 @@ def render_html(trace: InteractionTrace, source_name: str = "") -> str:
     for a in trace.annotations:
         anns_by_event.setdefault(a.event_id, []).append(a)
 
-    sev_counts = Counter(a.severity for a in trace.annotations)
+    # INFO annotations (e.g. gate enforcement records) never drive the
+    # verdict — a blocked call is judged by its own non-INFO annotations
+    sev_counts = Counter(a.severity for a in trace.annotations
+                         if a.kind != AnnotationKind.INFO)
     max_sev = max(sev_counts, default=0)
     verdict, verdict_text = VERDICTS[max_sev]
 
@@ -202,8 +209,10 @@ def render_html(trace: InteractionTrace, source_name: str = "") -> str:
 
         for a in sorted(anns_by_event.get(e.id, ()),
                         key=lambda a: -a.severity):
-            w(f'<div class="ann" data-sev="{a.severity}">'
-              f"⚠ {_esc(a.subcategory)} · sev {a.severity} · "
+            marker = "•" if a.kind.value == "info" else "⚠"
+            w(f'<div class="ann" data-sev="{a.severity}" '
+              f'data-kind="{_esc(a.kind.value)}">'
+              f"{marker} {_esc(a.subcategory)} · sev {a.severity} · "
               f"{_esc(a.kind.value)}<br>{_esc(a.explanation)}</div>")
         w("</div>")
 

@@ -83,8 +83,15 @@ class SessionLog:
         self._seq = 0
         self.path = path
 
-    def record(self, direction: str, line: bytes) -> None:
-        """Log one wire line. Never raises — relay must outlive logging."""
+    def record(self, direction: str, line: bytes,
+               gate: dict | None = None) -> None:
+        """Log one wire line. Never raises — relay must outlive logging.
+
+        `gate` marks frames the gate acted on: {"action": "blocked"} on a
+        c2s frame the server never received, {"action": "injected"} on an
+        s2c frame the server never sent. Optional field — schema 0.1 logs
+        without it stay readable, readers without it stay correct.
+        """
         try:
             text = line.decode("utf-8", errors="replace").rstrip("\r\n")
             frame, raw = None, None
@@ -102,6 +109,8 @@ class SessionLog:
                     "frame": frame,
                     "raw": raw,
                 }
+                if gate is not None:
+                    entry["gate"] = gate
                 self._fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
         except Exception:
             pass  # logging is best-effort; the relay is sacred
@@ -114,18 +123,130 @@ class SessionLog:
 
 
 # ─────────────────────────────────────────────────────────────────
+# Gate — M5. Active enforcement on the c2s path. Opt-in, last, on
+# purpose: it ships only because the passive detectors came first.
+# ─────────────────────────────────────────────────────────────────
+class Gate:
+    """
+    Blocks c2s tools/call frames that name a tool outside the server's
+    declared surface. Everything else relays untouched.
+
+    The gate only blocks what the wire can prove. Until a tools/list
+    response has been seen there is no declaration to violate, so every
+    call is forwarded (the passive detectors still flag premature calls
+    after the fact). The latest tools/list result IS the contract: a
+    server that re-declares a smaller surface shrinks what it may be
+    asked to do.
+
+    A blocked request never reaches the server; the client receives a
+    synthesized JSON-RPC error (code -32000) whose error.data carries
+    {"glassport": "gate_blocked"} so callers can tell the gate's voice
+    from the server's. Both the blocked frame and the injected response
+    are logged with a "gate" marker — the session log records what each
+    side actually saw, and they legitimately differ.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._declared: set[str] | None = None   # None until tools/list seen
+        self.blocked_count = 0
+
+    def observe_s2c(self, line: bytes) -> None:
+        """Harvest tool declarations from server output. Never raises."""
+        try:
+            frame = json.loads(line)
+        except (json.JSONDecodeError, ValueError, UnicodeDecodeError):
+            return
+        if not isinstance(frame, dict):
+            return
+        result = frame.get("result")
+        if isinstance(result, dict) and isinstance(result.get("tools"), list):
+            names = {t["name"] for t in result["tools"]
+                     if isinstance(t, dict) and "name" in t}
+            with self._lock:
+                self._declared = names
+
+    def check_c2s(self, line: bytes
+                  ) -> tuple[str, bytes | None, dict | None]:
+        """
+        Decide one client→server line. Returns (action, response, info):
+        action "forward" relays the line untouched; "block" drops it,
+        sends `response` (bytes, or None for id-less calls) back to the
+        client, and logs `info` on the blocked entry.
+        """
+        try:
+            frame = json.loads(line)
+        except (json.JSONDecodeError, ValueError, UnicodeDecodeError):
+            return ("forward", None, None)   # not ours to judge
+        if not isinstance(frame, dict) or frame.get("method") != "tools/call":
+            return ("forward", None, None)
+
+        name = (frame.get("params") or {}).get("name")
+        with self._lock:
+            declared = self._declared
+        if declared is None or name in declared:
+            return ("forward", None, None)
+
+        self.blocked_count += 1
+        rid = frame.get("id")
+        response = None
+        if rid is not None:
+            response = (json.dumps({
+                "jsonrpc": "2.0", "id": rid,
+                "error": {
+                    "code": -32000,
+                    "message": (f"glassport gate: tools/call '{name}' "
+                                f"blocked — not in the declared tool "
+                                f"surface"),
+                    "data": {"glassport": "gate_blocked", "tool": name,
+                             "declared": sorted(declared)},
+                },
+            }, ensure_ascii=False) + "\n").encode("utf-8")
+        info = {"action": "blocked", "tool": name,
+                "declared": sorted(declared)}
+        return ("block", response, info)
+
+
+# ─────────────────────────────────────────────────────────────────
 # Pump — moves lines from one fd to another, tapping each line.
 # ─────────────────────────────────────────────────────────────────
-def pump(src, dst, log: SessionLog | None, direction: str) -> None:
+def pump(src, dst, log: SessionLog | None, direction: str,
+         gate: Gate | None = None, client_write=None,
+         dst_lock: threading.Lock | None = None) -> None:
     """
     Read newline-delimited lines from src, write them unmodified to dst,
     and tap each into the session log. Binary-safe; preserves the exact
     bytes including the newline.
+
+    With a gate: c2s lines are checked before forwarding — a blocked
+    line never reaches dst, and the synthesized error goes back to the
+    client via client_write. s2c lines feed the gate's view of the
+    declared surface. dst_lock serializes client-bound writes so an
+    injected error can't interleave with a real server response.
     """
     try:
         for line in iter(src.readline, b""):
-            dst.write(line)
-            dst.flush()
+            if gate is not None and direction == "c2s":
+                action, response, info = gate.check_c2s(line)
+                if action == "block" and info is not None:
+                    if log is not None:
+                        log.record(direction, line, gate=info)
+                    if response is not None and client_write is not None:
+                        client_write(response)
+                        if log is not None:
+                            log.record("s2c", response,
+                                       gate={"action": "injected",
+                                             "tool": info["tool"]})
+                    continue
+            elif gate is not None and direction == "s2c":
+                gate.observe_s2c(line)
+            if dst_lock is not None:
+                with dst_lock:
+                    dst.write(line)
+                    dst.flush()
+            else:
+                dst.write(line)
+                dst.flush()
             if log is not None:
                 log.record(direction, line)
     except (BrokenPipeError, ValueError, OSError):
@@ -150,7 +271,8 @@ def pump_stderr(src, dst) -> None:
 # ─────────────────────────────────────────────────────────────────
 # Tap mode — spawn the real server and sit in the middle.
 # ─────────────────────────────────────────────────────────────────
-def run_tap(server_cmd: list[str], log_dir: Path) -> int:
+def run_tap(server_cmd: list[str], log_dir: Path,
+            gate: Gate | None = None) -> int:
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     safe_name = "".join(c if c.isalnum() else "_" for c in server_cmd[0])[:32]
     log_path = log_dir / f"{stamp}_{safe_name}_{os.getpid()}.jsonl"
@@ -159,6 +281,9 @@ def run_tap(server_cmd: list[str], log_dir: Path) -> int:
     # Announce on stderr only — stdout belongs to the protocol.
     print(f"[glassport] tapping: {shlex.join(server_cmd)}", file=sys.stderr)
     print(f"[glassport] session log: {log_path}", file=sys.stderr)
+    if gate is not None:
+        print("[glassport] GATE ACTIVE: tools/call frames outside the "
+              "declared surface will be blocked", file=sys.stderr)
 
     try:
         child = subprocess.Popen(
@@ -175,11 +300,22 @@ def run_tap(server_cmd: list[str], log_dir: Path) -> int:
     stdin_b = sys.stdin.buffer
     stdout_b = sys.stdout.buffer
 
+    # One lock for everything client-bound: real server responses and
+    # gate-injected errors must never interleave mid-line.
+    out_lock = threading.Lock()
+
+    def client_write(data: bytes) -> None:
+        with out_lock:
+            stdout_b.write(data)
+            stdout_b.flush()
+
     threads = [
         threading.Thread(target=pump, daemon=True,
-                         args=(stdin_b, child.stdin, log, "c2s")),
+                         args=(stdin_b, child.stdin, log, "c2s"),
+                         kwargs={"gate": gate, "client_write": client_write}),
         threading.Thread(target=pump, daemon=True,
-                         args=(child.stdout, stdout_b, log, "s2c")),
+                         args=(child.stdout, stdout_b, log, "s2c"),
+                         kwargs={"gate": gate, "dst_lock": out_lock}),
         threading.Thread(target=pump_stderr, daemon=True,
                          args=(child.stderr, sys.stderr.buffer)),
     ]
@@ -198,7 +334,9 @@ def run_tap(server_cmd: list[str], log_dir: Path) -> int:
     rc = child.wait()
     time.sleep(0.1)  # let pumps drain their last lines
     log.close()
-    print(f"[glassport] session ended (exit {rc}); "
+    suffix = f"; blocked {gate.blocked_count} call(s)" \
+        if gate is not None and gate.blocked_count else ""
+    print(f"[glassport] session ended (exit {rc}){suffix}; "
           f"log: {log_path}", file=sys.stderr)
     return rc
 
@@ -291,6 +429,8 @@ USAGE = """\
 glassport_tap — passive MCP stdio proxy (M0)
 
   wrap (default):  glassport_tap.py [wrap] [--log-dir DIR] -- <server command...>
+  gate:            glassport_tap.py gate [--log-dir DIR] -- <server command...>
+                   (active: blocks tools/call outside the declared surface)
   summarize:       glassport_tap.py summarize <session.jsonl>
   report:          glassport_tap.py report <session.jsonl> [-o out.html]
   watch:           glassport_tap.py watch [log-dir] [--json]
@@ -302,13 +442,17 @@ def main(argv: list[str]) -> int:
         print(USAGE)
         return 0
 
-    # explicit subcommand alias for the default mode, so configs written
-    # as "wrap" today survive the day "gate" becomes a sibling (M5)
+    # "wrap" stays the passive default forever; "gate" is the opt-in
+    # enforcing sibling it was reserved for (M5)
+    gate: Gate | None = None
     if argv[0] == "wrap":
         argv = argv[1:]
-        if not argv:
-            print(USAGE)
-            return 2
+    elif argv[0] == "gate":
+        gate = Gate()
+        argv = argv[1:]
+    if not argv:
+        print(USAGE)
+        return 2
 
     if argv[0] == "summarize":
         if len(argv) != 2:
@@ -357,7 +501,7 @@ def main(argv: list[str]) -> int:
     if not argv:
         print(USAGE)
         return 2
-    return run_tap(argv, log_dir)
+    return run_tap(argv, log_dir, gate=gate)
 
 
 if __name__ == "__main__":

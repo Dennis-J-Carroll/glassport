@@ -38,8 +38,8 @@ report.
 | `detectors.py` | `fabricated_calls()` + `context_violations()` emitted as trace annotations | ✅ **Built** |
 | `report.py` | Session timeline as self-contained static HTML, anomalies colored by severity, no JS | ✅ **Built** |
 | `watch.py` | Session fingerprints over time; drift alerts ("started calling a new domain on Tuesday") | ✅ **Built** |
+| `gate` | Active enforcement: blocks `tools/call` outside the declared surface, opt-in | ✅ **Built** — the "port" in Glassport, shipped last on purpose |
 | Static audit tools | Pre-deployment dissection + scoring (`glassport_audit`, `glassport_dissect`) | 🔜 Planned — earlier v0.1 prototype being folded in |
-| Policy gate | Active enforcement: block calls outside declared scope | 🔜 Planned (M5) — the "port" in Glassport, last on purpose |
 
 Nothing in the Planned rows ships today. If it's not marked Built, it
 doesn't run yet.
@@ -127,6 +127,43 @@ every run, so every drift claim traces back to a `.jsonl` on disk.
 `--json` for machines; exit code 1 when drift of severity ≥ 2 is
 present, so a cron job can page you.
 
+## The gate
+
+When observation has earned enough trust, swap `wrap` for `gate` in
+your MCP config — same command, one word different:
+
+```json
+"args": ["/path/to/glassport/glassport_tap.py", "gate", "--",
+         "npx", "exa-mcp-server"]
+```
+
+The gate blocks exactly one thing: a client→server `tools/call` naming
+a tool outside the server's declared surface. The request never reaches
+the server; the client gets a synthesized JSON-RPC error (code
+`-32000`) whose `error.data` carries `{"glassport": "gate_blocked"}`,
+so the gate's voice is always distinguishable from the server's.
+Everything else — every other method, notification, reply, and
+unparseable line — relays untouched.
+
+```
+$ ... tools/call "shadow_tool" →
+← {"error": {"code": -32000, "message": "glassport gate: tools/call
+   'shadow_tool' blocked — not in the declared tool surface", ...}}
+```
+
+The session log records both realities: the blocked frame is logged
+with `"gate": {"action": "blocked"}` (the server never saw it) and the
+synthesized error with `{"action": "injected"}` (the server never sent
+it). `summarize`, `report`, and `watch` all understand the markers —
+gate actions show up in the HTML report as green INFO annotations,
+distinct from the red judgment the blocked call itself still earns.
+
+The gate only enforces what the wire has proven. Until a `tools/list`
+response has crossed the pipe there is no declaration to violate, so
+calls are forwarded (and the passive detectors still flag them). The
+latest `tools/list` result is the contract — a server that re-declares
+a smaller surface shrinks what it may be asked to do.
+
 ---
 
 ## The session log
@@ -198,10 +235,16 @@ Stated here so nobody discovers them the hard way:
 - **stdio transport only.** Remote streamable-HTTP servers need a
   different interception model and are out of scope for now. Local stdio
   is where the highest-trust credentials live, so it's first.
-- **Passive only.** The tap observes; it never blocks, rewrites, or
-  delays. Enforcement (the policy gate) ships only after the detectors
-  have a track record — a blocking proxy that misfires destroys trust
-  faster than no proxy at all.
+- **Passive by default.** `wrap` observes and never blocks, rewrites,
+  or delays — that contract is permanent. Enforcement exists only in
+  the opt-in `gate` mode, shipped last on purpose: a blocking proxy
+  that misfires destroys trust faster than no proxy at all.
+- **The gate can't block what hasn't been declared yet.** A client
+  that fires `tools/call` before the `tools/list` response lands is
+  forwarded — there is no declaration to enforce, and pre-list calls
+  are legal MCP. The passive detectors still flag them
+  (`premature_call` / `call_before_declaration`), and the next session
+  is covered the moment the handshake completes.
 - **The tap sees the wire, not the mind.** It cannot see the user's
   prompt, the model's reasoning, or the agent's plan. Claims it makes are
   limited to what crossed the pipe.
@@ -231,8 +274,9 @@ instrument).
    complement to the runtime tap. Scores, when they ship, will publish
    the rubric that produced them; an unexplained trust score is the
    opacity this project exists to fight.
-2. **M5 — The gate.** Opt-in enforcement: block `tools/call` frames
-   outside the declared surface. Last, on purpose.
+
+M0 (tap) through M5 (gate) are built. Observe first. Enforce later —
+later is here, and it's still opt-in.
 
 ---
 
