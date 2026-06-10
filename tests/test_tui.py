@@ -165,5 +165,39 @@ class TestFindingsAndOverlay(unittest.TestCase):
         self.assertIn("no findings", text)
 
 
+class TestPicker(unittest.TestCase):
+    def _write_session(self, dir_, name, n_lines, mtime):
+        p = Path(dir_) / name
+        p.write_text("\n".join(
+            L(i, "c2s", {"jsonrpc": "2.0", "method": "ping"})
+            for i in range(1, n_lines + 1)) + "\n")
+        os.utime(p, (mtime, mtime))
+        return p
+
+    def test_listing_sorted_newest_first_with_live_flag(self):
+        now = 1_780_000_000.0
+        with tempfile.TemporaryDirectory() as d:
+            self._write_session(d, "old_srv.jsonl", 3, now - 3600)
+            self._write_session(d, "hot_srv.jsonl", 5, now - 1)
+            entries = tui.list_sessions(Path(d), now=now)
+        self.assertEqual([e.path.name for e in entries],
+                         ["hot_srv.jsonl", "old_srv.jsonl"])
+        self.assertTrue(entries[0].live)
+        self.assertFalse(entries[1].live)
+        self.assertEqual(entries[0].frames, 5)
+
+    def test_listing_ignores_non_jsonl(self):
+        now = 1_780_000_000.0
+        with tempfile.TemporaryDirectory() as d:
+            self._write_session(d, "a_srv.jsonl", 1, now - 10)
+            (Path(d) / "report.html").write_text("<html></html>")
+            entries = tui.list_sessions(Path(d), now=now)
+        self.assertEqual(len(entries), 1)
+
+    def test_missing_dir_returns_empty(self):
+        entries = tui.list_sessions(Path("/nonexistent/glassport"), now=0.0)
+        self.assertEqual(entries, [])
+
+
 if __name__ == "__main__":
     unittest.main()

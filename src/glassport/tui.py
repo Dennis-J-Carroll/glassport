@@ -181,3 +181,32 @@ def format_overlay(trace: InteractionTrace, row_index: int) -> list[str]:
     else:
         out.append("no findings for this event")
     return out
+
+
+@dataclass
+class SessionEntry:
+    path: Path
+    mtime: float
+    frames: int
+    live: bool
+
+
+def list_sessions(log_dir: Path, now: float | None = None) -> list[SessionEntry]:
+    """Sessions newest-first; LIVE = grew within LIVE_WINDOW_SECS."""
+    if now is None:
+        now = time.time()
+    if not log_dir.is_dir():
+        return []
+    entries = []
+    for p in log_dir.glob("*.jsonl"):
+        try:
+            st = p.stat()
+            with open(p, "rb") as fh:
+                frames = sum(1 for _ in fh)
+        except OSError:
+            continue
+        entries.append(SessionEntry(
+            path=p, mtime=st.st_mtime, frames=frames,
+            live=(now - st.st_mtime) < LIVE_WINDOW_SECS))
+    entries.sort(key=lambda e: e.mtime, reverse=True)
+    return entries
