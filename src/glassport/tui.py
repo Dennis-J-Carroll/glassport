@@ -117,9 +117,8 @@ def build_view_model(trace: InteractionTrace, live: bool) -> ViewModel:
                      and a.subcategory != "fabricated_tool_call")
     server_requests = sum(
         1 for e in trace.events
-        if server and e.actor_id == server.id
-        and e.metadata.get("method") is not None
-        and e.metadata.get("jsonrpc_id") is not None)
+        if e.metadata.get("server_initiated")
+        and not e.metadata.get("notification"))
     gate_on = any(isinstance(e.metadata.get("gate"), dict)
                   for e in trace.events)
 
@@ -425,11 +424,19 @@ def _dashboard_loop(curses, scr, path: Path) -> None:
             size, mtime = last_size, 0.0
         if size != last_size or vm is None:
             last_size = size
-            trace = _ingest(path)
-            vm = build_view_model(
-                trace, live=(time.time() - mtime) < LIVE_WINDOW_SECS)
-            if state.follow:
-                state.selected = max(0, len(vm.rows) - 1)
+            try:
+                trace = _ingest(path)
+            except OSError:
+                # file vanished mid-rotation: keep showing the last
+                # good trace; the next tick re-stats and recovers
+                if vm is None:
+                    return
+                vm.live = False
+            else:
+                vm = build_view_model(
+                    trace, live=(time.time() - mtime) < LIVE_WINDOW_SECS)
+                if state.follow:
+                    state.selected = max(0, len(vm.rows) - 1)
         else:
             vm.live = (time.time() - mtime) < LIVE_WINDOW_SECS
 
@@ -519,6 +526,10 @@ def main(argv: list[str]) -> int:
     def _run(scr):
         _init_colors(curses)
         curses.curs_set(0)
+        try:
+            curses.set_escdelay(25)   # Esc should feel instant
+        except AttributeError:
+            pass                       # not on all curses builds
         if path is not None:
             _dashboard_loop(curses, scr, path)
             return
