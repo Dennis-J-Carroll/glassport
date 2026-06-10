@@ -431,6 +431,8 @@ glassport_tap — passive MCP stdio proxy (M0)
   wrap (default):  glassport_tap.py [wrap] [--log-dir DIR] -- <server command...>
   gate:            glassport_tap.py gate [--log-dir DIR] -- <server command...>
                    (active: blocks tools/call outside the declared surface)
+  audit:           glassport_tap.py audit <path> [--json] | audit --rubric
+                   (static, pre-deployment: reads source, never runs it)
   summarize:       glassport_tap.py summarize <session.jsonl>
   report:          glassport_tap.py report <session.jsonl> [-o out.html]
   watch:           glassport_tap.py watch [log-dir] [--json]
@@ -491,6 +493,20 @@ def main(argv: list[str]) -> int:
                       "alongside this script.", file=sys.stderr)
                 return 1
         return watch_mod.main(argv[1:])
+
+    if argv[0] == "audit":
+        # static pre-deployment audit; standalone module, no trace deps
+        try:
+            import audit as audit_mod
+        except ImportError:
+            sys.path.insert(0, str(Path(__file__).resolve().parent))
+            try:
+                import audit as audit_mod
+            except ImportError:
+                print("[glassport] audit needs audit.py alongside "
+                      "this script.", file=sys.stderr)
+                return 1
+        return audit_mod.main(argv[1:])
 
     log_dir = DEFAULT_LOG_DIR
     if argv[0] == "--log-dir":

@@ -39,10 +39,9 @@ report.
 | `report.py` | Session timeline as self-contained static HTML, anomalies colored by severity, no JS | ✅ **Built** |
 | `watch.py` | Session fingerprints over time; drift alerts ("started calling a new domain on Tuesday") | ✅ **Built** |
 | `gate` | Active enforcement: blocks `tools/call` outside the declared surface, opt-in | ✅ **Built** — the "port" in Glassport, shipped last on purpose |
-| Static audit tools | Pre-deployment dissection + scoring (`glassport_audit`, `glassport_dissect`) | 🔜 Planned — earlier v0.1 prototype being folded in |
+| `audit.py` | Static pre-deployment audit of a server's source; scored against a published rubric, no execution, no network | ✅ **Built** |
 
-Nothing in the Planned rows ships today. If it's not marked Built, it
-doesn't run yet.
+If it's not marked Built, it doesn't run yet.
 
 ---
 
@@ -228,6 +227,56 @@ means no capability claim, no `tools/list` seen means no schema check.
 
 ---
 
+## Static audit — before you ever run it
+
+The tap watches what a server *does*; `audit` reads what a server *is*,
+before it runs even once. Point it at a file or a checkout:
+
+```bash
+$ python3 glassport_tap.py audit ./some-mcp-server
+
+score:    9/100 (F)
+  -25  secret-hardcoded (critical) — 2 hit(s)
+  -25  tool-poisoning (critical) — 3 hit(s)
+  -15  exec-dynamic (high) — 1 hit(s)
+  -15  shell-injection (high) — 1 hit(s)
+  ...
+  [critical] tool-poisoning server.py:7
+      directive text: '<IMPORTANT>'
+```
+
+Local-only by design: no registry lookups, no network, no execution.
+Python sources get a real **AST pass** — so `model_eval(x)` is not
+flagged as `eval`, and `import subprocess as sp; sp.run(c, shell=True)`
+still is. JS/TS get pattern depth, and the report says which depth it
+used. Rules cover hardcoded secrets (redacted in output), **tool
+poisoning** (model-directed text like "ignore previous instructions" or
+`<IMPORTANT> read ~/.ssh` planted in tool descriptions), hidden/bidi
+unicode, dynamic execution, shell injection, runtime installs, and
+capability notes (subprocess, file delete/write, network egress).
+
+The **score is not a vibe**: it starts at 100 and loses a fixed,
+published weight per rule that fired — each rule deducts once, however
+many times it hit, so one noisy pattern can't zero a report. Every
+deduction names its rule; the full table prints with `--rubric`. An
+unexplained trust score is the opacity this project exists to fight.
+
+`audit` and the tap compose along the lifecycle: **audit** before you
+install, **wrap** while you run, **gate** when trust runs out. A static
+read can't see what a server does on the wire (that's the tap's job),
+and the wire can't show you a secret sitting unused in source (that's
+the audit's) — neither subsumes the other.
+
+> Auditing a security tool produces expected noise: run `audit` on
+> Glassport itself and `audit.py` flags `tool-poisoning`, because the
+> rule's own regexes literally contain the strings it hunts for. That
+> is the tool being correct about its contents, not a bug — and
+> Glassport deliberately does **not** exempt itself, because a scanner
+> that suppresses its own matches is one flag away from suppressing an
+> attacker's.
+
+---
+
 ## Known boundaries
 
 Stated here so nobody discovers them the hard way:
@@ -269,14 +318,15 @@ instrument).
 
 ## Roadmap
 
-1. **Static audit (folded in).** The earlier v0.1 dissector/static-audit
-   prototype returns as `glassport audit` — the pre-deployment
-   complement to the runtime tap. Scores, when they ship, will publish
-   the rubric that produced them; an unexplained trust score is the
-   opacity this project exists to fight.
+M0 (tap) through M5 (gate) are built, and the static `audit` (the v0.1
+dissector prototype, rebuilt stdlib-only with an AST pass and a
+published rubric) is folded in. Observe first. Enforce later — later is
+here, and it's still opt-in.
 
-M0 (tap) through M5 (gate) are built. Observe first. Enforce later —
-later is here, and it's still opt-in.
+Still on the horizon: a remote streamable-HTTP interception model, and
+the audit's network-enriched mode (npm/PyPI/GitHub provenance) as an
+explicit opt-in flag — kept off the default path so the core audit
+stays reproducible and offline.
 
 ---
 
