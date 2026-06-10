@@ -107,8 +107,10 @@ frame JSON plus that event's annotations, scrollable. Esc/q closes.
 | `Enter` | timeline: open overlay · findings: jump to event |
 | `Tab` | switch focus timeline ↔ findings |
 | `f` | toggle follow mode |
-| `?` | help overlay |
 | `q` / `Esc` | close overlay / back to picker / quit |
+
+(No `?` help overlay: the footer line permanently shows every binding —
+seven keys don't warrant a second screen. Revisit if the key count grows.)
 
 ## Colors
 
