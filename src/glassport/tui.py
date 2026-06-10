@@ -206,6 +206,13 @@ def reduce(state: UIState, action: str, vm: ViewModel) -> UIState:
     n = len(vm.rows) if state.focus == "timeline" else len(vm.findings)
     last = max(0, n - 1)
 
+    # selected persists across re-ingests while lists change underneath:
+    # rows only grow (append-only log) but findings can shrink AND
+    # reorder (a later tools/list retroactively un-fabricates earlier
+    # calls; sort is severity-first). Clamp every entry; positional
+    # drift after a reorder is accepted for v1.
+    state.selected = min(state.selected, last)
+
     if state.overlay_open:
         if action == "back":
             state.overlay_open = False

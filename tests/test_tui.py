@@ -262,6 +262,21 @@ class TestReducer(unittest.TestCase):
         self.assertTrue(self.st.overlay_open)         # still open
         self.assertTrue(self.st.follow)               # untouched while overlay
 
+    def test_enter_with_stale_findings_selection_does_not_crash(self):
+        # findings can shrink on re-ingest: a call made before any
+        # tools/list is fabricated until a later declaration arrives
+        pre = [call(1, 1, "web_search", {"query": "x"}), result(2, 1)]
+        vm_many = tui.build_view_model(annotated_trace(pre), live=True)
+        vm_fewer = tui.build_view_model(
+            annotated_trace(pre + handshake(start_seq=3)), live=True)
+        self.assertLess(len(vm_fewer.findings), len(vm_many.findings))
+
+        st = tui.UIState(focus="findings",
+                         selected=len(vm_many.findings) - 1)
+        tui.reduce(st, "enter", vm_fewer)   # must not raise
+        self.assertEqual(st.focus, "timeline")
+        self.assertLess(st.selected, len(vm_fewer.rows))
+
 
 if __name__ == "__main__":
     unittest.main()
