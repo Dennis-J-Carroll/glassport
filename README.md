@@ -99,6 +99,7 @@ The tap and the analysis are **separate by design**. The tap is dumb and fast �
 | `watch.py` | Session fingerprints + drift alerts across time | ✅ Built |
 | `gate` | Active enforcement: blocks `tools/call` outside the declared surface, opt-in | ✅ Built |
 | `audit.py` | Static pre-deployment source audit; scored against a published rubric, no execution, no network | ✅ Built |
+| `tui` | Live curses session inspector: picker, timeline, findings feed, frame overlay | ✅ Built |
 
 If it's not marked Built, it doesn't run yet.
 
@@ -191,6 +192,13 @@ score:    9/100 (F)
   ...
   [critical] tool-poisoning server.py:7
       directive text: '<IMPORTANT>'
+```
+
+### 6. Inspect live in the terminal
+
+```bash
+$ glassport tui          # session picker → live dashboard
+$ glassport tui ~/.glassport/sessions/<file>.jsonl
 ```
 
 ---
@@ -394,7 +402,7 @@ Still on the horizon:
 - Remote streamable-HTTP interception
 - Network-enriched audit mode: npm / PyPI / GitHub provenance lookups, as an explicit opt-in flag (kept off the default path so the core audit stays reproducible and offline)
 - Agent↔Agent trace coverage for Google A2A protocol
-- TUI: terminal interface for live session inspection and drift review
+- ~~TUI: terminal interface for live session inspection and drift review~~ ✅ Built (`glassport tui`)
 - CI integration: `--format json` + GitHub Action for automated audit on MCP config changes
 
 ---

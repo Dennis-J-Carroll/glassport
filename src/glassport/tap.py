@@ -421,6 +421,8 @@ glassport — passive MCP stdio proxy
   summarize:       glassport summarize <session.jsonl>
   report:          glassport report <session.jsonl> [-o out.html]
   watch:           glassport watch [log-dir] [--json]
+  tui:             glassport tui [session.jsonl] [--log-dir DIR]
+                   (live curses inspector; no argument = session picker)
 
 (`python3 glassport_tap.py ...` from a clone works identically.)
 """
@@ -463,6 +465,11 @@ def main(argv: list[str]) -> int:
         # static pre-deployment audit; standalone module, no trace deps
         from glassport import audit as audit_mod
         return audit_mod.main(argv[1:])
+
+    if argv[0] == "tui":
+        # live/replay curses inspector. Same lazy-import contract.
+        from glassport import tui as tui_mod
+        return tui_mod.main(argv[1:])
 
     log_dir = DEFAULT_LOG_DIR
     if argv[0] == "--log-dir":

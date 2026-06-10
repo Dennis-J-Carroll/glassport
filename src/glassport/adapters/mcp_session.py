@@ -51,7 +51,7 @@ from glassport.interaction_trace import (
 
 
 def _iter_entries(source: Iterable[str]) -> Iterable[dict]:
-    """Yield parsed log entries, skipping unparseable lines."""
+    """Yield parsed log entries; bare non-JSON lines become synthetic entries."""
     for line in source:
         line = line.strip()
         if not line:
@@ -59,7 +59,9 @@ def _iter_entries(source: Iterable[str]) -> Iterable[dict]:
         try:
             yield json.loads(line)
         except json.JSONDecodeError:
-            continue
+            # bare wire line — wrap it so the main loop can emit an event
+            yield {"schema_version": "0.1", "seq": None, "ts": "",
+                   "dir": None, "frame": None, "raw": line}
 
 
 def from_mcp_session(
