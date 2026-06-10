@@ -278,5 +278,15 @@ class TestReducer(unittest.TestCase):
         self.assertLess(st.selected, len(vm_fewer.rows))
 
 
+class TestCLIWiring(unittest.TestCase):
+    def test_main_rejects_missing_file(self):
+        rc = tui.main(["/nonexistent/session.jsonl"])
+        self.assertEqual(rc, 1)
+
+    def test_usage_mentions_tui(self):
+        from glassport.tap import USAGE
+        self.assertIn("tui", USAGE)
+
+
 if __name__ == "__main__":
     unittest.main()

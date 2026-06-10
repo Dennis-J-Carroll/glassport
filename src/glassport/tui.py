@@ -272,3 +272,261 @@ def list_sessions(log_dir: Path, now: float | None = None) -> list[SessionEntry]
             live=(now - st.st_mtime) < LIVE_WINDOW_SECS))
     entries.sort(key=lambda e: e.mtime, reverse=True)
     return entries
+
+
+# ─────────────────────────────────────────────────────────────────
+# Curses shell — everything below is dumb rendering + I/O. No
+# decisions here: state changes go through reduce(), content through
+# build_view_model()/format_overlay(). curses is imported inside
+# main() so the pure core (and the test suite) works on platforms
+# without curses.
+# ─────────────────────────────────────────────────────────────────
+
+KEYMAP = {
+    ord("j"): "down", ord("k"): "up",
+    ord("g"): "top", ord("G"): "bottom",
+    ord("f"): "follow", ord("\t"): "tab",
+    ord("\n"): "enter", ord("\r"): "enter",
+    27: "back",                       # Esc
+}
+
+C_BASE, C_HOT, C_WARN, C_DIM, C_BAR, C_INFO = 1, 2, 3, 4, 5, 6
+
+
+def _init_colors(curses):
+    if not curses.has_colors():
+        return
+    curses.use_default_colors()
+    curses.init_pair(C_BASE, curses.COLOR_GREEN, -1)
+    curses.init_pair(C_HOT, curses.COLOR_RED, -1)
+    curses.init_pair(C_WARN, curses.COLOR_YELLOW, -1)
+    curses.init_pair(C_DIM, curses.COLOR_WHITE, -1)
+    curses.init_pair(C_BAR, curses.COLOR_BLACK, curses.COLOR_GREEN)
+    curses.init_pair(C_INFO, curses.COLOR_GREEN, -1)
+
+
+def _attr(curses, pair, bold=False, dim=False):
+    a = curses.color_pair(pair) if curses.has_colors() else 0
+    if bold:
+        a |= curses.A_BOLD
+    if dim:
+        a |= curses.A_DIM
+    return a
+
+
+def _row_attr(curses, row):
+    if row.severity >= 3:
+        return _attr(curses, C_HOT, bold=True)
+    if row.severity >= 1:
+        return _attr(curses, C_WARN)
+    if row.is_info:
+        return _attr(curses, C_INFO, bold=True)
+    return _attr(curses, C_BASE)
+
+
+def _put(scr, y, x, text, attr=0):
+    """addstr that never raises on the bottom-right cell or overflow."""
+    h, w = scr.getmaxyx()
+    if 0 <= y < h and x < w:
+        try:
+            scr.addstr(y, x, text[: w - x - 1], attr)
+        except Exception:
+            pass
+
+
+def _draw_dashboard(curses, scr, vm, state):
+    scr.erase()
+    h, w = scr.getmaxyx()
+    if w < MIN_COLS or h < MIN_ROWS:
+        _put(scr, 0, 0, f"terminal too small (need {MIN_COLS}x{MIN_ROWS})")
+        scr.refresh()
+        return
+
+    bar = _attr(curses, C_BAR, bold=True)
+    ind = "LIVE ▮" if vm.live else "IDLE"
+    c = vm.counters
+    _put(scr, 0, 0, f" {vm.title} · {ind} · declared: "
+                    f"{', '.join(vm.declared) or '—'} · frames {c['frames']}"
+                    .ljust(w - 1), bar)
+    _put(scr, 1, 0, f" fabricated {c['fabricated']} · violations "
+                    f"{c['violations']} · server-requests "
+                    f"{c['server_requests']} · gate: "
+                    f"{'on' if vm.gate_on else 'off'}"
+                    f"{'' if state.follow else ' · follow OFF'}"
+                    .ljust(w - 1), bar)
+
+    n_findings = min(len(vm.findings), 5)
+    findings_h = (n_findings + 1) if n_findings else 0
+    tl_top = 2
+    tl_h = max(1, (h - 1) - findings_h - tl_top)
+
+    sel = state.selected if state.focus == "timeline" else -1
+    anchor = sel if sel >= 0 else len(vm.rows) - 1
+    first = max(0, min(anchor - tl_h // 2, len(vm.rows) - tl_h))
+    if state.follow:
+        first = max(0, len(vm.rows) - tl_h)
+    for i in range(tl_h):
+        idx = first + i
+        if idx >= len(vm.rows):
+            break
+        row = vm.rows[idx]
+        attr = _row_attr(curses, row)
+        if idx == sel:
+            attr |= curses.A_REVERSE
+        _put(scr, tl_top + i, 0, " " + row.text, attr)
+
+    if n_findings:
+        fy = tl_top + tl_h
+        _put(scr, fy, 0,
+             "─" * 18 + " findings " + "─" * max(0, w - 30),
+             _attr(curses, C_DIM, dim=True))
+        for i in range(n_findings):
+            f = vm.findings[i]
+            attr = _row_attr(curses, f)
+            if state.focus == "findings" and i == state.selected:
+                attr |= curses.A_REVERSE
+            _put(scr, fy + 1 + i, 0, " " + f.text, attr)
+
+    _put(scr, h - 1, 0,
+         " j/k move · enter expand · tab focus · f follow · q quit ",
+         _attr(curses, C_DIM, dim=True))
+    scr.refresh()
+
+
+def _draw_overlay(curses, scr, trace, state):
+    lines = format_overlay(trace, state.selected)
+    h, w = scr.getmaxyx()
+    top = state.overlay_scroll
+    scr.erase()
+    _put(scr, 0, 0, " frame detail — esc to close ".ljust(w - 1),
+         _attr(curses, C_BAR, bold=True))
+    for i, line in enumerate(lines[top: top + h - 2]):
+        _put(scr, 1 + i, 1, line, _attr(curses, C_BASE))
+    scr.refresh()
+
+
+def _ingest(path: Path) -> InteractionTrace:
+    trace = from_mcp_session_file(path)
+    detectors.annotate(trace)
+    return trace
+
+
+def _dashboard_loop(curses, scr, path: Path) -> None:
+    scr.timeout(250)          # input poll doubles as the re-ingest tick
+    last_size = -1
+    trace = None
+    vm = None
+    state = UIState()
+    while True:
+        try:
+            st = path.stat()
+            size, mtime = st.st_size, st.st_mtime
+        except OSError:
+            size, mtime = last_size, 0.0
+        if size != last_size or vm is None:
+            last_size = size
+            trace = _ingest(path)
+            vm = build_view_model(
+                trace, live=(time.time() - mtime) < LIVE_WINDOW_SECS)
+            if state.follow:
+                state.selected = max(0, len(vm.rows) - 1)
+        else:
+            vm.live = (time.time() - mtime) < LIVE_WINDOW_SECS
+
+        if state.overlay_open:
+            _draw_overlay(curses, scr, trace, state)
+        else:
+            _draw_dashboard(curses, scr, vm, state)
+
+        key = scr.getch()
+        if key in (-1, curses.KEY_RESIZE):
+            continue
+        if key == ord("q"):
+            if state.overlay_open:
+                reduce(state, "back", vm)
+                continue
+            return
+        action = KEYMAP.get(key)
+        if key == curses.KEY_UP:
+            action = "up"
+        elif key == curses.KEY_DOWN:
+            action = "down"
+        if action:
+            reduce(state, action, vm)
+
+
+def _picker_loop(curses, scr, log_dir: Path) -> Path | None:
+    scr.timeout(500)
+    selected = 0
+    while True:
+        entries = list_sessions(log_dir)
+        selected = min(selected, max(0, len(entries) - 1))
+        scr.erase()
+        h, w = scr.getmaxyx()
+        _put(scr, 0, 0, f" glassport · sessions in {log_dir} ".ljust(w - 1),
+             _attr(curses, C_BAR, bold=True))
+        if not entries:
+            _put(scr, 2, 1, "no sessions found — wrap a server first",
+                 _attr(curses, C_DIM, dim=True))
+        for i, e in enumerate(entries[: h - 3]):
+            mark = "LIVE ▮ " if e.live else "       "
+            attr = _attr(curses, C_HOT if e.live else C_BASE, bold=e.live)
+            if i == selected:
+                attr |= curses.A_REVERSE
+            _put(scr, 2 + i, 0,
+                 f" {mark}{e.path.name}  ({e.frames} frames)", attr)
+        _put(scr, h - 1, 0, " j/k move · enter attach · q quit ",
+             _attr(curses, C_DIM, dim=True))
+        scr.refresh()
+
+        key = scr.getch()
+        if key == ord("q"):
+            return None
+        if key in (ord("\n"), ord("\r")) and entries:
+            return entries[selected].path
+        if key in (ord("k"), curses.KEY_UP):
+            selected = max(0, selected - 1)
+        if key in (ord("j"), curses.KEY_DOWN):
+            selected = min(max(0, len(entries) - 1), selected + 1)
+
+
+def main(argv: list[str]) -> int:
+    log_dir = Path.home() / ".glassport" / "sessions"
+    path: Path | None = None
+    i = 0
+    while i < len(argv):
+        if argv[i] == "--log-dir" and i + 1 < len(argv):
+            log_dir = Path(argv[i + 1])
+            i += 2
+        elif argv[i] in ("-h", "--help"):
+            print("usage: glassport tui [session.jsonl] [--log-dir DIR]")
+            return 0
+        else:
+            path = Path(argv[i])
+            i += 1
+
+    if path is not None and not path.is_file():
+        print(f"[glassport] no such session log: {path}", file=sys.stderr)
+        return 1
+
+    try:
+        import curses
+    except ImportError:
+        print("[glassport] tui needs the stdlib curses module, which is "
+              "not available on this platform", file=sys.stderr)
+        return 1
+
+    def _run(scr):
+        _init_colors(curses)
+        curses.curs_set(0)
+        if path is not None:
+            _dashboard_loop(curses, scr, path)
+            return
+        while True:
+            chosen = _picker_loop(curses, scr, log_dir)
+            if chosen is None:
+                return
+            _dashboard_loop(curses, scr, chosen)
+
+    curses.wrapper(_run)
+    return 0
