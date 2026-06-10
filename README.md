@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/glassport_logo.jpg" alt="Glassport" width="180">
+</p>
+
 # Glassport
 
 **A window in the envelope — see what an MCP server actually does, not just what it says.**
