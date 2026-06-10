@@ -84,5 +84,51 @@ class TestViewModelHeader(unittest.TestCase):
         self.assertEqual(vm.counters["server_requests"], 1)
 
 
+class TestTimelineRows(unittest.TestCase):
+    def setUp(self):
+        lines = handshake() + [
+            call(6, 3, "web_search", {"query": "x"}),
+            result(7, 3),
+            call(8, 4, "shadow_fetch", {"u": "http://x"}),
+            result(9, 4),
+        ]
+        self.vm = tui.build_view_model(annotated_trace(lines), live=False)
+
+    def test_one_row_per_event(self):
+        self.assertEqual(len(self.vm.rows), 9)
+
+    def test_direction_arrows(self):
+        # initialize is client→server; its result is server→client
+        self.assertIn("→ initialize", self.vm.rows[0].text)
+        self.assertIn("←", self.vm.rows[1].text)
+
+    def test_tool_call_row_shows_tool_name(self):
+        texts = [r.text for r in self.vm.rows]
+        self.assertTrue(any("tools/call web_search" in t for t in texts))
+        self.assertTrue(any("tools/call shadow_fetch" in t for t in texts))
+
+    def test_result_row_shows_jsonrpc_id(self):
+        self.assertTrue(any("result id=3" in r.text for r in self.vm.rows))
+
+    def test_fabricated_row_carries_severity_3(self):
+        row = next(r for r in self.vm.rows if "shadow_fetch" in r.text)
+        self.assertEqual(row.severity, 3)
+
+    def test_clean_row_severity_0(self):
+        row = next(r for r in self.vm.rows
+                   if "tools/call web_search" in r.text)
+        self.assertEqual(row.severity, 0)
+
+    def test_clock_iso_and_synthetic(self):
+        self.assertEqual(tui._clock("2026-06-09T18:39:29+00:00"), "18:39:29")
+        self.assertEqual(tui._clock("t7"), "t7")
+
+    def test_raw_line_renders_dimmed_not_crash(self):
+        lines = handshake() + ["this is not json\n"]
+        vm = tui.build_view_model(annotated_trace(lines), live=False)
+        self.assertEqual(len(vm.rows), 6)
+        self.assertIn("raw", vm.rows[-1].text)
+
+
 if __name__ == "__main__":
     unittest.main()

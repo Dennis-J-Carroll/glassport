@@ -73,6 +73,32 @@ class FindingRow:
     row_index: int       # timeline row of the annotated event
 
 
+def _clock(ts: str) -> str:
+    """HH:MM:SS from an ISO timestamp; synthetic stamps pass through."""
+    if "T" in ts and len(ts) >= 19:
+        return ts[11:19]
+    return ts
+
+
+def _event_label(event) -> str:
+    md = event.metadata
+    if md.get("unparsed"):
+        return "raw (unparsed line)"
+    if event.kind == EventKind.TOOL_CALL:
+        for p in event.parts:
+            if p.kind == PartKind.TOOL_USE:
+                return f"tools/call {p.content.get('name')}"
+        return "tools/call"
+    if event.kind == EventKind.TOOL_RESULT:
+        rid = md.get("jsonrpc_id")
+        return f"result id={rid}" if rid is not None else "result"
+    if md.get("method"):
+        return md["method"]
+    if md.get("jsonrpc_id") is not None:
+        return f"result id={md['jsonrpc_id']}"
+    return event.kind.value
+
+
 def build_view_model(trace: InteractionTrace, live: bool) -> ViewModel:
     server = next((a for a in trace.actors if a.name == "mcp_server"), None)
 
@@ -97,10 +123,29 @@ def build_view_model(trace: InteractionTrace, live: bool) -> ViewModel:
     gate_on = any(isinstance(e.metadata.get("gate"), dict)
                   for e in trace.events)
 
+    client = next((a for a in trace.actors if a.name == "mcp_client"), None)
+    sev_by_event: dict[str, int] = {}
+    info_by_event: dict[str, bool] = {}
+    for a in trace.annotations:
+        if a.kind == AnnotationKind.INFO:
+            info_by_event[a.event_id] = True
+        else:
+            sev_by_event[a.event_id] = max(
+                sev_by_event.get(a.event_id, 0), a.severity)
+
+    rows: list[TimelineRow] = []
+    for e in trace.events:
+        arrow = "→" if (client and e.actor_id == client.id) else "←"
+        rows.append(TimelineRow(
+            text=f"{_clock(e.timestamp)} {arrow} {_event_label(e)}",
+            severity=sev_by_event.get(e.id, 0),
+            is_info=info_by_event.get(e.id, False)))
+
     return ViewModel(
         title=title, live=live, declared=declared,
         counters={"frames": len(trace.events),
                   "fabricated": fabricated,
                   "violations": violations,
                   "server_requests": server_requests},
-        gate_on=gate_on)
+        gate_on=gate_on,
+        rows=rows)
