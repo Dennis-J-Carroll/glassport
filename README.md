@@ -36,7 +36,7 @@ report.
 | `summarize` | Declared vs. called vs. fabricated delta per session, computed on an `InteractionTrace` | ✅ **Built** |
 | `from_mcp_session()` | Session log → `InteractionTrace` (Understanding Layer schema) | ✅ **Built** |
 | `detectors.py` | `fabricated_calls()` + `context_violations()` emitted as trace annotations | ✅ **Built** |
-| Session HTML report | Visual timeline with anomalies highlighted | 🔜 Planned (M3) |
+| `report.py` | Session timeline as self-contained static HTML, anomalies colored by severity, no JS | ✅ **Built** |
 | Watch mode | Behavioral drift across sessions over time | 🔜 Planned (M4) |
 | Static audit tools | Pre-deployment dissection + scoring (`glassport_audit`, `glassport_dissect`) | 🔜 Planned — earlier v0.1 prototype being folded in |
 | Policy gate | Active enforcement: block calls outside declared scope | 🔜 Planned (M5) — the "port" in Glassport, last on purpose |
@@ -88,6 +88,21 @@ A fabricated call means the wire carried a `tools/call` for a tool the
 server never declared. That's either a hallucinating agent, a confused
 client, or a server quietly servicing an undeclared capability. All three
 are things you want to know about.
+
+Or render the whole session as a page you can read on a phone:
+
+```bash
+$ python3 glassport_tap.py report ~/.glassport/sessions/<file>.jsonl
+~/.glassport/sessions/<file>.html
+```
+
+One self-contained HTML file, written next to the log (`-o` to choose):
+the full timeline in wire order, request/response pairs linked, every
+frame expandable, and detector findings attached to the events that
+triggered them — colored by severity (1 worth a look, 2 should not
+happen, 3 hostile or hallucinated). Dark, green, zero JavaScript, no
+external resources. Everything that came off the wire is HTML-escaped,
+so a hostile server can't turn its own audit report into an exploit.
 
 ---
 
@@ -188,17 +203,14 @@ instrument).
 
 ## Roadmap
 
-1. **M3 — Session report.** Single-file HTML render of a session
-   timeline, anomalies colored, parent arrows drawn. No JS, opens on a
-   phone.
-2. **M4 — Watch mode.** Fingerprint sessions over time; alert when a
+1. **M4 — Watch mode.** Fingerprint sessions over time; alert when a
    server's behavior drifts ("started calling a new tool on Tuesday").
-3. **Static audit (folded in).** The earlier v0.1 dissector/static-audit
+2. **Static audit (folded in).** The earlier v0.1 dissector/static-audit
    prototype returns as `glassport audit` — the pre-deployment
    complement to the runtime tap. Scores, when they ship, will publish
    the rubric that produced them; an unexplained trust score is the
    opacity this project exists to fight.
-4. **M5 — The gate.** Opt-in enforcement: block `tools/call` frames
+3. **M5 — The gate.** Opt-in enforcement: block `tools/call` frames
    outside the declared surface. Last, on purpose.
 
 ---

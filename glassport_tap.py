@@ -292,6 +292,7 @@ glassport_tap — passive MCP stdio proxy (M0)
 
   wrap (default):  glassport_tap.py [wrap] [--log-dir DIR] -- <server command...>
   summarize:       glassport_tap.py summarize <session.jsonl>
+  report:          glassport_tap.py report <session.jsonl> [-o out.html]
 """
 
 
@@ -313,6 +314,23 @@ def main(argv: list[str]) -> int:
             print(USAGE)
             return 2
         return summarize(Path(argv[1]))
+
+    if argv[0] == "report":
+        # M3 — static HTML render. Lazy import for the same reason as
+        # summarize: tap mode must stay a standalone single file.
+        try:
+            import report as report_mod
+        except ImportError:
+            sys.path.insert(0, str(Path(__file__).resolve().parent))
+            try:
+                import report as report_mod
+            except ImportError:
+                print("[glassport] report needs report.py, "
+                      "interaction_trace.py, detectors.py and "
+                      "adapters/mcp_session.py alongside this script.",
+                      file=sys.stderr)
+                return 1
+        return report_mod.main(argv[1:])
 
     log_dir = DEFAULT_LOG_DIR
     if argv[0] == "--log-dir":
