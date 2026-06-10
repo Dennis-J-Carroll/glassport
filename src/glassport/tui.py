@@ -141,6 +141,16 @@ def build_view_model(trace: InteractionTrace, live: bool) -> ViewModel:
             severity=sev_by_event.get(e.id, 0),
             is_info=info_by_event.get(e.id, False)))
 
+    row_by_event = {e.id: i for i, e in enumerate(trace.events)}
+    findings: list[FindingRow] = []
+    for a in sorted(trace.annotations,
+                    key=lambda a: (-a.severity, row_by_event.get(a.event_id, 0))):
+        findings.append(FindingRow(
+            text=f"sev {a.severity}  {a.subcategory}: {a.explanation}",
+            severity=a.severity,
+            is_info=a.kind == AnnotationKind.INFO,
+            row_index=row_by_event.get(a.event_id, 0)))
+
     return ViewModel(
         title=title, live=live, declared=declared,
         counters={"frames": len(trace.events),
@@ -148,4 +158,26 @@ def build_view_model(trace: InteractionTrace, live: bool) -> ViewModel:
                   "violations": violations,
                   "server_requests": server_requests},
         gate_on=gate_on,
-        rows=rows)
+        rows=rows,
+        findings=findings)
+
+
+def format_overlay(trace: InteractionTrace, row_index: int) -> list[str]:
+    """Pretty-printed parts + annotations for one event, as plain lines."""
+    e = trace.events[row_index]
+    out = [f"event {row_index}  seq={e.metadata.get('seq')}  "
+           f"kind={e.kind.value}  ts={e.timestamp}", ""]
+    for p in e.parts:
+        if isinstance(p.content, (dict, list)):
+            out.extend(json.dumps(p.content, indent=2).splitlines())
+        else:
+            out.append(str(p.content))
+    anns = [a for a in trace.annotations if a.event_id == e.id]
+    out.append("")
+    if anns:
+        for a in anns:
+            out.append(f"⚠ sev {a.severity} [{a.kind.value}] "
+                       f"{a.subcategory}: {a.explanation}")
+    else:
+        out.append("no findings for this event")
+    return out

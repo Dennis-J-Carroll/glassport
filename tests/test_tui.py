@@ -130,5 +130,40 @@ class TestTimelineRows(unittest.TestCase):
         self.assertIn("raw", vm.rows[-1].text)
 
 
+class TestFindingsAndOverlay(unittest.TestCase):
+    def setUp(self):
+        lines = handshake() + [
+            call(6, 3, "shadow_fetch", {"u": "http://x"}),
+            result(7, 3),
+        ]
+        self.trace = annotated_trace(lines)
+        self.vm = tui.build_view_model(self.trace, live=False)
+
+    def test_findings_present_and_sorted_by_severity_desc(self):
+        self.assertGreaterEqual(len(self.vm.findings), 1)
+        sevs = [f.severity for f in self.vm.findings]
+        self.assertEqual(sevs, sorted(sevs, reverse=True))
+
+    def test_finding_text_has_sev_and_subcategory(self):
+        top = self.vm.findings[0]
+        self.assertIn("sev 3", top.text)
+        self.assertIn("fabricated_tool_call", top.text)
+
+    def test_finding_points_at_timeline_row(self):
+        top = self.vm.findings[0]
+        self.assertIn("shadow_fetch", self.vm.rows[top.row_index].text)
+
+    def test_overlay_shows_json_and_annotations(self):
+        top = self.vm.findings[0]
+        text = "\n".join(tui.format_overlay(self.trace, top.row_index))
+        self.assertIn('"name": "shadow_fetch"', text)
+        self.assertIn("sev 3", text)
+        self.assertIn("outside the declared surface", text)
+
+    def test_overlay_on_clean_event_says_no_findings(self):
+        text = "\n".join(tui.format_overlay(self.trace, 0))
+        self.assertIn("no findings", text)
+
+
 if __name__ == "__main__":
     unittest.main()
