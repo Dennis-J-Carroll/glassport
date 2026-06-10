@@ -199,5 +199,59 @@ class TestPicker(unittest.TestCase):
         self.assertEqual(entries, [])
 
 
+class TestReducer(unittest.TestCase):
+    def setUp(self):
+        lines = handshake() + [
+            call(6, 3, "shadow_fetch", {"u": "x"}),
+            result(7, 3),
+        ]
+        self.vm = tui.build_view_model(annotated_trace(lines), live=True)
+        self.st = tui.UIState()
+
+    def test_initial_state_follows_tail(self):
+        self.assertTrue(self.st.follow)
+        self.assertEqual(self.st.focus, "timeline")
+        self.assertFalse(self.st.overlay_open)
+
+    def test_scroll_up_disables_follow(self):
+        tui.reduce(self.st, "up", self.vm)
+        self.assertFalse(self.st.follow)
+
+    def test_follow_toggle_and_bottom_jump(self):
+        tui.reduce(self.st, "up", self.vm)
+        tui.reduce(self.st, "follow", self.vm)
+        self.assertTrue(self.st.follow)
+        self.assertEqual(self.st.selected, len(self.vm.rows) - 1)
+
+    def test_selection_clamped(self):
+        tui.reduce(self.st, "top", self.vm)
+        tui.reduce(self.st, "up", self.vm)
+        self.assertEqual(self.st.selected, 0)
+        tui.reduce(self.st, "bottom", self.vm)
+        tui.reduce(self.st, "down", self.vm)
+        self.assertEqual(self.st.selected, len(self.vm.rows) - 1)
+
+    def test_enter_on_timeline_opens_overlay_back_closes(self):
+        tui.reduce(self.st, "enter", self.vm)
+        self.assertTrue(self.st.overlay_open)
+        tui.reduce(self.st, "back", self.vm)
+        self.assertFalse(self.st.overlay_open)
+
+    def test_tab_switches_focus_and_enter_jumps_to_event(self):
+        tui.reduce(self.st, "tab", self.vm)
+        self.assertEqual(self.st.focus, "findings")
+        self.st.selected = 0
+        target = self.vm.findings[0].row_index
+        tui.reduce(self.st, "enter", self.vm)
+        self.assertEqual(self.st.focus, "timeline")
+        self.assertEqual(self.st.selected, target)
+        self.assertFalse(self.st.follow)
+
+    def test_up_down_move_within_focused_list(self):
+        tui.reduce(self.st, "tab", self.vm)      # findings focus
+        tui.reduce(self.st, "down", self.vm)
+        self.assertLessEqual(self.st.selected, len(self.vm.findings) - 1)
+
+
 if __name__ == "__main__":
     unittest.main()

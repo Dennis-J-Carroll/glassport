@@ -191,6 +191,60 @@ class SessionEntry:
     live: bool
 
 
+@dataclass
+class UIState:
+    focus: str = "timeline"          # "timeline" | "findings"
+    selected: int = 0
+    follow: bool = True
+    overlay_open: bool = False
+    overlay_scroll: int = 0
+
+
+def reduce(state: UIState, action: str, vm: ViewModel) -> UIState:
+    """Pure state transition for one semantic action."""
+    n = len(vm.rows) if state.focus == "timeline" else len(vm.findings)
+    last = max(0, n - 1)
+
+    if state.overlay_open:
+        if action == "back":
+            state.overlay_open = False
+        elif action == "up":
+            state.overlay_scroll = max(0, state.overlay_scroll - 1)
+        elif action == "down":
+            state.overlay_scroll += 1
+        return state
+
+    if action == "up":
+        state.selected = max(0, state.selected - 1)
+        if state.focus == "timeline":
+            state.follow = False
+    elif action == "down":
+        state.selected = min(last, state.selected + 1)
+    elif action == "top":
+        state.selected = 0
+        if state.focus == "timeline":
+            state.follow = False
+    elif action == "bottom":
+        state.selected = last
+    elif action == "follow":
+        state.follow = not state.follow
+        if state.follow:
+            state.focus = "timeline"
+            state.selected = max(0, len(vm.rows) - 1)
+    elif action == "tab":
+        state.focus = "findings" if state.focus == "timeline" else "timeline"
+        state.selected = 0
+    elif action == "enter":
+        if state.focus == "timeline" and vm.rows:
+            state.overlay_open = True
+            state.overlay_scroll = 0
+        elif state.focus == "findings" and vm.findings:
+            state.focus = "timeline"
+            state.selected = vm.findings[state.selected].row_index
+            state.follow = False
+    return state
+
+
 def list_sessions(log_dir: Path, now: float | None = None) -> list[SessionEntry]:
     """Sessions newest-first; LIVE = grew within LIVE_WINDOW_SECS."""
     if now is None:
