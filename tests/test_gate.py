@@ -9,10 +9,13 @@ the glass and a declared call passing untouched.
 
 Pure stdlib, run with:  python3 -m unittest tests.test_gate
 """
+import io
 import json
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 
@@ -20,7 +23,7 @@ from glassport.adapters.mcp_session import from_mcp_session
 from glassport.interaction_trace import AnnotationKind, EventKind
 from glassport import detectors
 from glassport import report as report_mod
-from glassport.tap import Gate
+from glassport.tap import Gate, SessionLog, pump
 from tests.test_detectors import handshake
 
 REPO = Path(__file__).resolve().parent.parent
@@ -41,12 +44,16 @@ def declared_gate() -> Gate:
 
 class TestGateDecisions(unittest.TestCase):
     def test_forwards_until_declaration_seen(self):
-        g = Gate()
+        # no tools/list ever arrives: after the hold timeout the gate
+        # fails open, marking the forwarded frame so the log shows it
+        g = Gate(hold_timeout=0.05)
         action, resp, info = g.check_c2s(
             line({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
                   "params": {"name": "anything"}}))
         self.assertEqual(action, "forward")
         self.assertIsNone(resp)
+        self.assertEqual(info["action"], "gate_skipped")
+        self.assertEqual(info["reason"], "no_surface_timeout")
 
     def test_blocks_undeclared_call_with_error_response(self):
         g = declared_gate()
@@ -113,6 +120,59 @@ class TestGateDecisions(unittest.TestCase):
         self.assertEqual(action, "forward")
 
 
+class _KeepOpen(io.BytesIO):
+    """BytesIO whose buffer survives pump()'s dst.close()."""
+    def close(self):  # noqa: D102 — value must outlive the pump
+        pass
+
+
+class TestGateHold(unittest.TestCase):
+    """Pipelined clients: tools/call held until the surface is known."""
+
+    def _held_call(self, tool_name: str):
+        g = Gate(hold_timeout=5.0)
+        results = {}
+        t = threading.Thread(
+            target=lambda: results.setdefault("r", g.check_c2s(
+                line({"jsonrpc": "2.0", "id": 4, "method": "tools/call",
+                      "params": {"name": tool_name, "arguments": {}}}))),
+            daemon=True)
+        t.start()
+        time.sleep(0.1)
+        self.assertTrue(t.is_alive(), "call should be held, not decided")
+        g.observe_s2c(TOOLS_LIST_RESULT)
+        t.join(timeout=5)
+        self.assertFalse(t.is_alive(), "held call never woke up")
+        return results["r"]
+
+    def test_held_undeclared_call_blocked_when_surface_arrives(self):
+        action, resp, info = self._held_call("shadow_tool")
+        self.assertEqual(action, "block")
+        self.assertEqual(info["action"], "blocked")
+        self.assertEqual(json.loads(resp)["error"]["data"]["tool"],
+                         "shadow_tool")
+
+    def test_held_declared_call_forwarded_when_surface_arrives(self):
+        action, resp, info = self._held_call("web_search")
+        self.assertEqual(action, "forward")
+        self.assertIsNone(resp)
+
+    def test_pump_logs_fail_open_with_gate_marker(self):
+        # the fail-open forward must be visible in the session log
+        with tempfile.TemporaryDirectory() as tmp:
+            log = SessionLog(Path(tmp) / "s.jsonl")
+            src = io.BytesIO(line({"jsonrpc": "2.0", "id": 1,
+                                   "method": "tools/call",
+                                   "params": {"name": "anything"}}))
+            dst = _KeepOpen()
+            pump(src, dst, log, "c2s", gate=Gate(hold_timeout=0.05))
+            log.close()
+            self.assertIn(b"anything", dst.getvalue())   # still forwarded
+            entries = [json.loads(l) for l in
+                       (Path(tmp) / "s.jsonl").read_text().splitlines()]
+            self.assertEqual(entries[0]["gate"]["action"], "gate_skipped")
+
+
 def gated_log_lines():
     """Synthetic session log as gate mode would write it: a blocked call
     plus the injected error response, both carrying gate markers."""
@@ -155,6 +215,24 @@ class TestGateInTrace(unittest.TestCase):
         for a in anns:
             self.assertEqual(a.kind, AnnotationKind.INFO)
             self.assertEqual(a.severity, 1)
+
+    def test_gate_skipped_marker_surfaces_as_info(self):
+        skipped = {"schema_version": "0.1", "seq": 6, "ts": "t6",
+                   "dir": "c2s",
+                   "frame": {"jsonrpc": "2.0", "id": 3,
+                             "method": "tools/call",
+                             "params": {"name": "early_bird",
+                                        "arguments": {}}},
+                   "raw": None,
+                   "gate": {"action": "gate_skipped",
+                            "reason": "no_surface_timeout",
+                            "tool": "early_bird"}}
+        trace = from_mcp_session(handshake() + [json.dumps(skipped)])
+        anns = detectors.gate_actions(trace)
+        self.assertIn("gate_skipped", [a.subcategory for a in anns])
+        ann = next(a for a in anns if a.subcategory == "gate_skipped")
+        self.assertEqual(ann.kind, AnnotationKind.INFO)
+        self.assertIn("early_bird", ann.explanation)
 
     def test_annotate_includes_gate_actions(self):
         trace = from_mcp_session(gated_log_lines())

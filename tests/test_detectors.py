@@ -148,10 +148,19 @@ class TestContextViolations(unittest.TestCase):
         anns = detectors.context_violations(from_mcp_session(lines))
         self.assertIn("premature_call", subcats(anns))
 
-    def test_call_before_declaration(self):
-        # initialized done, but call lands before the tools/list response
+    def test_pipelined_call_after_list_request_not_flagged(self):
+        # initialized done, tools/list REQUEST sent, call lands before the
+        # response arrives — valid MCP pipelining, not a violation
         h = handshake()
         lines = h[:4] + [call(6, 3, "web_search", {"query": "x"})] + [h[4]]
+        anns = detectors.context_violations(from_mcp_session(lines))
+        self.assertNotIn("call_before_declaration", subcats(anns))
+        self.assertNotIn("premature_call", subcats(anns))
+
+    def test_call_without_list_request_flagged(self):
+        # initialized done, but the client never asked for the tool list
+        h = handshake()
+        lines = h[:3] + [call(6, 3, "web_search", {"query": "x"})]
         anns = detectors.context_violations(from_mcp_session(lines))
         self.assertIn("call_before_declaration", subcats(anns))
         self.assertNotIn("premature_call", subcats(anns))

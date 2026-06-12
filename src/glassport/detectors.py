@@ -133,7 +133,9 @@ def context_violations(trace: InteractionTrace) -> list[Annotation]:
       capability_violation    server-initiated request the client never granted
       unknown_server_request  server-initiated request outside the MCP set
       premature_call          tools/call before notifications/initialized
-      call_before_declaration tools/call before any tools/list response
+      call_before_declaration tools/call when no tools/list request was
+                              ever sent (a call merely racing the
+                              response is valid pipelining, not flagged)
       orphaned_response       response whose id matched no request
       surface_change          tools/list result changed mid-session
     """
@@ -149,6 +151,7 @@ def context_violations(trace: InteractionTrace) -> list[Annotation]:
                 tool_defs.setdefault(t["name"], t)
 
     initialized_seen = False
+    tools_list_requested = False
     first_surface: Optional[set[str]] = None
 
     for e in trace.events:
@@ -157,6 +160,13 @@ def context_violations(trace: InteractionTrace) -> list[Annotation]:
         if e.kind == EventKind.MESSAGE and \
                 md.get("method") == "notifications/initialized":
             initialized_seen = True
+
+        # a c2s tools/list request means the client INTENDS to learn the
+        # surface; parsed c2s requests carry no "dir" key, so the absent
+        # server_initiated flag is the direction discriminator
+        if e.kind == EventKind.MESSAGE and md.get("method") == "tools/list" \
+                and not md.get("server_initiated"):
+            tools_list_requested = True
 
         names = _list_result_names(e)
         if names is not None:
@@ -176,11 +186,11 @@ def context_violations(trace: InteractionTrace) -> list[Annotation]:
                         e, AnnotationKind.ANOMALY, "premature_call",
                         f"tools/call '{name}' before notifications/initialized",
                         severity=2))
-                elif first_surface is None:
+                elif first_surface is None and not tools_list_requested:
                     out.append(_ann(
                         e, AnnotationKind.ANOMALY, "call_before_declaration",
-                        f"tools/call '{name}' before any tools/list response",
-                        severity=1))
+                        f"tools/call '{name}' and no tools/list request "
+                        f"was ever sent", severity=1))
                 schema = (tool_defs.get(name) or {}).get("inputSchema")
                 for problem in _schema_problems(args, schema):
                     out.append(_ann(
@@ -253,6 +263,13 @@ def gate_actions(trace: InteractionTrace) -> list[Annotation]:
                 f"error response synthesized by the gate for blocked call "
                 f"'{g.get('tool')}'; the server never sent this frame",
                 severity=1, tool=g.get("tool")))
+        elif g.get("action") == "gate_skipped":
+            out.append(_ann(
+                e, AnnotationKind.INFO, "gate_skipped",
+                f"gate failed open for tools/call '{g.get('tool')}' — "
+                f"no tools/list response arrived within the hold window, "
+                f"so this call was forwarded unenforced",
+                severity=1, tool=g.get("tool"), reason=g.get("reason")))
     return out
 
 

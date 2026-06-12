@@ -132,11 +132,15 @@ class Gate:
     declared surface. Everything else relays untouched.
 
     The gate only blocks what the wire can prove. Until a tools/list
-    response has been seen there is no declaration to violate, so every
-    call is forwarded (the passive detectors still flag premature calls
-    after the fact). The latest tools/list result IS the contract: a
-    server that re-declares a smaller surface shrinks what it may be
-    asked to do.
+    response has been seen there is no declaration to violate — but a
+    pipelined client may fire tools/call before that response lands, so
+    the gate HOLDS such calls (blocking the c2s pump; stdio backpressure
+    is the flow control a real client expects anyway) until the surface
+    arrives or `hold_timeout` expires. On timeout it fails open and the
+    forwarded frame is logged with a "gate_skipped" marker, so the log
+    still shows enforcement was impossible. The latest tools/list result
+    IS the contract: a server that re-declares a smaller surface shrinks
+    what it may be asked to do.
 
     A blocked request never reaches the server; the client receives a
     synthesized JSON-RPC error (code -32000) whose error.data carries
@@ -146,9 +150,11 @@ class Gate:
     side actually saw, and they legitimately differ.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, hold_timeout: float = 2.0) -> None:
         self._lock = threading.Lock()
         self._declared: set[str] | None = None   # None until tools/list seen
+        self._surface_known = threading.Event()
+        self._hold_timeout = hold_timeout
         self.blocked_count = 0
 
     def observe_s2c(self, line: bytes) -> None:
@@ -165,6 +171,7 @@ class Gate:
                      if isinstance(t, dict) and "name" in t}
             with self._lock:
                 self._declared = names
+            self._surface_known.set()
 
     def check_c2s(self, line: bytes
                   ) -> tuple[str, bytes | None, dict | None]:
@@ -184,7 +191,18 @@ class Gate:
         name = (frame.get("params") or {}).get("name")
         with self._lock:
             declared = self._declared
-        if declared is None or name in declared:
+        if declared is None:
+            # pipelined client: hold the call until the tools/list
+            # response lands; the s2c pump will wake us via observe_s2c
+            self._surface_known.wait(timeout=self._hold_timeout)
+            with self._lock:
+                declared = self._declared
+            if declared is None:
+                # server never declared a surface — fail open, visibly
+                return ("forward", None,
+                        {"action": "gate_skipped",
+                         "reason": "no_surface_timeout", "tool": name})
+        if name in declared:
             return ("forward", None, None)
 
         self.blocked_count += 1
@@ -226,6 +244,7 @@ def pump(src, dst, log: SessionLog | None, direction: str,
     """
     try:
         for line in iter(src.readline, b""):
+            gate_info = None   # marker for forwarded-but-noteworthy frames
             if gate is not None and direction == "c2s":
                 action, response, info = gate.check_c2s(line)
                 if action == "block" and info is not None:
@@ -238,6 +257,7 @@ def pump(src, dst, log: SessionLog | None, direction: str,
                                        gate={"action": "injected",
                                              "tool": info["tool"]})
                     continue
+                gate_info = info   # e.g. gate_skipped fail-open
             elif gate is not None and direction == "s2c":
                 gate.observe_s2c(line)
             if dst_lock is not None:
@@ -248,7 +268,7 @@ def pump(src, dst, log: SessionLog | None, direction: str,
                 dst.write(line)
                 dst.flush()
             if log is not None:
-                log.record(direction, line)
+                log.record(direction, line, gate=gate_info)
     except (BrokenPipeError, ValueError, OSError):
         pass  # one side hung up; let the session wind down
     finally:
@@ -346,7 +366,7 @@ def run_tap(server_cmd: list[str], log_dir: Path,
 # InteractionTrace via adapters/mcp_session.py so this CLI and the
 # Understanding Layer read the wire through one code path.
 # ─────────────────────────────────────────────────────────────────
-def summarize(log_path: Path) -> int:
+def summarize(log_path: Path, as_json: bool = False) -> int:
     """
     Render the declared/called/fabricated delta for one session log.
 
@@ -354,6 +374,10 @@ def summarize(log_path: Path) -> int:
     from_mcp_session adapter; everything printed here is derived from
     the trace, never from the raw JSONL. Tap mode stays standalone —
     only summarize requires the Understanding Layer modules.
+
+    With as_json the same facts are emitted as one JSON object, so an
+    agent can shell out to `glassport summarize --json` and parse the
+    result instead of scraping the human rendering.
     """
     from glassport.adapters.mcp_session import from_mcp_session_file
     from glassport.detectors import context_violations
@@ -382,6 +406,27 @@ def summarize(log_path: Path) -> int:
                     else str(out)
                 errors.append((e.metadata.get("seq", -1), msg))
 
+    violations = sorted(context_violations(trace),
+                        key=lambda a: (a.metadata.get("seq") or 0))
+
+    if as_json:
+        print(json.dumps({
+            "session": log_path.name,
+            "frames_parsed": frames,
+            "declared_tools": sorted(declared),
+            "called_tools": [n for _, n in called],
+            "unused_declared": unused,
+            "fabricated_calls": [{"seq": s, "tool": n}
+                                 for s, n in fabricated],
+            "protocol_errors": [{"seq": s, "message": m}
+                                for s, m in errors],
+            "context_violations": [
+                {"severity": a.severity, "subcategory": a.subcategory,
+                 "seq": a.metadata.get("seq"), "explanation": a.explanation}
+                for a in violations],
+        }, indent=2, ensure_ascii=False))
+        return 0
+
     print(f"session: {log_path.name}")
     print(f"frames parsed:    {frames}")
     print(f"declared tools:   {sorted(declared) or '— (no tools/list seen)'}")
@@ -395,8 +440,6 @@ def summarize(log_path: Path) -> int:
     if errors:
         print(f"protocol errors:  {errors}")
 
-    violations = sorted(context_violations(trace),
-                        key=lambda a: (a.metadata.get("seq") or 0))
     if violations:
         print("CONTEXT VIOLATIONS:")
         for a in violations:
@@ -405,6 +448,30 @@ def summarize(log_path: Path) -> int:
     else:
         print("context violations: none")
     return 0
+
+
+# ─────────────────────────────────────────────────────────────────
+# Detect mode — run every behavioral detector over one session log
+# and print the findings. Exit 1 when anything was found (grep-style)
+# so scripts and CI can branch on the result.
+# ─────────────────────────────────────────────────────────────────
+def _cmd_detect(log_path: Path) -> int:
+    from glassport.adapters.mcp_session import from_mcp_session_file
+    from glassport.detectors import annotate
+
+    trace = from_mcp_session_file(log_path)
+    annotations = annotate(trace)
+    if not annotations:
+        print(f"detect: {log_path.name} — no findings")
+        return 0
+    print(f"detect: {log_path.name} — {len(annotations)} finding(s)\n")
+    for a in sorted(annotations,
+                    key=lambda x: (-x.severity, x.metadata.get("seq") or 0)):
+        sev_label = {1: "INFO", 2: "WARN", 3: "HIGH"}.get(
+            a.severity, str(a.severity))
+        print(f"  [{sev_label}] seq={a.metadata.get('seq', '?')} "
+              f"{a.subcategory}: {a.explanation}")
+    return 1
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -418,9 +485,13 @@ glassport — passive MCP stdio proxy
                    (active: blocks tools/call outside the declared surface)
   audit:           glassport audit <path> [--json] | audit --rubric
                    (static, pre-deployment: reads source, never runs it)
-  summarize:       glassport summarize <session.jsonl>
+  summarize:       glassport summarize [--json] <session.jsonl>
+  detect:          glassport detect <session.jsonl>
+                   (run all behavioral detectors; exit 1 if findings)
   report:          glassport report <session.jsonl> [-o out.html]
   watch:           glassport watch [log-dir] [--json]
+  serve:           glassport serve [--log-dir DIR]
+                   (expose glassport itself as a queryable MCP server)
   tui:             glassport tui [session.jsonl] [--log-dir DIR]
                    (live curses inspector; no argument = session picker)
 
@@ -446,10 +517,25 @@ def main(argv: list[str]) -> int:
         return 2
 
     if argv[0] == "summarize":
+        args = argv[1:]
+        as_json = "--json" in args
+        if as_json:
+            args.remove("--json")
+        if len(args) != 1:
+            print(USAGE)
+            return 2
+        return summarize(Path(args[0]), as_json=as_json)
+
+    if argv[0] == "detect":
         if len(argv) != 2:
             print(USAGE)
             return 2
-        return summarize(Path(argv[1]))
+        return _cmd_detect(Path(argv[1]))
+
+    if argv[0] == "serve":
+        # glassport as a queryable MCP audit server. Lazy import.
+        from glassport import server as server_mod
+        return server_mod.main(argv[1:])
 
     if argv[0] == "report":
         # M3 — static HTML render. Lazy import keeps tap mode import-light.
