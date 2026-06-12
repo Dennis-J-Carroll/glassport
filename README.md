@@ -10,6 +10,7 @@
 
 <p align="center">
   <img alt="CI" src="https://github.com/Dennis-J-Carroll/glassport/actions/workflows/ci.yml/badge.svg">
+  <a href="https://pypi.org/project/glassport/"><img alt="PyPI" src="https://img.shields.io/pypi/v/glassport?style=flat-square&color=3b82f6"></a>
   <img alt="Python 3.10+" src="https://img.shields.io/badge/python-3.10+-3b82f6?style=flat-square&logo=python&logoColor=white">
   <img alt="Zero dependencies" src="https://img.shields.io/badge/dependencies-zero-22c55e?style=flat-square">
   <img alt="Runs in Termux" src="https://img.shields.io/badge/runs%20in-Termux-a78bfa?style=flat-square">
@@ -130,23 +131,21 @@ Edit your MCP client config to route the target server through the tap. Replace 
 {
   "mcpServers": {
     "exa": {
-      "command": "python3",
-      "args": [
-        "/path/to/glassport/glassport_tap.py",
-        "--",
-        "npx", "exa-mcp-server"
-      ]
+      "command": "glassport",
+      "args": ["--", "npx", "exa-mcp-server"]
     }
   }
 }
 ```
+
+(Running from a bare clone instead? Use `"command": "python3"`, `"args": ["/path/to/glassport/glassport_tap.py", "--", ...]` — the root shim is kept for exactly this.)
 
 Use the server normally. Every session is logged to `~/.glassport/sessions/<timestamp>_<server>.jsonl`.
 
 ### 2. Read the delta
 
 ```bash
-$ python3 glassport_tap.py summarize ~/.glassport/sessions/<file>.jsonl
+$ glassport summarize ~/.glassport/sessions/<file>.jsonl
 
 declared tools:   ['web_search']
 called tools:     ['web_search', 'arxiv_lookup']
@@ -159,7 +158,7 @@ A fabricated call means the wire carried a `tools/call` for a tool the server ne
 ### 3. Render a session report
 
 ```bash
-$ python3 glassport_tap.py report ~/.glassport/sessions/<file>.jsonl
+$ glassport report ~/.glassport/sessions/<file>.jsonl
 ~/.glassport/sessions/<file>.html
 ```
 
@@ -168,7 +167,7 @@ One self-contained HTML file, written next to the log (`-o` to override). Full t
 ### 4. Watch for drift
 
 ```bash
-$ python3 glassport_tap.py watch    # defaults to ~/.glassport/sessions
+$ glassport watch    # defaults to ~/.glassport/sessions
 
 exa-search — 3 session(s)
   20260608T..._exa_100.jsonl  baseline established · 1 declared tool(s) · hosts: api.exa.ai
@@ -182,7 +181,7 @@ exa-search — 3 session(s)
 ### 5. Audit before you run
 
 ```bash
-$ python3 glassport_tap.py audit ./some-mcp-server
+$ glassport audit ./some-mcp-server
 
 score:    9/100 (F)
   -25  secret-hardcoded (critical) — 2 hit(s)
@@ -303,8 +302,8 @@ Watch is **stateless**: the baseline is rebuilt from the logs on every run, so e
 When observation has earned enough trust, swap `wrap` for `gate` in your MCP config — same command, one word different:
 
 ```json
-"args": ["/path/to/glassport/glassport_tap.py", "gate", "--",
-         "npx", "exa-mcp-server"]
+"command": "glassport",
+"args": ["gate", "--", "npx", "exa-mcp-server"]
 ```
 
 The gate blocks exactly one thing: a `tools/call` naming a tool outside the server's declared surface. The request never reaches the server; the client gets a synthesized JSON-RPC error (code `-32000`) whose `error.data` carries `{"glassport": "gate_blocked"}` — the gate's voice is always distinguishable from the server's.
@@ -326,9 +325,9 @@ The session log records both realities: the blocked frame is logged with `"gate"
 The tap watches what a server *does*; `audit.py` reads what a server *is*, before it ever runs:
 
 ```bash
-python3 glassport_tap.py audit ./some-mcp-server
-python3 glassport_tap.py audit ./some-mcp-server --json
-python3 glassport_tap.py audit --rubric   # print the full scoring rubric
+glassport audit ./some-mcp-server
+glassport audit ./some-mcp-server --json
+glassport audit --rubric   # print the full scoring rubric
 ```
 
 - **Python**: full AST pass — `model_eval(x)` is not `eval`, and `import subprocess as sp; sp.run(c, shell=True)` still is
@@ -349,7 +348,7 @@ Rules cover: hardcoded secrets (redacted in output), **tool poisoning** (model-d
 `adapters/mcp_session.py` converts a tap log into an `InteractionTrace` — the protocol-spanning schema used by the Understanding Layer for visualization and hallucination attribution:
 
 ```python
-from adapters.mcp_session import from_mcp_session_file
+from glassport.adapters.mcp_session import from_mcp_session_file
 
 trace = from_mcp_session_file("~/.glassport/sessions/....jsonl",
                               server_name="exa-mcp-server")
@@ -361,7 +360,7 @@ trace.fabricated_tool_calls()  # the delta
 The adapter is deliberately dumb: it produces the faithful trace and nothing else. Detectors run on top and attach `Annotation` objects:
 
 ```python
-from detectors import annotate
+from glassport.detectors import annotate
 
 annotate(trace)   # fabricated calls, schema violations, capability violations,
                   # ordering violations, orphaned responses, surface changes
@@ -411,14 +410,18 @@ Still on the horizon:
 
 ```
 glassport/
-├── glassport_tap.py          # M0: stdio proxy — the tap
-├── interaction_trace.py      # protocol-spanning data model
-├── detectors.py              # M2: analysis passes
-├── report.py                 # M3: HTML session renderer
-├── watch.py                  # M4: behavioral drift
-├── audit.py                  # static source audit
-├── adapters/
-│   └── mcp_session.py        # tap log → InteractionTrace
+├── pyproject.toml            # packaging — `glassport` console script
+├── glassport_tap.py          # back-compat shim for clone-and-run / MCP configs
+├── src/glassport/
+│   ├── tap.py                # M0: stdio proxy — the tap, gate, and CLI
+│   ├── interaction_trace.py  # protocol-spanning data model
+│   ├── detectors.py          # M2: analysis passes
+│   ├── report.py             # M3: HTML session renderer
+│   ├── watch.py              # M4: behavioral drift
+│   ├── audit.py              # static source audit
+│   ├── tui.py                # live curses session inspector
+│   └── adapters/
+│       └── mcp_session.py    # tap log → InteractionTrace
 ├── examples/
 │   └── fake_server.py        # deliberately misbehaving test server
 └── tests/
@@ -426,7 +429,8 @@ glassport/
     ├── test_report.py
     ├── test_watch.py
     ├── test_gate.py
-    └── test_audit.py
+    ├── test_audit.py
+    └── test_tui.py
 ```
 
 ---
