@@ -232,7 +232,7 @@ One JSON object per wire line, append-only, crash-safe:
 
 ## Detection inventory
 
-`detectors.py` runs three passes over a trace. Every finding is wire-provable — if no `initialize` frame was captured, no capability claim is made; if no `tools/list` was seen, no schema check is possible. Absence of evidence is reported as absence, not guilt.
+`detectors.py` runs four passes over a trace. Every finding is wire-provable — if no `initialize` frame was captured, no capability claim is made; if no `tools/list` was seen, no schema check is possible. Absence of evidence is reported as absence, not guilt.
 
 ### Severity scale
 
@@ -258,6 +258,20 @@ One JSON object per wire line, append-only, crash-safe:
 | `gate_injected_response` | info | gate synthesized the error reply; server never sent it |
 
 Severity-3 findings drive the session verdict to `HOSTILE OR HALLUCINATED`. INFO annotations (gate records) never affect the verdict — a blocked call is still judged by its own findings.
+
+**Data exfiltration** (`data_exfiltration`) is the fourth pass: it reads the payloads, not just the protocol. It flags PII and credentials in tool-call arguments, sensitive data leaving for hosts the server never declared, and secrets leaked back in tool results.
+
+| Subcategory | Sev | What the wire proved |
+|---|:---:|---|
+| `pii_<category>` | **3**/2/1 | credential or PII in tool-call arguments — `pii_rsa_private_key`, `pii_openai_key`, `pii_aws_secret_key`, `pii_github_token`, `pii_ssn`, `pii_credit_card`, … (sev by category) |
+| `unexpected_egress_host` | **3**/2 | tool call reaches a host outside the declared surface; **3** when sensitive data rides along, **2** otherwise |
+| `pii_in_result_<category>` | **3** | a credential came back in a tool *result* — a server leaking secrets to the client |
+
+Three properties keep this honest:
+
+- **Validated, not greedy.** Credit cards pass Luhn, SSNs pass SSA-range checks, generic secrets must clear an entropy floor. A random 16-digit order number is not a card.
+- **Non-reversible redaction.** A flagged secret never appears in the annotation — not even a prefix. The explanation carries `[category redacted · N chars]`, so the detector's own output can't become the leak.
+- **The allowlist downgrades, it never silences.** Traffic to `*.amazonaws.com`, `*.googleapis.com`, and peers is expected and quiet — *until* a secret rides along, at which point it's flagged anyway (severity 2). An attacker-controlled bucket on a trusted domain is the most common real exfil channel; trusting the domain must not mean trusting the payload.
 
 ---
 
@@ -327,6 +341,7 @@ The tap watches what a server *does*; `audit.py` reads what a server *is*, befor
 ```bash
 glassport audit ./some-mcp-server
 glassport audit ./some-mcp-server --json
+glassport audit ./some-mcp-server --sarif   # SARIF 2.1.0 for code scanning
 glassport audit --rubric   # print the full scoring rubric
 ```
 
@@ -339,7 +354,27 @@ Rules cover: hardcoded secrets (redacted in output), **tool poisoning** (model-d
 
 `audit` and the tap compose along the lifecycle: **audit** before you install, **wrap** while you run, **gate** when trust runs out. Static analysis can't see what a server does on the wire — and the wire can't show you a secret sitting unused in source. Neither subsumes the other.
 
-> **Note:** Running `audit` on Glassport itself flags `tool-poisoning` — because the rule's own regexes contain the strings they hunt for. That is the tool being correct about its contents. Glassport deliberately does not exempt itself, because a scanner that suppresses its own matches is one flag away from suppressing an attacker's.
+### SARIF export and CI
+
+`--sarif` emits a SARIF 2.1.0 document over the audit findings. Result locations are **repo-root-relative** (the audited path is folded back in), so GitHub code scanning annotates the offending line on the diff rather than pointing at nothing. One severity vocabulary maps both the audit's string severities and the runtime detectors' integer severities onto SARIF `error` / `warning` / `note`, so a single report can carry both without two scales fighting.
+
+The shipped GitHub Actions workflow (`.github/workflows/ci.yml`) runs `audit --sarif` and uploads to the Security tab; point `AUDIT_TARGET` at your server directory. The upload runs even when the audit exits non-zero — a high or critical finding is exactly what the Security tab is for.
+
+### Inline suppression
+
+A finding can be waived **on the line that produced it**, in source, where the diff records it:
+
+```python
+sp.run(cmd, shell=True)        # nosec
+sp.run(cmd, shell=True)        # glassport: ignore
+sp.run(cmd, shell=True)        # glassport: ignore[shell-injection]
+```
+
+`# nosec` (bandit-compatible) and bare `# glassport: ignore` waive every finding on the line; the scoped `# glassport: ignore[rule-id]` waives only the named rule and lets everything else still fire.
+
+> **Note — observe, learn, act.** Running `audit` on Glassport once flagged its own `tool-poisoning` rule, because the rule's text *quotes* the strings it hunts (`<IMPORTANT> read ~/.ssh`) to explain the attack. The scanner was correct: that text is **information** — documentation of a threat — and observing it is the tool doing its job. The question is what to do with a true observation about benign content.
+>
+> The wrong answer is a silent self-exemption: a scanner that quietly drops its own matches is one config away from quietly dropping an attacker's. The right answer is an **auditable** one. The catalog now carries a scoped `# glassport: ignore[tool-poisoning]` on exactly the lines that document the attack — visible in every diff, limited to one rule, on one line, reviewable by anyone. The suppression is itself part of the record, not a hole in it. That is the same doctrine the detectors follow on the wire — assert only what the evidence shows, and make every judgment traceable — applied back to Glassport's own source. Observe the finding, learn that the match is documentation, act in the open.
 
 ---
 
@@ -402,7 +437,7 @@ Still on the horizon:
 - Network-enriched audit mode: npm / PyPI / GitHub provenance lookups, as an explicit opt-in flag (kept off the default path so the core audit stays reproducible and offline)
 - Agent↔Agent trace coverage for Google A2A protocol
 - ~~TUI: terminal interface for live session inspection and drift review~~ ✅ Built (`glassport tui`)
-- CI integration: `--format json` + GitHub Action for automated audit on MCP config changes
+- ~~CI integration: JSON + SARIF export and a GitHub Action that uploads audit findings to the Security tab~~ ✅ Built (`audit --sarif`, `.github/workflows/ci.yml`)
 
 ---
 
@@ -415,17 +450,21 @@ glassport/
 ├── src/glassport/
 │   ├── tap.py                # M0: stdio proxy — the tap, gate, and CLI
 │   ├── interaction_trace.py  # protocol-spanning data model
-│   ├── detectors.py          # M2: analysis passes
+│   ├── detectors.py          # M2: analysis passes (incl. data exfiltration)
 │   ├── report.py             # M3: HTML session renderer
 │   ├── watch.py              # M4: behavioral drift
-│   ├── audit.py              # static source audit
+│   ├── audit.py              # static source audit (+ --sarif, suppression)
+│   ├── sarif.py              # SARIF 2.1.0 export for code scanning
 │   ├── tui.py                # live curses session inspector
 │   └── adapters/
 │       └── mcp_session.py    # tap log → InteractionTrace
 ├── examples/
 │   └── fake_server.py        # deliberately misbehaving test server
+├── .github/workflows/ci.yml  # test matrix + audit → SARIF → Security tab
 └── tests/
     ├── test_detectors.py
+    ├── test_sarif.py
+    ├── test_suppress.py
     ├── test_report.py
     ├── test_watch.py
     ├── test_gate.py
