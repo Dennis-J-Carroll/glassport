@@ -20,7 +20,10 @@ or hallucinated unless proven otherwise.
 """
 from __future__ import annotations
 
-from typing import Iterator, Optional
+import json
+import math
+import re
+from typing import Any, Iterator, NamedTuple, Optional, Callable
 
 from glassport.interaction_trace import (
     Annotation, AnnotationKind, HallucinationCategory,
@@ -273,7 +276,254 @@ def gate_actions(trace: InteractionTrace) -> list[Annotation]:
     return out
 
 
-DETECTORS = [fabricated_calls, context_violations, gate_actions]
+# ─────────────────────────────────────────────────────────
+# Data exfiltration — PII / credential egress (M6)
+#
+# Doctrine matches the rest of this module: assert only what the wire
+# shows. A pattern fires on bytes that crossed the glass, a validator
+# culls the obvious false positive, and the raw value never leaves this
+# function — explanations and metadata carry a non-reversible tag, not
+# the secret. The allowlist of trusted clouds LOWERS severity; it never
+# suppresses a finding, because the most common real exfil channel is an
+# attacker-controlled bucket on an otherwise-trusted domain.
+# ─────────────────────────────────────────────────────────
+
+
+def _calculate_entropy(s: str) -> float:
+    """Shannon entropy (bits/char). High values flag random key material."""
+    if not s:
+        return 0.0
+    freq: dict[str, int] = {}
+    for ch in s:
+        freq[ch] = freq.get(ch, 0) + 1
+    n = len(s)
+    return -sum((c / n) * math.log2(c / n) for c in freq.values())
+
+
+def _luhn_check(card_number: str) -> bool:
+    """Luhn checksum — culls random digit runs that aren't real cards."""
+    digits = [int(d) for d in card_number if d.isdigit()]
+    if len(digits) < 13:
+        return False
+    total = 0
+    for i, d in enumerate(reversed(digits)):
+        if i % 2 == 1:
+            d *= 2
+            if d > 9:
+                d -= 9
+        total += d
+    return total % 10 == 0
+
+
+def _validate_ssn(ssn: str) -> bool:
+    """Reject SSNs in ranges the SSA never issues (000/666/9xx, 00, 0000)."""
+    if not re.match(r"^\d{3}-\d{2}-\d{4}$", ssn):
+        return False
+    area, group, serial = ssn.split("-")
+    if area in ("000", "666") or area.startswith("9"):
+        return False
+    return group != "00" and serial != "0000"
+
+
+class PIIPattern(NamedTuple):
+    category: str
+    severity: int                       # 1 worth a look · 2 should not · 3 hostile
+    pattern: re.Pattern
+    validator: Optional[Callable[[str], bool]]
+    description: str
+
+
+# Ordered most-specific first. Validators (defined ABOVE this list so the
+# module imports cleanly) cull false positives.
+PII_PATTERNS: list[PIIPattern] = [
+    PIIPattern("rsa_private_key", 3, re.compile(
+        r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----"
+        r"[\s\S]{20,}?"
+        r"-----END (?:RSA |EC |OPENSSH )?PRIVATE KEY-----"),
+        None, "RSA/EC/SSH private key (PEM block)"),
+    PIIPattern("pgp_private_key", 3, re.compile(
+        r"-----BEGIN PGP PRIVATE KEY BLOCK-----[\s\S]{20,}?"
+        r"-----END PGP PRIVATE KEY BLOCK-----"),
+        None, "PGP private key block"),
+    PIIPattern("anthropic_key", 3,
+        re.compile(r"(sk-ant-api03-[A-Za-z0-9_-]{20,})"),
+        None, "Anthropic API key"),
+    PIIPattern("openai_key", 3,
+        re.compile(r"(sk-(?:proj-)?[A-Za-z0-9]{32,})"),
+        lambda s: len(s) >= 40, "OpenAI API key"),
+    PIIPattern("aws_access_key", 3,
+        re.compile(r"(?<![A-Z0-9])(AKIA[0-9A-Z]{16})(?![A-Z0-9])"),
+        lambda s: len(s) == 20, "AWS access key ID"),
+    PIIPattern("aws_secret_key", 3,
+        re.compile(r"(?<![A-Za-z0-9/+=])([A-Za-z0-9/+=]{40})(?![A-Za-z0-9/+=])"),
+        lambda s: _calculate_entropy(s) > 4.0, "AWS secret access key (entropy)"),
+    PIIPattern("github_token", 3,
+        re.compile(r"((?:gh[poursab]|github_pat)_[A-Za-z0-9_]{36,})"),
+        lambda s: len(s) >= 40, "GitHub token"),
+    PIIPattern("slack_token", 3,
+        re.compile(r"(xox[baprs]-[0-9]{10,13}-[0-9]{10,13}-[A-Za-z0-9]{24,})"),
+        None, "Slack token"),
+    PIIPattern("database_url", 3, re.compile(
+        r"((?:postgres|postgresql|mysql|mongodb|redis)://"
+        r"[A-Za-z0-9_.-]+:[^@\s]+@[A-Za-z0-9._-]+(?::\d+)?/[A-Za-z0-9_-]+)"),
+        None, "database URL with credentials"),
+    PIIPattern("jwt_token", 2, re.compile(
+        r"(eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,})"),
+        None, "JSON Web Token"),
+    PIIPattern("generic_api_key", 2, re.compile(
+        r"(?i)(?:api[_-]?key|apikey|secret[_-]?key|access[_-]?token|"
+        r"auth[_-]?token|client[_-]?secret)"
+        r"['\"]?\s*[:=]\s*['\"]([A-Za-z0-9_\-+=/.]{20,})['\"]"),
+        lambda s: _calculate_entropy(s) > 3.0, "generic API key/secret"),
+    PIIPattern("ssn", 3, re.compile(r"(?<!\d)(\d{3}-\d{2}-\d{4})(?!\d)"),
+        _validate_ssn, "US Social Security Number"),
+    PIIPattern("credit_card", 3, re.compile(
+        r"(?<!\d)(4[0-9]{12}(?:[0-9]{3})?|5[1-5][0-9]{14}|"
+        r"3[47][0-9]{13}|6(?:011|5[0-9]{2})[0-9]{12})(?!\d)"),
+        _luhn_check, "credit card number (Luhn)"),
+    PIIPattern("email_address", 1, re.compile(
+        r"([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,})"),
+        None, "email address"),
+    PIIPattern("private_ip", 1, re.compile(
+        r"(?<!\d)(10\.\d{1,3}\.\d{1,3}\.\d{1,3}|"
+        r"172\.(?:1[6-9]|2[0-9]|3[01])\.\d{1,3}\.\d{1,3}|"
+        r"192\.168\.\d{1,3}\.\d{1,3})(?!\d)"),
+        None, "private IP address (RFC 1918)"),
+]
+
+# Trusted clouds/CDNs: presence here only DOWNGRADES an egress finding.
+TRUSTED_HOSTS = {"localhost", "127.0.0.1", "::1", "0.0.0.0"}
+TRUSTED_DOMAINS = {
+    "amazonaws.com", "cloudfront.net", "googleapis.com", "googleusercontent.com",
+    "azure.com", "azurewebsites.net", "windows.net", "cloudflare.com",
+    "fastly.net", "akamai.net", "openai.com", "anthropic.com",
+    "modelcontextprotocol.io",
+}
+
+_URL_RE = re.compile(r"(?:https?|wss?)://([A-Za-z0-9.\-]+)(?::\d+)?", re.I)
+_BARE_DOMAIN_RE = re.compile(r"^[a-z0-9.\-]+\.[a-z]{2,}$")
+
+
+def _redact(value: str, category: str) -> str:
+    """Non-reversible tag — never returns plaintext (not even a prefix)."""
+    return f"[{category} redacted · {len(value)} chars]"
+
+
+def _scan_pii(text: str) -> list[tuple[PIIPattern, str]]:
+    """Validated, de-duplicated PII hits in one serialized blob."""
+    hits: list[tuple[PIIPattern, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for pat in PII_PATTERNS:
+        for m in pat.pattern.finditer(text):
+            value = m.group(m.lastindex) if m.lastindex else m.group(0)
+            if pat.validator and not pat.validator(value):
+                continue
+            dedup = (pat.category, value)
+            if dedup in seen:
+                continue
+            seen.add(dedup)
+            hits.append((pat, value))
+    return hits
+
+
+def _extract_hosts_from_value(value: Any, hosts: set[str]) -> None:
+    """Recursively collect hostnames: embedded URLs anywhere, plus bare
+    domain values. Deliberately does NOT mine domains out of prose or
+    email addresses — only a real scheme or a whole-string domain counts."""
+    if isinstance(value, str):
+        for m in _URL_RE.finditer(value):
+            hosts.add(m.group(1).lower())
+        v = value.strip().lower()
+        if " " not in v and "@" not in v and _BARE_DOMAIN_RE.match(v):
+            hosts.add(v)
+    elif isinstance(value, dict):
+        for v in value.values():
+            _extract_hosts_from_value(v, hosts)
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            _extract_hosts_from_value(item, hosts)
+
+
+def _extract_hosts_from_args(args: Any) -> set[str]:
+    hosts: set[str] = set()
+    _extract_hosts_from_value(args, hosts)
+    return hosts
+
+
+def _extract_declared_hosts(trace: InteractionTrace) -> set[str]:
+    """Hosts the server itself put on the wire: serverInfo and tool defs."""
+    declared: set[str] = set()
+    for actor in trace.actors:
+        si = actor.metadata.get("server_info")
+        if isinstance(si, dict):
+            _extract_hosts_from_value(si, declared)
+        for tool in actor.metadata.get("tools") or []:
+            if isinstance(tool, dict):
+                _extract_hosts_from_value(tool.get("description", ""), declared)
+                _extract_hosts_from_value(tool.get("inputSchema", {}), declared)
+    return declared
+
+
+def _is_trusted_host(hostname: str) -> bool:
+    if hostname in TRUSTED_HOSTS:
+        return True
+    return any(hostname == d or hostname.endswith("." + d)
+               for d in TRUSTED_DOMAINS)
+
+
+def data_exfiltration(trace: InteractionTrace) -> list[Annotation]:
+    """PII/credentials in tool-call arguments, sensitive egress to
+    undeclared or merely-trusted hosts, and secrets leaked back in tool
+    results. Severity: 3 hostile, 2 should-not-happen, 1 worth a look."""
+    out: list[Annotation] = []
+    declared = _extract_declared_hosts(trace)
+
+    for e in trace.events:
+        if e.kind == EventKind.TOOL_CALL:
+            for name, args in _tool_call_parts(e):
+                blob = json.dumps(args, ensure_ascii=False, default=str)
+                hits = _scan_pii(blob)
+                for pat, value in hits:
+                    out.append(_ann(
+                        e, AnnotationKind.DIVERGENCE, f"pii_{pat.category}",
+                        f"tools/call '{name}' argument contains {pat.description}: "
+                        f"{_redact(value, pat.category)}",
+                        severity=pat.severity,
+                        category=HallucinationCategory.TOOL_USE,
+                        pii_category=pat.category))
+
+                has_pii = any(p.severity >= 2 for p, _ in hits)
+                for host in _extract_hosts_from_args(args):
+                    if host in declared:
+                        continue
+                    trusted = _is_trusted_host(host)
+                    if trusted and not has_pii:
+                        continue            # ordinary cloud traffic, no secret
+                    severity = 3 if (has_pii and not trusted) else 2
+                    out.append(_ann(
+                        e, AnnotationKind.ANOMALY, "unexpected_egress_host",
+                        f"tools/call '{name}' reaches {host}"
+                        + (" (allowlisted)" if trusted else " (undeclared)")
+                        + (" CARRYING SENSITIVE DATA" if has_pii else ""),
+                        severity=severity,
+                        host=host, has_pii=has_pii, trusted=trusted))
+
+        elif e.kind == EventKind.TOOL_RESULT:
+            blob = json.dumps([p.content for p in e.parts],
+                              ensure_ascii=False, default=str)
+            for pat, _ in _scan_pii(blob):
+                if pat.severity < 3:
+                    continue
+                out.append(_ann(
+                    e, AnnotationKind.DIVERGENCE, f"pii_in_result_{pat.category}",
+                    f"tool result leaks {pat.description}",
+                    severity=3, category=HallucinationCategory.TOOL_USE,
+                    pii_category=pat.category))
+    return out
+
+
+DETECTORS = [fabricated_calls, context_violations, gate_actions,
+             data_exfiltration]
 
 
 def annotate(trace: InteractionTrace) -> list[Annotation]:

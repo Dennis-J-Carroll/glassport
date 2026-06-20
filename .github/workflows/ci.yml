@@ -32,3 +32,38 @@ jobs:
 
       - name: Static audit smoke test (fake server is misbehaving by design)
         run: glassport audit examples/fake_server.py || true
+
+  # End-to-end SARIF path: static audit -> SARIF 2.1.0 -> GitHub Security
+  # tab. Result locations are repo-root-relative (the audited path is
+  # passed as the SARIF base), so findings annotate the diff. Consumers
+  # point AUDIT_TARGET at their MCP server directory; this repo dogfoods
+  # its own package source (clean of false positives thanks to the
+  # `# glassport: ignore[...]` markers in the rule catalog).
+  security-scan:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    env:
+      AUDIT_TARGET: src
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install package
+        run: pip install .
+
+      - name: Static audit -> SARIF
+        # never let a non-zero audit exit (high/critical findings) skip the
+        # upload; the Security tab is exactly where those should surface
+        run: glassport audit "$AUDIT_TARGET" --sarif > glassport.sarif.json || true
+
+      - name: Upload SARIF to GitHub Security
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: glassport.sarif.json
+          category: glassport-audit

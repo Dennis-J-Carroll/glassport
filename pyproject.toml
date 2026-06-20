@@ -47,3 +47,8 @@ glassport = "glassport.tap:cli"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.pyright]
+# src-layout: tell the analyzer where the package lives so it resolves
+# `glassport.*` without depending on an editable install's .pth file.
+extraPaths = ["src"]
