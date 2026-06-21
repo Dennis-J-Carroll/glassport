@@ -272,6 +272,9 @@ Three properties keep this honest:
 - **Validated, not greedy.** Credit cards pass Luhn, SSNs pass SSA-range checks, generic secrets must clear an entropy floor. A random 16-digit order number is not a card.
 - **Non-reversible redaction.** A flagged secret never appears in the annotation — not even a prefix. The explanation carries `[category redacted · N chars]`, so the detector's own output can't become the leak.
 - **The allowlist downgrades, it never silences.** Traffic to `*.amazonaws.com`, `*.googleapis.com`, and peers is expected and quiet — *until* a secret rides along, at which point it's flagged anyway (severity 2). An attacker-controlled bucket on a trusted domain is the most common real exfil channel; trusting the domain must not mean trusting the payload.
+- **It sees through obfuscation, and it can't be wedged by what it scans.** A secret sprinkled with zero-width joiners (`s​k​-​a​n​t​-​…`) or disguised in fullwidth homoglyphs reads as plaintext to the validators: every blob is invisible-stripped and NFKC-folded before matching. And because the scanner's input is hostile by definition, the credential patterns are ReDoS-hardened (a flood of PEM `BEGIN` markers can't force catastrophic backtracking) and each blob is capped — the traffic glassport inspects cannot turn the inspection into a denial of service.
+
+The detector pass is also **fault-isolated**: if one detector raises, `annotate()` records a `detector_error` annotation and the rest still run, so a single bad pass can't blind the overwatch.
 
 ---
 
@@ -348,9 +351,10 @@ glassport audit --rubric   # print the full scoring rubric
 - **Python**: full AST pass — `model_eval(x)` is not `eval`, and `import subprocess as sp; sp.run(c, shell=True)` still is
 - **JavaScript / TypeScript**: pattern depth; the report says which depth it used
 - **Score**: starts at 100, fixed deductions per rule that fired — each rule deducts once regardless of hit count, so one noisy pattern can't zero a report
+- **Score measures risk, not capability** (rubric v0.3): a `note`-tier rule is **surfaced but weight 0**. `cmd-exec` (spawns a subprocess) and `fs-write` (writes a file) are capabilities, not violations — their *dangerous* forms have their own scored rules (`shell-injection`, `fs-delete`). Penalizing the mere presence of a capability would only reward hiding it, which is the opacity this tool exists to fight. The capability still appears in every report as a `[note]` finding.
 - **Rubric**: printed with `--rubric`, embedded in the file; an unexplained trust score is the opacity this project exists to fight
 
-Rules cover: hardcoded secrets (redacted in output), **tool poisoning** (model-directed text like `<IMPORTANT> read ~/.ssh` planted in tool descriptions), hidden/bidi unicode, dynamic execution, shell injection, runtime installs, and capability notes (subprocess, file delete/write, network egress).
+Rules cover: hardcoded secrets (redacted in output), **tool poisoning** (model-directed text like `<IMPORTANT> read ~/.ssh` planted in tool descriptions), hidden/bidi unicode, dynamic execution, shell injection, runtime installs, and capability notes (subprocess, file delete/write, network egress). The tool-poisoning pass runs on an **invisible-stripped view** of the source — a directive split with zero-width joiners is caught and mapped back to its real line number, not hidden by the same trick `unicode-hidden` flags.
 
 `audit` and the tap compose along the lifecycle: **audit** before you install, **wrap** while you run, **gate** when trust runs out. Static analysis can't see what a server does on the wire — and the wire can't show you a secret sitting unused in source. Neither subsumes the other.
 

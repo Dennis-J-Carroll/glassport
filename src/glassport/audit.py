@@ -31,19 +31,28 @@ from __future__ import annotations
 
 import ast
 import json
+import os
 import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-RUBRIC_VERSION = "0.2"          # v0.1 was the FastMCP prototype
+RUBRIC_VERSION = "0.3"          # v0.3: capability-note tier (0 weight)
 MAX_FILE_BYTES = 1_000_000
 
 SOURCE_EXTS = {".py", ".js", ".ts", ".mjs", ".cjs"}
 SKIP_DIRS = {"node_modules", ".git", "__pycache__", "venv", ".venv",
              "dist", "build", ".tox", ".mypy_cache", ".pytest_cache"}
 
-WEIGHTS = {"critical": 25, "high": 15, "medium": 8, "low": 3, "info": 0}
+# "note" is a zero-weight tier for capability findings that the rules
+# themselves call non-violations: they are surfaced in the report but do
+# not deduct, because the *dangerous* form of each has its own scored
+# rule (cmd-exec ↔ shell-injection, fs-write ↔ fs-delete). Scoring the
+# mere presence of a capability would penalize honest declaration and
+# reward hiding it — the opacity this tool exists to fight. "info" stays
+# distinct: provenance notes (no-license), not capabilities.
+WEIGHTS = {"critical": 25, "high": 15, "medium": 8, "low": 3,
+           "note": 0, "info": 0}
 GRADES = [(90, "A"), (80, "B"), (70, "C"), (60, "D")]
 
 
@@ -93,10 +102,12 @@ RULES = [
          "serves at launch time, bypassing install review and pinning.",
          "Pin a version and install ahead of time; run the binary "
          "directly."),
-    Rule("cmd-exec", "medium", "permissions",
+    Rule("cmd-exec", "note", "permissions",
          "Spawns subprocesses",
          "Not a violation — a capability. Verify the server's declared "
-         "purpose actually needs to run other programs.",
+         "purpose actually needs to run other programs. The dangerous "
+         "form (shell=True / os.system) is scored separately as "
+         "shell-injection.",
          "If the capability isn't needed, remove it; least privilege."),
     Rule("fs-delete", "medium", "permissions",
          "Deletes files or directory trees",
@@ -108,9 +119,10 @@ RULES = [
          "Every direct dependency is a supply-chain trust decision; "
          "more than ~20 deserves an audit, more than ~50 a reason.",
          "Run npm audit / pip-audit and prune what isn't used."),
-    Rule("fs-write", "low", "permissions",
+    Rule("fs-write", "note", "permissions",
          "Writes files",
-         "Capability note only.",
+         "Capability note only. The dangerous form (deleting files / "
+         "trees) is scored separately as fs-delete.",
          "Confine writes to a declared workspace directory."),
     Rule("net-egress", "low", "permissions",
          "Talks to the network",
@@ -185,6 +197,24 @@ HIDDEN_UNICODE = re.compile(
     "[\\u200b-\\u200f\\u2060-\\u2064\\u202a-\\u202e\\u2066-\\u2069\\ufeff]")
 
 NPX_AUTO_INSTALL = re.compile(r"\bnpx\s+(-y|--yes)\b")
+
+
+def _strip_invisible(text: str) -> tuple[str, list[int]]:
+    """Return (text without invisible/bidi chars, index_map) where
+    index_map[i] is the position of stripped char i in the original.
+
+    A poisoning directive with a zero-width joiner between every letter
+    matches no raw pattern, yet a model reads it whole. We scan the
+    stripped view but map matches back so the reported line is exact.
+    Deletion-only, so the map is a clean one-to-one."""
+    kept: list[str] = []
+    index_map: list[int] = []
+    for i, ch in enumerate(text):
+        if HIDDEN_UNICODE.match(ch):
+            continue
+        kept.append(ch)
+        index_map.append(i)
+    return "".join(kept), index_map
 
 # JavaScript/TypeScript — pattern depth only, and the report says so
 JS_PATTERNS = [
@@ -313,10 +343,22 @@ def _scan_common(text: str, rel: str) -> list[dict]:
             hits.append({"rule": "secret-hardcoded", "path": rel,
                          "line": _line_of(text, m.start()),
                          "detail": f"{label}: '{secret[:4]}…(redacted)'"})
+    # poison patterns run on the invisible-stripped view (so a directive
+    # split with zero-width chars is caught), then positions map back to
+    # the original text for an exact line number
+    stripped, index_map = _strip_invisible(text)
+    seen_poison: set[tuple[int, str]] = set()
     for rx in POISON_PATTERNS:
-        for m in rx.finditer(text):
+        for m in rx.finditer(stripped):
+            orig_start = index_map[m.start()] if m.start() < len(index_map) \
+                else len(text)
+            line = _line_of(text, orig_start)
+            key = (line, m.group(0))
+            if key in seen_poison:
+                continue
+            seen_poison.add(key)
             hits.append({"rule": "tool-poisoning", "path": rel,
-                         "line": _line_of(text, m.start()),
+                         "line": line,
                          "detail": f"directive text: {m.group(0)[:60]!r}"})
     m = HIDDEN_UNICODE.search(text)
     if m:
@@ -375,16 +417,20 @@ def _scan_package_json(text: str, rel: str) -> tuple[list[dict], dict]:
 
 
 def _iter_source_files(root: Path):
+    """Yield source files lazily. os.walk with in-place pruning of
+    SKIP_DIRS means vendored trees (node_modules, .git) are never
+    descended into — the old sorted(rglob("*")) walked them in full and
+    then discarded the results. Order is deterministic (sorted per
+    directory) so the report is stable run to run."""
     if root.is_file():
         yield root
         return
-    for p in sorted(root.rglob("*")):
-        if not p.is_file():
-            continue
-        if any(part in SKIP_DIRS for part in p.parts):
-            continue
-        if p.suffix in SOURCE_EXTS or p.name == "package.json":
-            yield p
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = sorted(d for d in dirnames if d not in SKIP_DIRS)
+        base = Path(dirpath)
+        for name in sorted(filenames):
+            if Path(name).suffix in SOURCE_EXTS or name == "package.json":
+                yield base / name
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -462,7 +508,8 @@ def audit_path(path: str | Path) -> Report:
                 severity=h.get("severity", rule.severity),
                 path=h["path"], line=h["line"], detail=h["detail"],
                 fix=rule.fix)
-    order = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
+    order = {"critical": 0, "high": 1, "medium": 2, "low": 3,
+             "note": 4, "info": 5}
     findings = sorted(grouped.values(),
                       key=lambda f: (order[f.severity], f.rule, f.path))
 

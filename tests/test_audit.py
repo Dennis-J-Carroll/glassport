@@ -94,7 +94,7 @@ class TestPythonAst(unittest.TestCase):
                       "subprocess.run(['ls', '-l'])\n")
         self.assertNotIn("shell-injection", rule_ids(r))
         f = next(f for f in r.findings if f.rule == "cmd-exec")
-        self.assertEqual(f.severity, "medium")
+        self.assertEqual(f.severity, "note")     # capability, not a deduction
 
     def test_os_system_is_shell_injection(self):
         r = audit_src("import os\nos.system(user_cmd)\n")
@@ -191,8 +191,9 @@ class TestScoring(unittest.TestCase):
 
     def test_one_high_finding_deducts_15(self):
         r = audit_src("import subprocess\nsubprocess.run(c, shell=True)\n")
-        # shell-injection (high, -15) and cmd-exec capability (medium, -8)
-        self.assertEqual(r.score, 100 - 15 - 8)
+        # shell-injection (high, -15); cmd-exec is a capability note (0),
+        # surfaced but unscored — the dangerous variant carries the weight
+        self.assertEqual(r.score, 100 - 15)
 
     def test_rule_deducts_once_no_matter_how_often_it_fires(self):
         many = "\n".join(f"shutil.rmtree(p{i})" for i in range(30))
@@ -218,9 +219,40 @@ class TestScoring(unittest.TestCase):
     def test_every_deduction_names_its_rule(self):
         r = audit_src("import subprocess\nsubprocess.run(c, shell=True)\n")
         deducted = {d["rule"] for d in r.deductions}
-        self.assertEqual(deducted, {"shell-injection", "cmd-exec"})
+        self.assertEqual(deducted, {"shell-injection"})   # cmd-exec is a note
         self.assertEqual(100 - sum(d["points"] for d in r.deductions),
                          r.score)
+
+
+class TestCapabilityNotes(unittest.TestCase):
+    """Capability-note tier (rubric v0.3): a rule whose own text calls
+    itself 'not a violation' is surfaced but weight 0, because its
+    dangerous variant has a separate scored rule. Score measures risk,
+    not the mere presence of a capability."""
+
+    def test_cmd_exec_is_a_zero_weight_note(self):
+        r = audit_src("import subprocess\nsubprocess.run(['ls'])\n")
+        f = next(f for f in r.findings if f.rule == "cmd-exec")
+        self.assertEqual(f.severity, "note")
+        self.assertEqual(r.score, 100)
+        self.assertNotIn("cmd-exec", {d["rule"] for d in r.deductions})
+
+    def test_fs_write_is_a_zero_weight_note(self):
+        r = audit_src("f = open('out.log', 'a')\n")
+        f = next(f for f in r.findings if f.rule == "fs-write")
+        self.assertEqual(f.severity, "note")
+        self.assertEqual(r.score, 100)
+
+    def test_reform_does_not_blunt_the_risk_rules(self):
+        # shell-injection (the dangerous subprocess variant) still scores;
+        # fs-delete (the dangerous filesystem variant) still scores
+        shell = audit_src("import subprocess\nsubprocess.run(c, shell=True)\n")
+        self.assertIn("shell-injection", {d["rule"] for d in shell.deductions})
+        rm = audit_src("import shutil\nshutil.rmtree(p)\n")
+        self.assertIn("fs-delete", {d["rule"] for d in rm.deductions})
+
+    def test_note_tier_has_zero_weight(self):
+        self.assertEqual(audit.WEIGHTS["note"], 0)
 
 
 class TestOutput(unittest.TestCase):

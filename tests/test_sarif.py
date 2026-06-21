@@ -32,6 +32,9 @@ class TestSeverityVocab(unittest.TestCase):
         self.assertEqual(sarif._sarif_level(2), "warning")
         self.assertEqual(sarif._sarif_level(1), "note")
 
+    def test_capability_note_tier_maps_to_sarif_note(self):
+        self.assertEqual(sarif._sarif_level("note"), "note")
+
 
 class TestSarifStructure(unittest.TestCase):
     def doc(self, findings, **kw):

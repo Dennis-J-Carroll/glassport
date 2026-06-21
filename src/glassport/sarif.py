@@ -30,7 +30,7 @@ _INFO_URI = "https://github.com/Dennis-J-Carroll/glassport"
 
 # string (audit) and int (detector) severities collapse to one scale
 _STR_LEVEL = {"critical": "error", "high": "error", "medium": "warning",
-              "low": "note", "info": "note"}
+              "low": "note", "note": "note", "info": "note"}
 _INT_LEVEL = {3: "error", 2: "warning", 1: "note"}
 
 

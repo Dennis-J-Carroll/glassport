@@ -23,6 +23,7 @@ from __future__ import annotations
 import json
 import math
 import re
+import unicodedata
 from typing import Any, Iterator, NamedTuple, Optional, Callable
 
 from glassport.interaction_trace import (
@@ -32,6 +33,11 @@ from glassport.interaction_trace import (
 )
 
 ANNOTATOR = "glassport.detectors"
+
+# Hard cap on the bytes any single blob is scanned for PII. Wire payloads
+# are small; a multi-megabyte tool result is either a mistake or an attempt
+# to make the scanner the bottleneck. Matches audit.MAX_FILE_BYTES.
+MAX_SCAN_BYTES = 1_000_000
 
 # Server-initiated requests and the client capability that must have been
 # granted in the initialize handshake for the server to send them.
@@ -336,13 +342,19 @@ class PIIPattern(NamedTuple):
 # Ordered most-specific first. Validators (defined ABOVE this list so the
 # module imports cleanly) cull false positives.
 PII_PATTERNS: list[PIIPattern] = [
+    # ReDoS-hardened PEM matchers. The body is [^-]{20,8000}?, not
+    # [\s\S]{20,}?: a PEM body is base64 (never a hyphen), so excluding '-'
+    # means the body can't swallow a BEGIN/END marker. A flood of BEGIN
+    # markers with no END therefore fails in O(1) per start position
+    # instead of backtracking to EOF — and 8000 still holds an RSA-4096
+    # key (≈3.2KB). _scan_pii also caps total input as a second guard.
     PIIPattern("rsa_private_key", 3, re.compile(
         r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----"
-        r"[\s\S]{20,}?"
+        r"[^-]{20,8000}?"
         r"-----END (?:RSA |EC |OPENSSH )?PRIVATE KEY-----"),
         None, "RSA/EC/SSH private key (PEM block)"),
     PIIPattern("pgp_private_key", 3, re.compile(
-        r"-----BEGIN PGP PRIVATE KEY BLOCK-----[\s\S]{20,}?"
+        r"-----BEGIN PGP PRIVATE KEY BLOCK-----[^-]{20,8000}?"
         r"-----END PGP PRIVATE KEY BLOCK-----"),
         None, "PGP private key block"),
     PIIPattern("anthropic_key", 3,
@@ -404,13 +416,38 @@ _URL_RE = re.compile(r"(?:https?|wss?)://([A-Za-z0-9.\-]+)(?::\d+)?", re.I)
 _BARE_DOMAIN_RE = re.compile(r"^[a-z0-9.\-]+\.[a-z]{2,}$")
 
 
+# Zero-width and bidi controls an attacker can sprinkle between the
+# characters of a secret to break a raw-byte match while leaving the
+# value intact for a downstream model/parser. Same set the audit flags
+# as unicode-hidden; here we strip them so the scan sees through them.
+_INVISIBLE_RE = re.compile(
+    "[\\u200b-\\u200f\\u2060-\\u2064\\u202a-\\u202e\\u2066-\\u2069\\ufeff]")
+
+
+def _normalize_for_scan(text: str) -> str:
+    """Defeat obfuscation before pattern-matching: drop invisible/bidi
+    characters, then NFKC-fold homoglyphs (fullwidth, etc.) to their
+    canonical ascii. A secret split with zero-width joiners or disguised
+    in fullwidth Latin reads as plaintext to the validators."""
+    stripped = _INVISIBLE_RE.sub("", text)
+    return unicodedata.normalize("NFKC", stripped)
+
+
 def _redact(value: str, category: str) -> str:
     """Non-reversible tag — never returns plaintext (not even a prefix)."""
     return f"[{category} redacted · {len(value)} chars]"
 
 
 def _scan_pii(text: str) -> list[tuple[PIIPattern, str]]:
-    """Validated, de-duplicated PII hits in one serialized blob."""
+    """Validated, de-duplicated PII hits in one serialized blob.
+
+    The blob is normalized first (invisible chars stripped, homoglyphs
+    NFKC-folded) so obfuscated secrets can't slip past the patterns, and
+    capped at MAX_SCAN_BYTES so a multi-megabyte tool payload can't turn
+    the scan itself into a denial of service."""
+    if len(text) > MAX_SCAN_BYTES:
+        text = text[:MAX_SCAN_BYTES]
+    text = _normalize_for_scan(text)
     hits: list[tuple[PIIPattern, str]] = []
     seen: set[tuple[str, str]] = set()
     for pat in PII_PATTERNS:
@@ -526,10 +563,33 @@ DETECTORS = [fabricated_calls, context_violations, gate_actions,
              data_exfiltration]
 
 
+def _detector_error(detector_name: str, exc: BaseException) -> Annotation:
+    """A detector crash is itself a signal — record it as an annotation
+    rather than letting it abort the whole pass. Not tied to any one
+    event (event_id=""): it's a fact about the analysis, not the trace."""
+    return Annotation(
+        id=_new_id("ann"), event_id="", kind=AnnotationKind.ANOMALY,
+        subcategory="detector_error", severity=2,
+        explanation=f"detector {detector_name!r} raised "
+                    f"{type(exc).__name__}: {exc}",
+        annotator=ANNOTATOR,
+        metadata={"detector": detector_name,
+                  "error_type": type(exc).__name__},
+    )
+
+
 def annotate(trace: InteractionTrace) -> list[Annotation]:
-    """Run every detector and attach the results to the trace."""
+    """Run every detector and attach the results to the trace.
+
+    Each detector is isolated: if one raises, its failure is captured as
+    a 'detector_error' annotation and the remaining detectors still run,
+    so a single bad pass can't blind the whole overwatch."""
     found: list[Annotation] = []
     for detector in DETECTORS:
-        found.extend(detector(trace))
+        try:
+            found.extend(detector(trace))
+        except Exception as exc:                    # noqa: BLE001 — by design
+            found.append(_detector_error(
+                getattr(detector, "__name__", repr(detector)), exc))
     trace.annotations.extend(found)
     return found
