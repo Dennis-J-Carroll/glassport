@@ -36,6 +36,7 @@ See what an MCP server <em>actually does</em>, not just what it declares.
 - [Behavioral drift](#behavioral-drift)
 - [The gate](#the-gate)
 - [Static audit](#static-audit)
+- [Query the history](#query-the-history)
 - [From log to InteractionTrace](#from-log-to-interactiontrace)
 - [Known boundaries](#known-boundaries)
 - [How this differs from MCP gateways](#how-this-differs-from-mcp-gateways)
@@ -101,6 +102,7 @@ The tap and the analysis are **separate by design**. The tap is dumb and fast �
 | `gate` | Active enforcement: blocks `tools/call` outside the declared surface, opt-in | ✅ Built |
 | `audit.py` | Static pre-deployment source audit; scored against a published rubric, no execution, no network | ✅ Built |
 | `tui` | Live curses session inspector: picker, timeline, findings feed, frame overlay | ✅ Built |
+| `serve` | Glassport itself as a queryable MCP server: the agent interrogates its own session history over stdio | ✅ Built |
 
 If it's not marked Built, it doesn't run yet.
 
@@ -199,6 +201,15 @@ score:    9/100 (F)
 $ glassport tui          # session picker → live dashboard
 $ glassport tui ~/.glassport/sessions/<file>.jsonl
 ```
+
+### 7. Let the agent query its own history
+
+```bash
+$ glassport serve        # MCP server on stdio; speaks to your agent
+[glassport] serve: MCP audit server on stdio; log dir: ~/.glassport/sessions
+```
+
+Register it in your MCP client (see [Query the history](#query-the-history)) and the agent gets five read-only tools over the same logs — `list_sessions`, `analyze_session`, `audit_server`, `get_gate_status`, `watch_drift`. Glassport watches the servers; the agent watches Glassport.
 
 ---
 
@@ -382,6 +393,36 @@ sp.run(cmd, shell=True)        # glassport: ignore[shell-injection]
 
 ---
 
+## Query the history
+
+The same logs the tap writes can be read back *by the agent itself*. `glassport serve` exposes Glassport as an MCP server over stdio — add it alongside the servers you're watching, and the agent can interrogate its own session history mid-conversation:
+
+```json
+{
+  "mcpServers": {
+    "glassport": { "command": "glassport", "args": ["serve"] },
+    "filesystem": {
+      "command": "glassport",
+      "args": ["gate", "--", "npx", "@modelcontextprotocol/server-filesystem", "/tmp"]
+    }
+  }
+}
+```
+
+Five read-only tools, every one backed by a `.jsonl` on disk:
+
+| Tool | What it returns |
+|---|---|
+| `list_sessions` | recent session logs, newest first |
+| `analyze_session` | declared vs. called vs. fabricated tools + every detector annotation |
+| `audit_server` | the static AST audit on a server source path (reads, never runs) |
+| `get_gate_status` | the calls the gate blocked in a session |
+| `watch_drift` | behavioral drift across all sessions, grouped by server |
+
+Recursive in the right way: Glassport watches the servers, and the agent watches Glassport's findings. Same zero-dependency stdio path as the tap — newline-delimited JSON-RPC, stdlib `json`. A tool failure comes back as an MCP result with `isError`, not a protocol error, so the agent sees it as content it can reason about.
+
+---
+
 ## From log to InteractionTrace
 
 `adapters/mcp_session.py` converts a tap log into an `InteractionTrace` — the protocol-spanning schema used by the Understanding Layer for visualization and hallucination attribution:
@@ -459,6 +500,7 @@ glassport/
 │   ├── watch.py              # M4: behavioral drift
 │   ├── audit.py              # static source audit (+ --sarif, suppression)
 │   ├── sarif.py              # SARIF 2.1.0 export for code scanning
+│   ├── server.py             # glassport as a queryable MCP server (`serve`)
 │   ├── tui.py                # live curses session inspector
 │   └── adapters/
 │       └── mcp_session.py    # tap log → InteractionTrace
