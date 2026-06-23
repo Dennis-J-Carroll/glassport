@@ -375,6 +375,8 @@ Rules cover: hardcoded secrets (redacted in output), **tool poisoning** (model-d
 
 The shipped GitHub Actions workflow (`.github/workflows/ci.yml`) runs `audit --sarif` and uploads to the Security tab; point `AUDIT_TARGET` at your server directory. The upload runs even when the audit exits non-zero — a high or critical finding is exactly what the Security tab is for.
 
+The *runtime* side has a SARIF path too: `glassport summarize <session>.jsonl --sarif` emits a SARIF 2.1.0 document over the **detector annotations** of a session — fabricated calls, data exfiltration, drift, gate actions. Unlike the audit (which locates into repo source), these results locate into the session `.jsonl` itself (`region.startLine` is the wire event's line in the log), since a behavioral finding's evidence lives on the wire, not in a source file. Same severity vocabulary; consume it as a generic SARIF artifact.
+
 ### Inline suppression
 
 A finding can be waived **on the line that produced it**, in source, where the diff records it:
