@@ -1,7 +1,7 @@
 # glassport — project status
 
 Living snapshot of what's built, what's built-but-unshipped, and what's next.
-Update when a tier changes. Last updated: 2026-06-23 (0.2.0 published; runtime-annotation SARIF landed).
+Update when a tier changes. Last updated: 2026-06-23 (0.3.0 published — runtime SARIF released).
 
 ## Tier 1 — Built, tested, in the repo
 
@@ -23,13 +23,9 @@ Source is the truth; this is the index.
 
 ## Tier 2 — Built but NOT shipped to PyPI
 
-**`pip install glassport` serves 0.2.0** (published 2026-06-23) — `serve`, SARIF
-export, rubric v0.3, scanner hardening, and `data_exfiltration` all shipped in it.
-
-Merged to `main` since, awaiting the next release cut (see `RELEASING.md`):
-
-- **Runtime-annotation SARIF** (`summarize --sarif`) — detector annotations →
-  SARIF 2.1.0 located into the session `.jsonl`. PRs #8/#10.
+**Empty — `pip install glassport` serves 0.3.0** (published 2026-06-23 via
+tag-triggered trusted publishing). Everything in Tier 1 is released, including
+**runtime-annotation SARIF** (`summarize --sarif`, shipped in 0.3.0).
 
 ## Tier 3 — Roadmap (not built)
 
@@ -52,9 +48,6 @@ Roughly in dependency order — earlier unlocks later.
 
 ## Next action
 
-Two open choices:
-
-1. **Cut 0.3.0** to publish runtime-annotation SARIF (bump 0.2.0 → 0.3.0, see
-   `RELEASING.md`) — closes the Tier-2 gap.
-2. **Start a Tier-3 item** — recommended next: **#1 GitLab CI + pre-commit
-   templates** (small, distribution-only).
+Repo and PyPI are in sync at **0.3.0** — no release gap. Pick a Tier-3 item;
+recommended next: **#1 GitLab CI + pre-commit templates** (small,
+distribution-only).
