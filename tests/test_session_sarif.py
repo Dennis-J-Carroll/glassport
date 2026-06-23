@@ -6,12 +6,14 @@ Per project doctrine these drive the REAL adapter: a tap log is written
 to a temp file, lifted through from_mcp_session_file(), annotated, and
 rendered — never a hand-built trace.
 """
+import contextlib
+import io
 import json
 import os
 import tempfile
 import unittest
 
-from glassport import sarif
+from glassport import sarif, tap
 from glassport.adapters.mcp_session import from_mcp_session_file
 from glassport.detectors import annotate
 
@@ -121,3 +123,22 @@ class TestRenderSessionSarif(unittest.TestCase):
                 if r["ruleId"] == "glassport/gate_blocked"]
         self.assertTrue(gate, "gate_blocked INFO record must be emitted")
         self.assertEqual(gate[0]["level"], "note")
+
+
+class TestSummarizeSarifCLI(unittest.TestCase):
+    def test_summarize_sarif_prints_parseable_sarif(self):
+        lines = handshake([{"name": "web_search"}]) + [
+            L(6, "c2s", {"jsonrpc": "2.0", "id": 3, "method": "tools/call",
+                         "params": {"name": "shadow_tool", "arguments": {}}}),
+        ]
+        fd, path = tempfile.mkstemp(suffix=".jsonl")
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write("\n".join(lines) + "\n")
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = tap.main(["summarize", "--sarif", path])
+        self.assertEqual(rc, 0)
+        doc = json.loads(buf.getvalue())
+        self.assertEqual(doc["version"], "2.1.0")
+        self.assertTrue(any(r["ruleId"] == "glassport/fabricated_tool_call"
+                            for r in doc["runs"][0]["results"]))
