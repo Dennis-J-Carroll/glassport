@@ -43,6 +43,28 @@ def _sarif_level(severity: Union[str, int]) -> str:
     return _STR_LEVEL.get(str(severity).lower(), "warning")
 
 
+def _sarif_document(rules: list, results: list, props: dict | None = None) -> str:
+    """Wrap rules + results in the SARIF 2.1.0 run envelope. Shared by the
+    static-audit and runtime-annotation renderers."""
+    doc = {
+        "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
+        "version": "2.1.0",
+        "runs": [{
+            "tool": {"driver": {
+                "name": "glassport",
+                "version": DRIVER_VERSION,
+                "semanticVersion": DRIVER_VERSION,
+                "informationUri": _INFO_URI,
+                "rules": rules,
+            }},
+            "results": results,
+            "columnKind": "utf16CodeUnits",
+            "properties": props or {},
+        }],
+    }
+    return json.dumps(doc, indent=2, ensure_ascii=False)
+
+
 def _rule_object(rule_id: str, severity: str) -> dict:
     """SARIF reportingDescriptor, enriched from the audit rule catalog."""
     meta = RULES_BY_ID.get(rule_id)
@@ -101,20 +123,5 @@ def render_sarif(report: Report, base: str = "") -> str:
             "properties": {"severity": f.severity, "count": f.count},
         })
 
-    doc = {
-        "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
-        "version": "2.1.0",
-        "runs": [{
-            "tool": {"driver": {
-                "name": "glassport",
-                "version": DRIVER_VERSION,
-                "semanticVersion": DRIVER_VERSION,
-                "informationUri": _INFO_URI,
-                "rules": list(rules.values()),
-            }},
-            "results": results,
-            "columnKind": "utf16CodeUnits",
-            "properties": {"score": report.score, "grade": report.grade},
-        }],
-    }
-    return json.dumps(doc, indent=2, ensure_ascii=False)
+    return _sarif_document(list(rules.values()), results,
+                           {"score": report.score, "grade": report.grade})
