@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import posixpath
+from pathlib import Path
 from typing import Union
 
 from glassport.audit import Report, RULES_BY_ID
@@ -41,6 +42,28 @@ def _sarif_level(severity: Union[str, int]) -> str:
     if isinstance(severity, int):
         return _INT_LEVEL.get(severity, "warning")
     return _STR_LEVEL.get(str(severity).lower(), "warning")
+
+
+def _sarif_document(rules: list, results: list, props: dict | None = None) -> str:
+    """Wrap rules + results in the SARIF 2.1.0 run envelope. Shared by the
+    static-audit and runtime-annotation renderers."""
+    doc = {
+        "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
+        "version": "2.1.0",
+        "runs": [{
+            "tool": {"driver": {
+                "name": "glassport",
+                "version": DRIVER_VERSION,
+                "semanticVersion": DRIVER_VERSION,
+                "informationUri": _INFO_URI,
+                "rules": rules,
+            }},
+            "results": results,
+            "columnKind": "utf16CodeUnits",
+            "properties": props or {},
+        }],
+    }
+    return json.dumps(doc, indent=2, ensure_ascii=False)
 
 
 def _rule_object(rule_id: str, severity: str) -> dict:
@@ -101,20 +124,93 @@ def render_sarif(report: Report, base: str = "") -> str:
             "properties": {"severity": f.severity, "count": f.count},
         })
 
-    doc = {
-        "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
-        "version": "2.1.0",
-        "runs": [{
-            "tool": {"driver": {
-                "name": "glassport",
-                "version": DRIVER_VERSION,
-                "semanticVersion": DRIVER_VERSION,
-                "informationUri": _INFO_URI,
-                "rules": list(rules.values()),
-            }},
-            "results": results,
-            "columnKind": "utf16CodeUnits",
-            "properties": {"score": report.score, "grade": report.grade},
-        }],
+    return _sarif_document(list(rules.values()), results,
+                           {"score": report.score, "grade": report.grade})
+
+
+# subcategory -> human short description; fallback humanizes the slug
+_RUNTIME_RULE_TEXT = {
+    "fabricated_tool_call": "Tool call outside the declared surface",
+    "capability_violation": "Server used a capability the client never granted",
+    "schema_violation": "Call arguments violate the declared inputSchema",
+    "unexpected_egress_host": "Tool call reached an undeclared host",
+    "gate_blocked": "Gate blocked a call outside the declared surface",
+    "gate_injected_response": "Gate synthesized the error reply",
+    "gate_skipped": "Gate forwarded a call (no surface declared yet)",
+    "detector_error": "A detector raised during analysis",
+}
+
+
+def _seq_to_line(session_path: str) -> dict:
+    """Map each log entry's `seq` to its 1-based line number in the file.
+    Empty/unreadable path -> {}. Lines without a seq are skipped."""
+    out: dict = {}
+    if not session_path:
+        return out
+    try:
+        with open(session_path, encoding="utf-8") as fh:
+            for lineno, raw in enumerate(fh, 1):
+                raw = raw.strip()
+                if not raw:
+                    continue
+                try:
+                    seq = json.loads(raw).get("seq")
+                except json.JSONDecodeError:
+                    continue
+                if seq is not None:
+                    out[seq] = lineno
+    except OSError:
+        pass
+    return out
+
+
+def _runtime_rule_object(ann) -> dict:
+    """SARIF reportingDescriptor for one annotation's subcategory."""
+    sub = ann.subcategory or "annotation"
+    short = _RUNTIME_RULE_TEXT.get(sub, sub.replace("_", " ").capitalize())
+    return {
+        "id": f"glassport/{sub}",
+        "name": sub,
+        "shortDescription": {"text": short},
+        "defaultConfiguration": {"level": _sarif_level(ann.severity)},
+        "properties": {"tags": ["glassport", "runtime", ann.kind.value]},
     }
-    return json.dumps(doc, indent=2, ensure_ascii=False)
+
+
+def render_session_sarif(trace, session_path: str = "") -> str:
+    """Render a session trace's detector annotations as SARIF 2.1.0 (JSON str).
+
+    Results are located into the session `.jsonl` itself: artifactLocation.uri
+    is `session_path`, region.startLine is the annotation's event's line in
+    that log. `seq` rides in partialFingerprints for stable identity."""
+    seq_line = _seq_to_line(session_path)
+    event_by_id = {e.id: e for e in trace.events}
+    rules: dict = {}
+    results: list = []
+
+    for a in trace.annotations:
+        rule_id = f"glassport/{a.subcategory or 'annotation'}"
+        if rule_id not in rules:
+            rules[rule_id] = _runtime_rule_object(a)
+        ev = event_by_id.get(a.event_id)
+        seq = ev.metadata.get("seq") if ev else None
+        line = seq_line.get(seq, 1)
+        results.append({
+            "ruleId": rule_id,
+            "level": _sarif_level(a.severity),
+            "message": {"text": a.explanation or a.subcategory or rule_id},
+            "locations": [{
+                "physicalLocation": {
+                    "artifactLocation": {"uri": session_path},
+                    "region": {"startLine": max(1, int(line))},
+                },
+            }],
+            "partialFingerprints": {
+                "glassportSeq": f"{a.subcategory}:{seq}"},
+            "properties": {"severity": a.severity, "kind": a.kind.value,
+                           "subcategory": a.subcategory},
+        })
+
+    props = {"session": Path(session_path).name if session_path else "",
+             "annotation_count": len(trace.annotations)}
+    return _sarif_document(list(rules.values()), results, props)

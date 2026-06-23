@@ -366,7 +366,7 @@ def run_tap(server_cmd: list[str], log_dir: Path,
 # InteractionTrace via adapters/mcp_session.py so this CLI and the
 # Understanding Layer read the wire through one code path.
 # ─────────────────────────────────────────────────────────────────
-def summarize(log_path: Path, as_json: bool = False) -> int:
+def summarize(log_path: Path, as_json: bool = False, as_sarif: bool = False) -> int:
     """
     Render the declared/called/fabricated delta for one session log.
 
@@ -384,6 +384,13 @@ def summarize(log_path: Path, as_json: bool = False) -> int:
     from glassport.interaction_trace import PartKind
 
     trace = from_mcp_session_file(log_path)
+
+    if as_sarif:
+        from glassport.detectors import annotate
+        from glassport.sarif import render_session_sarif
+        annotate(trace)            # mutates trace.annotations in place
+        print(render_session_sarif(trace, str(log_path)))
+        return 0
 
     seq_of = {e.id: e.metadata.get("seq", -1) for e in trace.events}
     # one event per parsed frame; raw wire lines carry the unparsed flag
@@ -485,7 +492,7 @@ glassport — passive MCP stdio proxy
                    (active: blocks tools/call outside the declared surface)
   audit:           glassport audit <path> [--json] | audit --rubric
                    (static, pre-deployment: reads source, never runs it)
-  summarize:       glassport summarize [--json] <session.jsonl>
+  summarize:       glassport summarize [--json|--sarif] <session.jsonl>
   detect:          glassport detect <session.jsonl>
                    (run all behavioral detectors; exit 1 if findings)
   report:          glassport report <session.jsonl> [-o out.html]
@@ -519,12 +526,13 @@ def main(argv: list[str]) -> int:
     if argv[0] == "summarize":
         args = argv[1:]
         as_json = "--json" in args
-        if as_json:
-            args.remove("--json")
+        as_sarif = "--sarif" in args
+        args = [a for a in args if not a.startswith("--")]
         if len(args) != 1:
-            print(USAGE)
+            print("usage: glassport summarize [--json|--sarif] <session.jsonl>",
+                  file=sys.stderr)
             return 2
-        return summarize(Path(args[0]), as_json=as_json)
+        return summarize(Path(args[0]), as_json=as_json, as_sarif=as_sarif)
 
     if argv[0] == "detect":
         if len(argv) != 2:
