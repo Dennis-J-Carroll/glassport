@@ -388,7 +388,7 @@ def summarize(log_path: Path, as_json: bool = False, as_sarif: bool = False) -> 
     if as_sarif:
         from glassport.detectors import annotate
         from glassport.sarif import render_session_sarif
-        trace.annotations.extend(annotate(trace))
+        annotate(trace)            # mutates trace.annotations in place
         print(render_session_sarif(trace, str(log_path)))
         return 0
 

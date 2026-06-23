@@ -61,7 +61,7 @@ def render_lines(lines):
     with os.fdopen(fd, "w", encoding="utf-8") as fh:
         fh.write("\n".join(lines) + "\n")
     trace = from_mcp_session_file(path)
-    trace.annotations.extend(annotate(trace))
+    annotate(trace)
     doc = json.loads(sarif.render_session_sarif(trace, path))
     return doc, path
 
@@ -123,6 +123,12 @@ class TestRenderSessionSarif(unittest.TestCase):
                 if r["ruleId"] == "glassport/gate_blocked"]
         self.assertTrue(gate, "gate_blocked INFO record must be emitted")
         self.assertEqual(gate[0]["level"], "note")
+
+    def test_no_duplicate_results(self):
+        doc, _ = self._fabricated()
+        fab = [r for r in doc["runs"][0]["results"]
+               if r["ruleId"] == "glassport/fabricated_tool_call"]
+        self.assertEqual(len(fab), 1)
 
 
 class TestSummarizeSarifCLI(unittest.TestCase):
