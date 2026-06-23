@@ -425,12 +425,19 @@ def _iter_source_files(root: Path):
     if root.is_file():
         yield root
         return
-    for dirpath, dirnames, filenames in os.walk(root):
+    # followlinks=False keeps os.walk from descending through a directory
+    # symlink that points outside the audited tree.
+    for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
         dirnames[:] = sorted(d for d in dirnames if d not in SKIP_DIRS)
         base = Path(dirpath)
         for name in sorted(filenames):
             if Path(name).suffix in SOURCE_EXTS or name == "package.json":
-                yield base / name
+                p = base / name
+                # never read through a file symlink — it could point at an
+                # arbitrary host file outside the root the caller asked for
+                if p.is_symlink():
+                    continue
+                yield p
 
 
 # ─────────────────────────────────────────────────────────────────
