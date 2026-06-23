@@ -113,6 +113,22 @@ def _text(payload) -> dict:
                                             ensure_ascii=False)}]}
 
 
+def _resolve_session_path(raw, log_dir: Path) -> Path:
+    """Resolve a session_path argument and confine it to log_dir.
+
+    The `serve` tools read session logs an MCP client names. Opening the
+    raw path would let a hostile client pass `/etc/passwd` or `../../.env`
+    and read arbitrary host files. Resolve the path and require it to live
+    inside the configured log directory; reject anything that escapes."""
+    if not raw:
+        raise ValueError("session_path is required")
+    p = Path(raw).resolve()
+    base = Path(log_dir).resolve()
+    if not p.is_relative_to(base):
+        raise ValueError(f"session_path escapes the log directory: {raw}")
+    return p
+
+
 def _call_tool(name: str, args: dict, log_dir: Path) -> dict:
     if name == "list_sessions":
         limit = args.get("limit", 10)
@@ -122,7 +138,7 @@ def _call_tool(name: str, args: dict, log_dir: Path) -> dict:
     if name == "analyze_session":
         from glassport.adapters.mcp_session import from_mcp_session_file
         from glassport.detectors import annotate
-        path = Path(args["session_path"])
+        path = _resolve_session_path(args.get("session_path"), log_dir)
         trace = from_mcp_session_file(path)
         anns = annotate(trace)
         seq_of = {e.id: e.metadata.get("seq") for e in trace.events}
@@ -147,7 +163,8 @@ def _call_tool(name: str, args: dict, log_dir: Path) -> dict:
 
     if name == "get_gate_status":
         blocked = []
-        with open(args["session_path"], encoding="utf-8") as fh:
+        with open(_resolve_session_path(args.get("session_path"), log_dir),
+                  encoding="utf-8") as fh:
             for raw in fh:
                 try:
                     entry = json.loads(raw)

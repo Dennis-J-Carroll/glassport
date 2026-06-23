@@ -394,7 +394,9 @@ PII_PATTERNS: list[PIIPattern] = [
         r"3[47][0-9]{13}|6(?:011|5[0-9]{2})[0-9]{12})(?!\d)"),
         _luhn_check, "credit card number (Luhn)"),
     PIIPattern("email_address", 1, re.compile(
-        r"([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,})"),
+        # bounded quantifiers — the unbounded `+@+` form catastrophically
+        # backtracks on long attacker-controlled strings with no '@' (ReDoS)
+        r"([A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9.-]{1,255}\.[A-Za-z]{2,})"),
         None, "email address"),
     PIIPattern("private_ip", 1, re.compile(
         r"(?<!\d)(10\.\d{1,3}\.\d{1,3}\.\d{1,3}|"

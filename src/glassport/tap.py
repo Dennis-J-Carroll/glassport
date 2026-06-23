@@ -296,7 +296,15 @@ def run_tap(server_cmd: list[str], log_dir: Path,
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     safe_name = "".join(c if c.isalnum() else "_" for c in server_cmd[0])[:32]
     log_path = log_dir / f"{stamp}_{safe_name}_{os.getpid()}.jsonl"
-    log = SessionLog(log_path)
+    # The relay is sacred: a logging failure must never alter, delay, or kill
+    # a live session. If the log dir is unwritable, disable logging and relay
+    # anyway — pump() already tolerates a None log.
+    try:
+        log = SessionLog(log_path)
+    except OSError as exc:
+        print(f"[glassport] logging disabled ({exc}); relay continues",
+              file=sys.stderr)
+        log = None
 
     # Announce on stderr only — stdout belongs to the protocol.
     print(f"[glassport] tapping: {shlex.join(server_cmd)}", file=sys.stderr)
@@ -353,11 +361,13 @@ def run_tap(server_cmd: list[str], log_dir: Path,
 
     rc = child.wait()
     time.sleep(0.1)  # let pumps drain their last lines
-    log.close()
+    if log is not None:
+        log.close()
+    log_note = str(log_path) if log is not None else "(logging disabled)"
     suffix = f"; blocked {gate.blocked_count} call(s)" \
         if gate is not None and gate.blocked_count else ""
     print(f"[glassport] session ended (exit {rc}){suffix}; "
-          f"log: {log_path}", file=sys.stderr)
+          f"log: {log_note}", file=sys.stderr)
     return rc
 
 
