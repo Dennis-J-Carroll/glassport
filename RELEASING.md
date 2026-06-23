@@ -25,20 +25,37 @@ Semver: new features (like `serve`, `sarif`) → minor bump. Bugfix only → pat
 
 - [ ] Land the code first — merge the release PR (#4) into `main` so `main` matches
       what ships. Tag after: `git tag v0.2.0 && git push --tags`.
-- [ ] Bump version in **both** files above (skip if already done).
-- [ ] Clean old artifacts: `rm -f dist/*`
-- [ ] Build: `python3 -m build` → fresh `dist/glassport-X.Y.Z*` (wheel + sdist)
-- [ ] Sanity-check the wheel before upload:
-  - `unzip -l dist/glassport-X.Y.Z-py3-none-any.whl` — confirms `server.py`,
-    `sarif.py`, `tap.py` are packed
-  - `unzip -p dist/glassport-X.Y.Z-py3-none-any.whl '*/METADATA' | grep ^Version:`
-  - `python3 -m twine check dist/glassport-X.Y.Z*` — validates the long-description
-    (PyPI renders `README.md`; `pyproject.toml` `readme = "README.md"`)
-- [ ] Upload (irreversible — a version number can never be reused on PyPI):
-  - `pip install twine` (once)
-  - `python3 -m twine upload dist/glassport-X.Y.Z*` — prompts for PyPI API token
-- [ ] Verify the release: `pip install -U glassport` in a clean venv, then
-      `glassport serve` (should print the MCP banner, not wrap-spawn another binary).
+- [ ] Bump version in **both** files above (skip if already done), commit, and
+      push to `main`. The bump MUST be on `main` before the tag — the release
+      workflow's build job fails if `tag != pyproject version`.
+
+### Primary path — tag-triggered trusted publishing (no token)
+
+`.github/workflows/release.yml` triggers on a `v*` tag: it runs the test matrix,
+builds, checks the tag matches `pyproject.toml`, and publishes to PyPI via
+**trusted publishing (OIDC)** — no API token, no local `twine`.
+
+- [ ] Push the tag (THIS is the irreversible publish step):
+  - `git tag vX.Y.Z && git push origin vX.Y.Z`
+- [ ] Watch the run: `gh run watch` (or the Actions tab). The `publish` job
+      uploads to PyPI on success.
+- [ ] Verify: `pip install -U glassport` in a clean venv, then `glassport serve`
+      (prints the MCP banner, not a wrap-spawn of another binary).
+
+> **Prerequisite:** PyPI must have a *trusted publisher* configured for this repo
+> (project → Publishing → add GitHub publisher: repo `Dennis-J-Carroll/glassport`,
+> workflow `release.yml`, environment `pypi`). If it isn't set up, the `publish`
+> job fails cleanly (nothing partial publishes) — use the fallback below.
+
+### Fallback — manual twine upload
+
+Only if trusted publishing isn't configured (how 0.2.0 shipped):
+
+- [ ] `rm -f dist/* && python3 -m build`
+- [ ] Sanity-check: `unzip -l dist/glassport-X.Y.Z-py3-none-any.whl` (server.py,
+      sarif.py, tap.py packed); `python3 -m twine check dist/glassport-X.Y.Z*`
+- [ ] `pip install twine && python3 -m twine upload dist/glassport-X.Y.Z*`
+      (prompts for PyPI API token; irreversible — a version can't be reused)
 
 ## Gotchas
 
