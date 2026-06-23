@@ -21,3 +21,14 @@ class TestPreCommitHook(unittest.TestCase):
         for token in ("id: glassport-audit", "entry: glassport audit",
                       "language: python", "pass_filenames: false"):
             self.assertIn(token, text)
+
+
+class TestGitlabTemplate(unittest.TestCase):
+    def test_template_exists(self):
+        self.assertTrue((ROOT / "examples" / "gitlab-ci.yml").is_file())
+
+    def test_template_has_load_bearing_tokens(self):
+        text = (ROOT / "examples" / "gitlab-ci.yml").read_text(encoding="utf-8")
+        for token in ("glassport audit", "--sarif", "allow_failure: true",
+                      "when: always", "set false to gate"):
+            self.assertIn(token, text)

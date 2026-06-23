@@ -1,0 +1,15 @@
+# glassport security audit for GitLab CI.
+# Copy to your repo root as .gitlab-ci.yml, or merge this job into your pipeline.
+glassport-audit:
+  image: python:3.12-slim
+  variables:
+    AUDIT_TARGET: "src"        # point at your MCP server source
+  before_script:
+    - pip install glassport
+  script:
+    - glassport audit "$AUDIT_TARGET" --sarif > glassport.sarif.json
+  allow_failure: true          # observe first — set false to gate the pipeline
+  artifacts:
+    when: always
+    paths: [glassport.sarif.json]
+    expire_in: 30 days
