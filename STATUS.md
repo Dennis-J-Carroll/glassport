@@ -31,23 +31,28 @@ tag-triggered trusted publishing). Everything in Tier 1 is released, including
 
 Roughly in dependency order — earlier unlocks later.
 
-1. **GitLab CI + pre-commit templates** *(small)* — packaging/distribution, no
-   core code change.
-2. **Plugin registry for custom PII patterns** *(medium)* — let users register
+1. **Plugin registry for custom PII patterns** *(medium)* — let users register
    their own detector patterns without forking.
-3. **Network-enriched audit** *(medium)* — opt-in npm/PyPI/GitHub provenance
+2. **Network-enriched audit** *(medium)* — opt-in npm/PyPI/GitHub provenance
    lookups; kept off the default path so the core audit stays offline/reproducible.
-4. **Streaming detector path** *(large, architectural)* — detectors currently
+3. **Streaming detector path** *(large, architectural)* — detectors currently
    consume a *full in-memory trace* (batch). Streaming means processing frames as
-   they arrive. This is the prerequisite for #5.
-5. **Remote streamable-HTTP interception** *(large)* — today glassport is
+   they arrive. This is the prerequisite for #4.
+4. **Remote streamable-HTTP interception** *(large)* — today glassport is
    stdio-only. Remote MCP servers use a different transport (HTTP + SSE) that needs
-   a different interception model. Depends on #4.
-6. **Agent↔Agent (A2A) trace coverage** *(large)* — extend beyond Agent↔Tool to
+   a different interception model. Depends on #3.
+5. **Agent↔Agent (A2A) trace coverage** *(large)* — extend beyond Agent↔Tool to
    agent-to-agent protocols.
+
+## Recently shipped
+
+- **GitLab CI + pre-commit templates** — `.pre-commit-hooks.yaml`,
+  `examples/gitlab-ci.yml`, README CI-integration section, and a CI job that
+  proves the hook fails on a tool-poisoning fixture. Zero `src/` change. On
+  branch `feat/gitlab-ci-precommit` (pending merge).
 
 ## Next action
 
-Repo and PyPI are in sync at **0.3.0** — no release gap. Pick a Tier-3 item;
-recommended next: **#1 GitLab CI + pre-commit templates** (small,
-distribution-only).
+Repo and PyPI in sync at **0.3.0**. After the GitLab/pre-commit branch merges,
+pick a Tier-3 item — recommended next: **#1 Plugin registry for custom PII
+patterns**.

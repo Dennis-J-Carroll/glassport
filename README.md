@@ -377,6 +377,29 @@ The shipped GitHub Actions workflow (`.github/workflows/ci.yml`) runs `audit --s
 
 The *runtime* side has a SARIF path too: `glassport summarize <session>.jsonl --sarif` emits a SARIF 2.1.0 document over the **detector annotations** of a session — fabricated calls, data exfiltration, drift, gate actions. Unlike the audit (which locates into repo source), these results locate into the session `.jsonl` itself (`region.startLine` is the wire event's line in the log), since a behavioral finding's evidence lives on the wire, not in a source file. Same severity vocabulary; consume it as a generic SARIF artifact.
 
+### CI integration
+
+glassport's static audit drops into any pipeline as a gate (exit 1 on
+critical/high) or a SARIF artifact.
+
+**GitHub Actions** — shipped in `.github/workflows/ci.yml` (`security-scan` job):
+`audit --sarif` → upload to the Security tab.
+
+**GitLab CI** — copy [`examples/gitlab-ci.yml`](examples/gitlab-ci.yml) to your
+repo root as `.gitlab-ci.yml`. It runs `audit --sarif`, saves the SARIF as a
+build artifact, and is non-blocking by default (`allow_failure: true`); set it
+to `false` to gate the pipeline.
+
+**pre-commit** — add glassport as a hook so a critical/high finding blocks the
+commit:
+
+    repos:
+      - repo: https://github.com/Dennis-J-Carroll/glassport
+        rev: v0.3.0
+        hooks:
+          - id: glassport-audit
+            args: ["path/to/server"]
+
 ### Inline suppression
 
 A finding can be waived **on the line that produced it**, in source, where the diff records it:

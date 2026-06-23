@@ -1,0 +1,8 @@
+- id: glassport-audit
+  name: glassport MCP security audit
+  description: Static audit of MCP server source; fails on critical/high findings.
+  entry: glassport audit
+  language: python
+  pass_filenames: false
+  types_or: [python, javascript, ts, tsx]
+  args: ["."]
