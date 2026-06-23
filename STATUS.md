@@ -23,9 +23,10 @@ Source is the truth; this is the index.
 
 ## Tier 2 — Built but NOT shipped to PyPI
 
-**Empty — `pip install glassport` serves 0.3.0** (published 2026-06-23 via
-tag-triggered trusted publishing). Everything in Tier 1 is released, including
-**runtime-annotation SARIF** (`summarize --sarif`, shipped in 0.3.0).
+**Empty — `pip install glassport` serves 0.4.0** (published 2026-06-23 via
+tag-triggered trusted publishing). Everything is released, including the 0.4.0
+additions: security hardening (ReDoS / symlink / path-traversal / log-dir
+fixes) and GitLab CI + pre-commit distribution templates.
 
 ## Tier 3 — Roadmap (not built)
 
@@ -46,13 +47,14 @@ Roughly in dependency order — earlier unlocks later.
 
 ## Recently shipped
 
-- **GitLab CI + pre-commit templates** — `.pre-commit-hooks.yaml`,
-  `examples/gitlab-ci.yml`, README CI-integration section, and a CI job that
-  proves the hook fails on a tool-poisoning fixture. Zero `src/` change. On
-  branch `feat/gitlab-ci-precommit` (pending merge).
+- **Security hardening** (0.4.0) — email-regex ReDoS, audit symlink traversal,
+  `serve` path traversal, unwritable-log-dir crash; adversarial tests in
+  `tests/test_comprehensive_security.py`. Credit: Kimi session.
+- **GitLab CI + pre-commit templates** (0.4.0) — `.pre-commit-hooks.yaml`,
+  `examples/gitlab-ci.yml`, README CI-integration section, CI integration job.
+  Zero `src/` change.
 
 ## Next action
 
-Repo and PyPI in sync at **0.3.0**. After the GitLab/pre-commit branch merges,
-pick a Tier-3 item — recommended next: **#1 Plugin registry for custom PII
-patterns**.
+Repo and PyPI in sync at **0.4.0**. Pick a Tier-3 item — recommended next:
+**#1 Plugin registry for custom PII patterns**.
