@@ -14,7 +14,7 @@ import unittest
 from pathlib import Path
 
 from glassport import tap
-from tests.test_detectors import handshake, call
+from tests.test_detectors import handshake, call, result, L
 
 
 def write_session(tmp: str, lines: list[str]) -> Path:
@@ -86,6 +86,55 @@ class TestSummarizeJson(unittest.TestCase):
     def test_usage_on_wrong_arity(self):
         rc, _ = run_main(["summarize", "--json"])
         self.assertEqual(rc, 2)
+
+
+class TestSummarizeErrorTaxonomy(unittest.TestCase):
+    """An MCP server can fail two distinct ways: a JSON-RPC protocol
+    error (the `error` member — malformed/unknown method) and a valid
+    tools/call result that carries isError=true (the tool ran, the
+    operation failed). summarize must not conflate them."""
+
+    def _session(self, tmp: str) -> Path:
+        return write_session(tmp, handshake() + [
+            # a normal tool call whose RESULT is a server-side failure
+            call(6, 3, "web_search", {"query": "x"}),
+            result(7, 3, {"content": [{"type": "text",
+                                       "text": "search backend unavailable"}],
+                          "isError": True}),
+            # a genuine JSON-RPC protocol error not tied to any tools/call
+            # (the adapter renders this as a PartKind.ERROR)
+            L(8, "s2c", {"jsonrpc": "2.0", "id": 99,
+                         "error": {"code": -32600,
+                                   "message": "invalid request"}}),
+        ])
+
+    def test_iserror_result_lands_in_tool_errors_not_protocol(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            rc, out = run_main(["summarize", "--json", str(self._session(tmp))])
+        self.assertEqual(rc, 0)
+        data = json.loads(out)
+        tool_seqs = [e["seq"] for e in data["tool_errors"]]
+        proto_seqs = [e["seq"] for e in data["protocol_errors"]]
+        self.assertIn(7, tool_seqs)            # isError result is a tool error
+        self.assertNotIn(7, proto_seqs)        # ...not a protocol error
+        self.assertIn("search backend unavailable",
+                      data["tool_errors"][0]["message"])
+
+    def test_real_protocol_error_stays_in_protocol_errors(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _, out = run_main(["summarize", "--json", str(self._session(tmp))])
+        data = json.loads(out)
+        proto_seqs = [e["seq"] for e in data["protocol_errors"]]
+        tool_seqs = [e["seq"] for e in data["tool_errors"]]
+        self.assertIn(8, proto_seqs)           # the JSON-RPC error frame
+        self.assertNotIn(8, tool_seqs)
+
+    def test_plain_text_has_separate_tool_errors_line(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            rc, out = run_main(["summarize", str(self._session(tmp))])
+        self.assertEqual(rc, 0)
+        self.assertIn("tool errors", out)
+        self.assertIn("search backend unavailable", out)
 
 
 if __name__ == "__main__":

@@ -56,6 +56,7 @@ Driver performed MCP handshake (`initialize` → `notifications/initialized` →
   - Correctly extracted the declared tool (`fetch`) and all called tools.
   - Correctly flagged the fabricated call: `FABRICATED CALLS: [(10, 'unknown_tool_xyz')]`.
   - **Issue:** reported three "protocol errors" for frames 13, 14, and 15, which are valid `tools/call` responses containing `isError=true`. Those are normal server-side error results, not protocol violations.
+    - **✅ RESOLVED (2026-06-24):** `summarize` now splits `tool_errors` (isError results) from `protocol_errors` (real JSON-RPC errors). Frames 13/14/15 render under `tool errors:`. Fixed in `tap.py`; locked by `tests/test_cli.py::TestSummarizeErrorTaxonomy`.
 - **Detect:**
   ```
   [HIGH] seq=10 fabricated_tool_call: tools/call 'unknown_tool_xyz' is outside the declared surface
@@ -65,7 +66,8 @@ Driver performed MCP handshake (`initialize` → `notifications/initialized` →
   ```
   - The `seq=10` fabricated-tool finding is correct and useful.
   - `seq=4` (`fetch` to `https://example.com`) is a reasonable egress observation.
-  - **Issue:** `seq=7` is the `foo://bar` call, yet detect reports the host as `example.com`. The egress parser appears to reuse a previously-seen host instead of extracting `bar` (or no valid host) from the actual payload.
+  - ~~**Issue:** `seq=7` is the `foo://bar` call, yet detect reports the host as `example.com`. The egress parser appears to reuse a previously-seen host instead of extracting `bar` (or no valid host) from the actual payload.~~
+    - **❌ RETRACTED (2026-06-24) — misread, not a bug.** Frame `seq` counts *all* frames, not just calls. seq=7's args are genuinely `{"url": "https://example.com", "max_length": 999999999}` (the oversized-`max_length` probe, which reused example.com). The `foo://bar` **call** is `seq=8`; `seq=15` is its *result*. The `foo://bar` call correctly produces **no** egress finding (`foo://` matches neither the http(s)/ws(s) URL regex nor the bare-domain check). `_extract_hosts_from_args` is stateless — verified by feeding each payload independently. No glassport defect.
   - `seq=10` also flags `example.com` because the unknown-tool arguments contain that URL; this is redundant with the fabricated-tool finding.
 
 ## Findings
@@ -73,13 +75,13 @@ Driver performed MCP handshake (`initialize` → `notifications/initialized` →
 1. **Outbound HTTP fetches hang indefinitely** in this environment. Both the benign `https://example.com` call and the `http://localhost:22` probe produced no server response within 60 seconds. Normal operation of the fetch server is blocked.
 2. **Non-HTTP schemes are rejected at the robots.txt stage, not by scheme allow-listing.** Both `file://` and `foo://` triggered `"Failed to fetch robots.txt <scheme>:///robots.txt"`. This leaks the server's internal behavior (it tries to retrieve a robots.txt for any scheme) and produces confusing error messages.
 3. **`max_length` input validation is effective.** The oversized value was rejected immediately with a clear schema error.
-4. **glassport `summarize` misclassifies `isError=true` tool results as protocol errors.** Server-side error responses should be treated as normal MCP results, not protocol violations.
-5. **glassport `detect` reports an incorrect egress host for the `foo://bar` call.** It attributed `example.com` to a call whose actual URL was `foo://bar`.
+4. **glassport `summarize` misclassifies `isError=true` tool results as protocol errors.** Server-side error responses should be treated as normal MCP results, not protocol violations. **✅ FIXED** — `tool_errors` field added (see Summarize note above).
+5. ~~**glassport `detect` reports an incorrect egress host for the `foo://bar` call.**~~ **❌ RETRACTED — analyst misread of frame `seq`.** seq=7 genuinely targeted example.com; the `foo://bar` call (seq=8) correctly yields no egress host. Extraction is stateless; no defect (see Detect note above).
 6. **glassport correctly surfaces fabricated tool calls** (`unknown_tool_xyz`), even when the server itself does not respond promptly.
 
 ## Recommendations
 
 - Investigate why `mcp-server-fetch` cannot complete outbound HTTP requests (network policy, DNS resolution, or a server-side async client bug).
-- Update glassport `summarize` to distinguish JSON-RPC protocol errors from valid `tools/call` responses that carry `isError=true`.
-- Fix glassport egress-host extraction so each call is parsed independently and malformed/custom schemes are handled accurately.
+- ~~Update glassport `summarize` to distinguish JSON-RPC protocol errors from valid `tools/call` responses that carry `isError=true`.~~ **Done.**
+- ~~Fix glassport egress-host extraction so each call is parsed independently~~ — **no fix needed**; extraction is already per-call and stateless. When auditing future logs, correlate findings by frame `seq` carefully: `seq` numbers *all* frames (requests, responses, notifications), so a call and its result have different `seq` values.
 - Consider whether glassport should warn when a wrapped server does not respond to a tool call within the session timeout (possible DoS/hang indicator).
