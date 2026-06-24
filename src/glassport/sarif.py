@@ -134,6 +134,8 @@ _RUNTIME_RULE_TEXT = {
     "capability_violation": "Server used a capability the client never granted",
     "schema_violation": "Call arguments violate the declared inputSchema",
     "unexpected_egress_host": "Tool call reached an undeclared host",
+    "premature_call": "tools/call issued before notifications/initialized",
+    "call_before_declaration": "tools/call before any tools/list was seen",
     "gate_blocked": "Gate blocked a call outside the declared surface",
     "gate_injected_response": "Gate synthesized the error reply",
     "gate_skipped": "Gate forwarded a call (no surface declared yet)",
@@ -165,9 +167,20 @@ def _seq_to_line(session_path: str) -> dict:
 
 
 def _runtime_rule_object(ann) -> dict:
-    """SARIF reportingDescriptor for one annotation's subcategory."""
+    """SARIF reportingDescriptor for one annotation's subcategory.
+
+    The data_exfiltration detector mints subcategories dynamically
+    (pii_<category>, pii_in_result_<category>), so match those by prefix
+    rather than enumerating every PII category."""
     sub = ann.subcategory or "annotation"
-    short = _RUNTIME_RULE_TEXT.get(sub, sub.replace("_", " ").capitalize())
+    if sub in _RUNTIME_RULE_TEXT:
+        short = _RUNTIME_RULE_TEXT[sub]
+    elif sub.startswith("pii_in_result_"):
+        short = "Secret or PII leaked back in a tool result"
+    elif sub.startswith("pii_"):
+        short = "Secret or PII in tool-call arguments"
+    else:
+        short = sub.replace("_", " ").capitalize()
     return {
         "id": f"glassport/{sub}",
         "name": sub,

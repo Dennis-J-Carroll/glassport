@@ -54,6 +54,12 @@ def handshake(tools):
     ]
 
 
+def call(seq, rid, name, arguments):
+    """One tools/call request line."""
+    return L(seq, "c2s", {"jsonrpc": "2.0", "id": rid, "method": "tools/call",
+                          "params": {"name": name, "arguments": arguments}})
+
+
 def render_lines(lines):
     """Write lines to a temp .jsonl, lift via the real adapter, annotate,
     and render. Returns (parsed_sarif_dict, session_path)."""
@@ -159,6 +165,29 @@ class TestRenderSessionSarif(unittest.TestCase):
         uri = doc["runs"][0]["results"][0]["locations"][0][
             "physicalLocation"]["artifactLocation"]["uri"]
         self.assertEqual(uri, log.replace("\\", "/"))   # absolute: unchanged
+
+    def test_pii_rule_has_descriptive_text(self):
+        # an anthropic key in tool-call args -> pii_anthropic_key
+        key = "sk-ant-api03-" + "A" * 80
+        with tempfile.TemporaryDirectory() as tmp:
+            log = os.path.join(tmp, "s.jsonl")
+            with open(log, "w", encoding="utf-8") as fh:
+                fh.write("\n".join(handshake([{"name": "web_search"}]) +
+                                   [call(6, 3, "web_search",
+                                         {"query": key})]) + "\n")
+            trace = from_mcp_session_file(log)
+            annotate(trace)
+            doc = json.loads(sarif.render_session_sarif(trace, "s.jsonl"))
+        rules = {r["id"]: r["shortDescription"]["text"]
+                 for r in doc["runs"][0]["tool"]["driver"]["rules"]}
+        self.assertIn("glassport/pii_anthropic_key", rules)
+        self.assertEqual(rules["glassport/pii_anthropic_key"],
+                         "Secret or PII in tool-call arguments")
+
+    def test_premature_call_rule_text(self):
+        self.assertEqual(
+            sarif._RUNTIME_RULE_TEXT["premature_call"],
+            "tools/call issued before notifications/initialized")
 
 
 class TestSummarizeSarifCLI(unittest.TestCase):
