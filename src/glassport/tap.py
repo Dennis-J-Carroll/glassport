@@ -399,8 +399,7 @@ def summarize(log_path: Path, as_json: bool = False, as_sarif: bool = False) -> 
         from glassport.detectors import annotate
         from glassport.sarif import render_session_sarif
         annotate(trace)            # mutates trace.annotations in place
-        base = "" if os.path.isabs(str(log_path)) else str(log_path.parent)
-        print(render_session_sarif(trace, log_path.name, base=base))
+        print(render_session_sarif(trace, str(log_path)))
         return 0
 
     seq_of = {e.id: e.metadata.get("seq", -1) for e in trace.events}
@@ -492,8 +491,7 @@ def _cmd_detect(log_path: Path, as_sarif: bool = False) -> int:
     annotations = annotate(trace)
     if as_sarif:
         from glassport.sarif import render_session_sarif
-        base = "" if os.path.isabs(str(log_path)) else str(log_path.parent)
-        print(render_session_sarif(trace, log_path.name, base=base))
+        print(render_session_sarif(trace, str(log_path)))
         return 0
     if not annotations:
         print(f"detect: {log_path.name} — no findings")
