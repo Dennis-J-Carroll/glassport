@@ -399,6 +399,8 @@ def summarize(log_path: Path, as_json: bool = False, as_sarif: bool = False) -> 
         from glassport.detectors import annotate
         from glassport.sarif import render_session_sarif
         annotate(trace)            # mutates trace.annotations in place
+        # full path (not base+name): _seq_to_line must read the real file
+        # for line numbers; a repo-relative path already resolves in the Security tab
         print(render_session_sarif(trace, str(log_path)))
         return 0
 
@@ -491,6 +493,8 @@ def _cmd_detect(log_path: Path, as_sarif: bool = False) -> int:
     annotations = annotate(trace)
     if as_sarif:
         from glassport.sarif import render_session_sarif
+        # full path (not base+name): _seq_to_line must read the real file
+        # for line numbers; a repo-relative path already resolves in the Security tab
         print(render_session_sarif(trace, str(log_path)))
         return 0
     if not annotations:
