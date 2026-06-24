@@ -177,13 +177,16 @@ def _runtime_rule_object(ann) -> dict:
     }
 
 
-def render_session_sarif(trace, session_path: str = "") -> str:
+def render_session_sarif(trace, session_path: str = "", base: str = "") -> str:
     """Render a session trace's detector annotations as SARIF 2.1.0 (JSON str).
 
     Results are located into the session `.jsonl` itself: artifactLocation.uri
-    is `session_path`, region.startLine is the annotation's event's line in
-    that log. `seq` rides in partialFingerprints for stable identity."""
+    is `session_path` (prefixed with `base` so it resolves from the repo root
+    in the GitHub Security tab; absolute paths pass through unchanged),
+    region.startLine is the annotation's event's line in that log. `seq` rides
+    in partialFingerprints for stable identity."""
     seq_line = _seq_to_line(session_path)
+    uri = _repo_uri(session_path, base)
     event_by_id = {e.id: e for e in trace.events}
     rules: dict = {}
     results: list = []
@@ -201,7 +204,7 @@ def render_session_sarif(trace, session_path: str = "") -> str:
             "message": {"text": a.explanation or a.subcategory or rule_id},
             "locations": [{
                 "physicalLocation": {
-                    "artifactLocation": {"uri": session_path},
+                    "artifactLocation": {"uri": uri},
                     "region": {"startLine": max(1, int(line))},
                 },
             }],

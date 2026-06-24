@@ -130,6 +130,36 @@ class TestRenderSessionSarif(unittest.TestCase):
                if r["ruleId"] == "glassport/fabricated_tool_call"]
         self.assertEqual(len(fab), 1)
 
+    def test_location_uri_is_prefixed_with_base(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            log = os.path.join(tmp, "session.jsonl")
+            with open(log, "w", encoding="utf-8") as fh:
+                fh.write("\n".join(handshake([{"name": "web_search"}]) +
+                                   [L(6, "c2s", {"jsonrpc": "2.0", "id": 3, "method": "tools/call",
+                                                  "params": {"name": "shadow_tool", "arguments": {}}})]) + "\n")
+            trace = from_mcp_session_file(log)
+            annotate(trace)
+            # session_path given as a repo-relative name, base = its dir
+            doc = json.loads(sarif.render_session_sarif(
+                trace, "session.jsonl", base="dogfood/logs/run1"))
+        uri = doc["runs"][0]["results"][0]["locations"][0][
+            "physicalLocation"]["artifactLocation"]["uri"]
+        self.assertEqual(uri, "dogfood/logs/run1/session.jsonl")
+
+    def test_absolute_session_path_passes_through(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            log = os.path.join(tmp, "session.jsonl")
+            with open(log, "w", encoding="utf-8") as fh:
+                fh.write("\n".join(handshake([{"name": "web_search"}]) +
+                                   [L(6, "c2s", {"jsonrpc": "2.0", "id": 3, "method": "tools/call",
+                                                  "params": {"name": "shadow_tool", "arguments": {}}})]) + "\n")
+            trace = from_mcp_session_file(log)
+            annotate(trace)
+            doc = json.loads(sarif.render_session_sarif(trace, log, base="x/y"))
+        uri = doc["runs"][0]["results"][0]["locations"][0][
+            "physicalLocation"]["artifactLocation"]["uri"]
+        self.assertEqual(uri, log.replace("\\", "/"))   # absolute: unchanged
+
 
 class TestSummarizeSarifCLI(unittest.TestCase):
     def test_summarize_sarif_prints_parseable_sarif(self):
