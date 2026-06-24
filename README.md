@@ -375,7 +375,9 @@ Rules cover: hardcoded secrets (redacted in output), **tool poisoning** (model-d
 
 The shipped GitHub Actions workflow (`.github/workflows/ci.yml`) runs `audit --sarif` and uploads to the Security tab; point `AUDIT_TARGET` at your server directory. The upload runs even when the audit exits non-zero — a high or critical finding is exactly what the Security tab is for.
 
-The *runtime* side has a SARIF path too: `glassport summarize <session>.jsonl --sarif` emits a SARIF 2.1.0 document over the **detector annotations** of a session — fabricated calls, data exfiltration, drift, gate actions. Unlike the audit (which locates into repo source), these results locate into the session `.jsonl` itself (`region.startLine` is the wire event's line in the log), since a behavioral finding's evidence lives on the wire, not in a source file. Same severity vocabulary; consume it as a generic SARIF artifact.
+The *runtime* side has a SARIF path too: both `glassport detect <session>.jsonl --sarif` (runs every behavioral detector) and `glassport summarize <session>.jsonl --sarif` emit a SARIF 2.1.0 document over the **detector annotations** of a session — fabricated calls, data exfiltration, drift, gate actions. Unlike the audit (which locates into repo source), these results locate into the session `.jsonl` itself (`region.startLine` is the wire event's line in the log), since a behavioral finding's evidence lives on the wire, not in a source file. Same severity vocabulary; consume it as a generic SARIF artifact.
+
+The CI workflow uploads the runtime SARIF too — a `detect --sarif` over a committed session fixture, posted to the Security tab under a distinct `glassport-runtime` category so the runtime findings sit beside the static `glassport-audit` ones without the two severity scales colliding.
 
 ### CI integration
 
@@ -383,7 +385,8 @@ glassport's static audit drops into any pipeline as a gate (exit 1 on
 critical/high) or a SARIF artifact.
 
 **GitHub Actions** — shipped in `.github/workflows/ci.yml` (`security-scan` job):
-`audit --sarif` → upload to the Security tab.
+`audit --sarif` → Security tab (`glassport-audit`), and `detect --sarif` over a
+session fixture → Security tab (`glassport-runtime`).
 
 **GitLab CI** — copy [`examples/gitlab-ci.yml`](examples/gitlab-ci.yml) to your
 repo root as `.gitlab-ci.yml`. It runs `audit --sarif`, saves the SARIF as a
