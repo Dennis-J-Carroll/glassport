@@ -411,7 +411,13 @@ def summarize(log_path: Path, as_json: bool = False, as_sarif: bool = False) -> 
                   for eid, name in trace.fabricated_tool_calls()]
     unused = sorted(declared - {n for _, n in called})
 
-    errors: list[tuple[int, str]] = []          # (seq, message)
+    # Two distinct failure modes, kept apart: a JSON-RPC *protocol* error
+    # (the `error` member — malformed/unknown method) versus a valid
+    # tools/call *result* carrying isError=true (the tool ran, the
+    # operation failed). Conflating them inflates the protocol-error count
+    # with ordinary denied-access / validation results.
+    errors: list[tuple[int, str]] = []          # protocol errors (seq, message)
+    tool_errors: list[tuple[int, str]] = []     # isError results (seq, message)
     for e in trace.events:
         for p in e.parts:
             if p.kind == PartKind.ERROR:
@@ -421,7 +427,7 @@ def summarize(log_path: Path, as_json: bool = False, as_sarif: bool = False) -> 
                 out = p.content.get("output")
                 msg = out.get("message", str(out)) if isinstance(out, dict) \
                     else str(out)
-                errors.append((e.metadata.get("seq", -1), msg))
+                tool_errors.append((e.metadata.get("seq", -1), msg))
 
     violations = sorted(context_violations(trace),
                         key=lambda a: (a.metadata.get("seq") or 0))
@@ -437,6 +443,8 @@ def summarize(log_path: Path, as_json: bool = False, as_sarif: bool = False) -> 
                                  for s, n in fabricated],
             "protocol_errors": [{"seq": s, "message": m}
                                 for s, m in errors],
+            "tool_errors": [{"seq": s, "message": m}
+                            for s, m in tool_errors],
             "context_violations": [
                 {"severity": a.severity, "subcategory": a.subcategory,
                  "seq": a.metadata.get("seq"), "explanation": a.explanation}
@@ -456,6 +464,9 @@ def summarize(log_path: Path, as_json: bool = False, as_sarif: bool = False) -> 
         print("fabricated calls: none")
     if errors:
         print(f"protocol errors:  {errors}")
+    if tool_errors:
+        print(f"tool errors:      {tool_errors}   <-- server-side isError "
+              f"results (the tool ran, the operation failed)")
 
     if violations:
         print("CONTEXT VIOLATIONS:")

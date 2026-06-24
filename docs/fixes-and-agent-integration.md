@@ -446,6 +446,15 @@ The agent now has three MCP servers: `filesystem` and `web-search` (both
 transparently tapped/gated), plus `glassport` itself as a queryable audit
 oracle.
 
+> **Caveat — strict servers require `clientInfo`.** Glassport's tap is
+> passive: it forwards the client's `initialize` frame verbatim and never
+> synthesizes one. Real clients (Claude Desktop/Code) always send
+> `params.clientInfo`, so this is invisible in normal use. But if you hand-wire
+> a *minimal* stdio driver (e.g. a dogfood/eval harness) to a server behind
+> the tap, omit `clientInfo` and strict servers — `@modelcontextprotocol/server-filesystem`
+> among them — reject the handshake with a Zod validation error before any
+> tool call. Send `params.clientInfo = {"name": ..., "version": ...}`.
+
 **Claude Code** (`~/.claude/settings.json` under `mcpServers`):
 
 ```json

@@ -1,0 +1,13 @@
+# Dependencies / caches that may be created during manual server setup
+node_modules/
+.venv/
+__pycache__/
+*.pyc
+.npm/
+.uv/
+
+# Lock files — eval intentionally uses latest public versions
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
+uv.lock
