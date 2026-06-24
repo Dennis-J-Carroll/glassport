@@ -52,6 +52,18 @@ class TestDetectCommand(unittest.TestCase):
         rc, _ = run_main(["detect"])
         self.assertEqual(rc, 2)
 
+    def test_sarif_flag_emits_runtime_sarif(self):
+        import json as _json
+        with tempfile.TemporaryDirectory() as tmp:
+            p = write_session(tmp, handshake() +
+                              [call(6, 3, "shadow_tool", {})])
+            rc, out = run_main(["detect", "--sarif", str(p)])
+        self.assertEqual(rc, 0)                      # sarif mode never exit-1
+        doc = _json.loads(out)                       # stdout is pure SARIF
+        self.assertEqual(doc["version"], "2.1.0")
+        rule_ids = {r["ruleId"] for r in doc["runs"][0]["results"]}
+        self.assertIn("glassport/fabricated_tool_call", rule_ids)
+
     def test_usage_mentions_detect_and_serve(self):
         rc, out = run_main(["--help"])
         self.assertEqual(rc, 0)

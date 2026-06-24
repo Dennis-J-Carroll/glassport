@@ -483,12 +483,16 @@ def summarize(log_path: Path, as_json: bool = False, as_sarif: bool = False) -> 
 # and print the findings. Exit 1 when anything was found (grep-style)
 # so scripts and CI can branch on the result.
 # ─────────────────────────────────────────────────────────────────
-def _cmd_detect(log_path: Path) -> int:
+def _cmd_detect(log_path: Path, as_sarif: bool = False) -> int:
     from glassport.adapters.mcp_session import from_mcp_session_file
     from glassport.detectors import annotate
 
     trace = from_mcp_session_file(log_path)
     annotations = annotate(trace)
+    if as_sarif:
+        from glassport.sarif import render_session_sarif
+        print(render_session_sarif(trace, str(log_path)))
+        return 0
     if not annotations:
         print(f"detect: {log_path.name} — no findings")
         return 0
@@ -514,8 +518,9 @@ glassport — passive MCP stdio proxy
   audit:           glassport audit <path> [--json] | audit --rubric
                    (static, pre-deployment: reads source, never runs it)
   summarize:       glassport summarize [--json|--sarif] <session.jsonl>
-  detect:          glassport detect <session.jsonl>
-                   (run all behavioral detectors; exit 1 if findings)
+  detect:          glassport detect [--sarif] <session.jsonl>
+                   (run all behavioral detectors; exit 1 if findings,
+                    or emit SARIF 2.1.0 with --sarif)
   report:          glassport report <session.jsonl> [-o out.html]
   watch:           glassport watch [log-dir] [--json]
   serve:           glassport serve [--log-dir DIR]
@@ -556,10 +561,13 @@ def main(argv: list[str]) -> int:
         return summarize(Path(args[0]), as_json=as_json, as_sarif=as_sarif)
 
     if argv[0] == "detect":
-        if len(argv) != 2:
+        args = argv[1:]
+        as_sarif = "--sarif" in args
+        args = [a for a in args if not a.startswith("--")]
+        if len(args) != 1:
             print(USAGE)
             return 2
-        return _cmd_detect(Path(argv[1]))
+        return _cmd_detect(Path(args[0]), as_sarif=as_sarif)
 
     if argv[0] == "serve":
         # glassport as a queryable MCP audit server. Lazy import.
