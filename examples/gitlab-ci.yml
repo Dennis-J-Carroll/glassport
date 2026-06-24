@@ -1,5 +1,14 @@
-# glassport security audit for GitLab CI.
-# Copy to your repo root as .gitlab-ci.yml, or merge this job into your pipeline.
+# glassport for GitLab CI.
+# Copy to your repo root as .gitlab-ci.yml, or merge these jobs into your pipeline.
+#
+# Two jobs, mirroring the shipped GitHub Actions workflow:
+#   glassport-audit   — STATIC: scans your server source pre-deployment.
+#   glassport-runtime — RUNTIME: scans a captured tap session log for
+#                       fabricated calls, data exfiltration, drift, gate actions.
+# Both emit SARIF 2.1.0 and save it as a build artifact (GitLab has no native
+# SARIF code-scanning view like GitHub's Security tab; consume the artifact, or
+# wire it into your own report ingestion).
+
 glassport-audit:
   image: python:3.12-slim
   variables:
@@ -12,4 +21,24 @@ glassport-audit:
   artifacts:
     when: always
     paths: [glassport.sarif.json]
+    expire_in: 30 days
+
+glassport-runtime:
+  image: python:3.12-slim
+  variables:
+    SESSION_LOG: "session.jsonl"   # point at a glassport tap session .jsonl
+  before_script:
+    - pip install glassport
+  script:
+    # runtime detectors over a captured session; SARIF locates into the log
+    # itself (region.startLine = the wire event's line). || true keeps the
+    # artifact upload from being skipped when findings exit non-zero.
+    - glassport detect --sarif "$SESSION_LOG" > glassport-runtime.sarif.json || true
+  rules:
+    # only run when a session log is actually present in the repo/pipeline
+    - exists: [session.jsonl]
+  allow_failure: true
+  artifacts:
+    when: always
+    paths: [glassport-runtime.sarif.json]
     expire_in: 30 days

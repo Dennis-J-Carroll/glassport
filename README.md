@@ -389,9 +389,11 @@ critical/high) or a SARIF artifact.
 session fixture → Security tab (`glassport-runtime`).
 
 **GitLab CI** — copy [`examples/gitlab-ci.yml`](examples/gitlab-ci.yml) to your
-repo root as `.gitlab-ci.yml`. It runs `audit --sarif`, saves the SARIF as a
-build artifact, and is non-blocking by default (`allow_failure: true`); set it
-to `false` to gate the pipeline.
+repo root as `.gitlab-ci.yml`. Two jobs mirroring the GitHub workflow:
+`glassport-audit` runs `audit --sarif` over your source, and `glassport-runtime`
+runs `detect --sarif` over a captured tap session log (`SESSION_LOG`, only when
+one is present). Both save SARIF 2.1.0 as a build artifact and are non-blocking
+by default (`allow_failure: true`); set it to `false` to gate the pipeline.
 
 **pre-commit** — add glassport as a hook so a critical/high finding blocks the
 commit:
