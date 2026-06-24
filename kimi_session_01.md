@@ -144,3 +144,62 @@ python -m pytest tests/test_audit.py tests/test_server.py tests/test_gate.py
 ## 7. Summary
 
 Glassport is already a well-architected, well-tested security tool. The four fixes above remove real, exploitable weaknesses (DoS, directory traversal, path traversal, availability failure). With the new test file, the project now has explicit adversarial coverage for the most likely attack surfaces. The next legitimate step is distribution artifacts (pre-commit + GitLab CI) using the existing SARIF/exit-code gate, not new renderer code.
+
+## 8. Phase 2 — Real-World Dogfooding (in progress)
+
+**Scope:** Audit four public MCP servers by running them through glassport wrap/tap:
+- `@modelcontextprotocol/server-filesystem`
+- `@modelcontextprotocol/server-github`
+- `@modelcontextprotocol/server-fetch`
+- `exa` (Exa MCP server)
+
+**Goal:** Move glassport from "well-tested against synthetic inputs" to "legit against real servers". Findings will be opened as a reviewable branch (`kimi/eval`) and summarized in this doc.
+
+**Methodology:**
+1. Install/inspect each server (npm/source).
+2. Launch each server behind `glassport tap` or `glassport wrap` with a permissive gate.
+3. Drive representative + adversarial MCP requests through stdin/SSE or the official MCP client SDK.
+4. Inspect session logs, detector hits, gate holds, and any server-side failures/exposures.
+5. Document findings, file paths, reproduction steps, and severity.
+
+### 8.1 Harness
+
+Created `dogfood/driver.py` — a reusable stdio MCP client that launches any server behind `python glassport_tap.py`, performs the handshake, drives tool calls, and runs `glassport summarize` / `glassport detect` on the resulting log.
+
+Per-server eval scripts:
+- `dogfood/eval_filesystem.py`
+- `dogfood/eval_github.py`
+- `dogfood/eval_fetch.py`
+- `dogfood/eval_exa.py`
+
+Findings docs:
+- `dogfood/findings/filesystem.md`
+- `dogfood/findings/github.md`
+- `dogfood/findings/fetch.md`
+- `dogfood/findings/exa.md`
+
+Session evidence is in `dogfood/logs/<server>/`.
+
+### 8.2 Cross-server results
+
+| Server | Auth | Declared tools | Benign result | Adversarial result | Glassport notes |
+|--------|------|----------------|---------------|--------------------|-----------------|
+| `@modelcontextprotocol/server-filesystem` | none | 14 | OK | Path traversal / null-byte blocked by server | No detector alerts; summarize/detect clean |
+| `@modelcontextprotocol/server-github` | token optional for search | 25 (many mutating) | Public search OK | Type/oversize/unknown-tool blocked | True positives on fabricated call + schema violation |
+| `mcp-server-fetch` | none | 1 (`fetch`) | **Hangs** outbound fetches | `file://`/`foo://` rejected at robots.txt stage | Summarize misclassifies `isError=true` as protocol error; detect reports wrong egress host |
+| `exa-mcp-server` | `EXA_API_KEY` required | 2 (`web_search_exa`, `web_fetch_exa`) | 401 without key | Schema-strict; unknown tool blocked | True positives on fabricated call + schema violation; egress noise on example.com |
+
+### 8.3 Server-side findings
+
+1. **filesystem — path containment is solid.** No traversal succeeded; server validates paths against allowed roots before I/O.
+2. **github — broad, high-impact surface.** 25 tools include repo creation, file writes, PR merge, issue creation. No `destructiveHint` annotations. Input validation is strict (Zod).
+3. **fetch — normal operation blocked in this environment.** Outbound HTTP to `example.com` and `localhost:22` hung for 60+ s. `file://` and custom schemes are rejected only after a confusing robots.txt fetch attempt.
+4. **exa — schema-strict and auth-gated.** Cannot reach backend without `EXA_API_KEY`; all adversarial probes stopped at argument validation or auth.
+
+### 8.4 Glassport-side findings (for implementation lane)
+
+1. **`summarize` misclassifies `isError=true` tool results as protocol errors.** Valid MCP error responses from the server are reported as "protocol errors" even though they are normal `tools/call` results.
+2. **`detect` reports incorrect egress host for malformed URLs.** The `foo://bar` call was attributed to `example.com`, suggesting the egress parser is reusing state or not handling custom schemes.
+3. **Missing `clientInfo` in minimal handshake causes real servers to reject initialize.** The driver was updated to include `clientInfo`; glassport docs/examples may need the same note for bare stdio configs.
+
+These are **not** blockers for the eval lane; they are findings to route through the implementation lane.
