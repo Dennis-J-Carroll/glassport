@@ -189,6 +189,21 @@ class TestRenderSessionSarif(unittest.TestCase):
             sarif._RUNTIME_RULE_TEXT["premature_call"],
             "tools/call issued before notifications/initialized")
 
+    def test_examples_fixture_renders_valid_runtime_sarif(self):
+        # the same fixture CI uploads; guards against a broken upload
+        fixture = os.path.join(
+            os.path.dirname(__file__), os.pardir,
+            "examples", "20260609T183929Z_python3_538.jsonl")
+        self.assertTrue(os.path.exists(fixture), "CI SARIF fixture missing")
+        trace = from_mcp_session_file(fixture)
+        annotate(trace)
+        doc = json.loads(sarif.render_session_sarif(
+            trace, "examples/20260609T183929Z_python3_538.jsonl"))
+        self.assertEqual(doc["version"], "2.1.0")
+        self.assertEqual(doc["runs"][0]["tool"]["driver"]["name"], "glassport")
+        # the shady-server fixture must produce at least one runtime finding
+        self.assertGreater(len(doc["runs"][0]["results"]), 0)
+
 
 class TestSummarizeSarifCLI(unittest.TestCase):
     def test_summarize_sarif_prints_parseable_sarif(self):
