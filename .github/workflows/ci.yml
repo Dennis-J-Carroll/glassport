@@ -68,6 +68,21 @@ jobs:
           sarif_file: glassport.sarif.json
           category: glassport-audit
 
+      - name: Runtime detectors -> SARIF (session fixture)
+        # mirror the audit path: never let a non-zero detect exit skip the
+        # upload — the Security tab is where runtime findings belong
+        run: |
+          glassport detect --sarif \
+            examples/20260609T183929Z_python3_538.jsonl \
+            > glassport-runtime.sarif.json || true
+
+      - name: Upload runtime SARIF to GitHub Security
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: glassport-runtime.sarif.json
+          category: glassport-runtime
+
   pre-commit-hook:
     runs-on: ubuntu-latest
     steps:

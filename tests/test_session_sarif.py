@@ -54,6 +54,12 @@ def handshake(tools):
     ]
 
 
+def call(seq, rid, name, arguments):
+    """One tools/call request line."""
+    return L(seq, "c2s", {"jsonrpc": "2.0", "id": rid, "method": "tools/call",
+                          "params": {"name": name, "arguments": arguments}})
+
+
 def render_lines(lines):
     """Write lines to a temp .jsonl, lift via the real adapter, annotate,
     and render. Returns (parsed_sarif_dict, session_path)."""
@@ -129,6 +135,74 @@ class TestRenderSessionSarif(unittest.TestCase):
         fab = [r for r in doc["runs"][0]["results"]
                if r["ruleId"] == "glassport/fabricated_tool_call"]
         self.assertEqual(len(fab), 1)
+
+    def test_location_uri_is_prefixed_with_base(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            log = os.path.join(tmp, "session.jsonl")
+            with open(log, "w", encoding="utf-8") as fh:
+                fh.write("\n".join(handshake([{"name": "web_search"}]) +
+                                   [L(6, "c2s", {"jsonrpc": "2.0", "id": 3, "method": "tools/call",
+                                                  "params": {"name": "shadow_tool", "arguments": {}}})]) + "\n")
+            trace = from_mcp_session_file(log)
+            annotate(trace)
+            # session_path given as a repo-relative name, base = its dir
+            doc = json.loads(sarif.render_session_sarif(
+                trace, "session.jsonl", base="dogfood/logs/run1"))
+        uri = doc["runs"][0]["results"][0]["locations"][0][
+            "physicalLocation"]["artifactLocation"]["uri"]
+        self.assertEqual(uri, "dogfood/logs/run1/session.jsonl")
+
+    def test_absolute_session_path_passes_through(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            log = os.path.join(tmp, "session.jsonl")
+            with open(log, "w", encoding="utf-8") as fh:
+                fh.write("\n".join(handshake([{"name": "web_search"}]) +
+                                   [L(6, "c2s", {"jsonrpc": "2.0", "id": 3, "method": "tools/call",
+                                                  "params": {"name": "shadow_tool", "arguments": {}}})]) + "\n")
+            trace = from_mcp_session_file(log)
+            annotate(trace)
+            doc = json.loads(sarif.render_session_sarif(trace, log, base="x/y"))
+        uri = doc["runs"][0]["results"][0]["locations"][0][
+            "physicalLocation"]["artifactLocation"]["uri"]
+        self.assertEqual(uri, log.replace("\\", "/"))   # absolute: unchanged
+
+    def test_pii_rule_has_descriptive_text(self):
+        # an anthropic key in tool-call args -> pii_anthropic_key
+        key = "sk-ant-api03-" + "A" * 80
+        with tempfile.TemporaryDirectory() as tmp:
+            log = os.path.join(tmp, "s.jsonl")
+            with open(log, "w", encoding="utf-8") as fh:
+                fh.write("\n".join(handshake([{"name": "web_search"}]) +
+                                   [call(6, 3, "web_search",
+                                         {"query": key})]) + "\n")
+            trace = from_mcp_session_file(log)
+            annotate(trace)
+            doc = json.loads(sarif.render_session_sarif(trace, "s.jsonl"))
+        rules = {r["id"]: r["shortDescription"]["text"]
+                 for r in doc["runs"][0]["tool"]["driver"]["rules"]}
+        self.assertIn("glassport/pii_anthropic_key", rules)
+        self.assertEqual(rules["glassport/pii_anthropic_key"],
+                         "Secret or PII in tool-call arguments")
+
+    def test_premature_call_rule_text(self):
+        self.assertEqual(
+            sarif._RUNTIME_RULE_TEXT["premature_call"],
+            "tools/call issued before notifications/initialized")
+
+    def test_examples_fixture_renders_valid_runtime_sarif(self):
+        # the same fixture CI uploads; guards against a broken upload
+        fixture = os.path.join(
+            os.path.dirname(__file__), os.pardir,
+            "examples", "20260609T183929Z_python3_538.jsonl")
+        self.assertTrue(os.path.exists(fixture), "CI SARIF fixture missing")
+        trace = from_mcp_session_file(fixture)
+        annotate(trace)
+        doc = json.loads(sarif.render_session_sarif(
+            trace, "examples/20260609T183929Z_python3_538.jsonl"))
+        self.assertEqual(doc["version"], "2.1.0")
+        self.assertEqual(doc["runs"][0]["tool"]["driver"]["name"], "glassport")
+        # the shady-server fixture must produce at least one runtime finding
+        self.assertGreater(len(doc["runs"][0]["results"]), 0)
 
 
 class TestSummarizeSarifCLI(unittest.TestCase):

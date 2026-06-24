@@ -52,6 +52,39 @@ class TestDetectCommand(unittest.TestCase):
         rc, _ = run_main(["detect"])
         self.assertEqual(rc, 2)
 
+    def test_sarif_flag_emits_runtime_sarif(self):
+        import json as _json
+        with tempfile.TemporaryDirectory() as tmp:
+            p = write_session(tmp, handshake() +
+                              [call(6, 3, "shadow_tool", {})])
+            rc, out = run_main(["detect", "--sarif", str(p)])
+        self.assertEqual(rc, 0)                      # sarif mode never exit-1
+        doc = _json.loads(out)                       # stdout is pure SARIF
+        self.assertEqual(doc["version"], "2.1.0")
+        rule_ids = {r["ruleId"] for r in doc["runs"][0]["results"]}
+        self.assertIn("glassport/fabricated_tool_call", rule_ids)
+
+    def test_sarif_result_locates_at_real_log_line(self):
+        import json as _json
+        with tempfile.TemporaryDirectory() as tmp:
+            lines = handshake() + [call(6, 3, "shadow_tool", {})]
+            p = write_session(tmp, lines)
+            # locate the actual line in the written file BEFORE temp dir is cleaned
+            written = p.read_text(encoding="utf-8").splitlines()
+            expected = next(i for i, ln in enumerate(written, 1)
+                            if '"shadow_tool"' in ln and '"tools/call"' in ln)
+            rc, out = run_main(["detect", "--sarif", str(p)])
+        self.assertEqual(rc, 0)
+        doc = _json.loads(out)
+        # find the SARIF result for the fabricated call and confirm its
+        # startLine is the real line of that tools/call frame in the log,
+        # not the collapsed default of 1
+        fab = next(r for r in doc["runs"][0]["results"]
+                   if r["ruleId"] == "glassport/fabricated_tool_call")
+        start_line = fab["locations"][0]["physicalLocation"]["region"]["startLine"]
+        self.assertEqual(start_line, expected)
+        self.assertGreater(start_line, 1)
+
     def test_usage_mentions_detect_and_serve(self):
         rc, out = run_main(["--help"])
         self.assertEqual(rc, 0)
