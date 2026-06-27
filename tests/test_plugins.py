@@ -83,8 +83,8 @@ class TestJsonLoader(PluginRegistryBase):
                  "validator": "entropy",
                  "description": "Acme secret (entropy-gated)"}])
             detectors.load_pii_patterns_from_json(path)
-        low = self.exfil({"q": "ACME" + "a" * 32})            # low entropy
-        high = self.exfil({"q": "ACMEa9X2kQ7mZ3pL8vR1tB6nW4cD5fH0gJ"})
+        low = self.exfil({"q": "ACME" + "a" * 32})            # 32 chars, H=0.0
+        high = self.exfil({"q": "ACMEa9X2kQ7mZ3pL8vR1tB6nW4cD5fH0gJpQ"})  # 32, H=4.9
         self.assertNotIn("acme_secret", self.categories(low))
         self.assertIn("acme_secret", self.categories(high))
 
@@ -111,6 +111,50 @@ class TestJsonLoader(PluginRegistryBase):
                  "validator": "no_such_validator", "description": "x"}])
             with self.assertRaises(ValueError):
                 detectors.load_pii_patterns_from_json(path)
+
+
+class TestNamedValidators(PluginRegistryBase):
+    """The validator menu the JSON path resolves "validator":"<name>" against.
+    Each name: one value it accepts, one it culls. Entropy values are measured,
+    not guessed (H in bits/char): 'a'*32 = 0.0, hex digest = 3.906,
+    base64 = 4.644, random alnum = 5.087, repeated word = 1.585."""
+    V = staticmethod(lambda: detectors._NAMED_VALIDATORS)
+
+    def test_menu_exposes_the_decided_names(self):
+        self.assertEqual(set(self.V()), {"entropy", "entropy_high", "luhn", "ssn"})
+
+    def test_luhn_accepts_valid_culls_invalid(self):
+        luhn = self.V()["luhn"]
+        self.assertTrue(luhn("4111111111111111"))      # valid Visa test number
+        self.assertFalse(luhn("4111111111111112"))     # checksum fails
+
+    def test_ssn_accepts_valid_culls_unissued_range(self):
+        ssn = self.V()["ssn"]
+        self.assertTrue(ssn("123-45-6789"))
+        self.assertFalse(ssn("000-45-6789"))           # 000 area never issued
+
+    def test_entropy_accepts_random_culls_repetition(self):
+        ent = self.V()["entropy"]
+        self.assertTrue(ent("ACMEa9X2kQ7mZ3pL8vR1tB6nW4cD5fH0gJ"))  # H=5.09
+        self.assertFalse(ent("a" * 32))                             # H=0.0
+        self.assertFalse(ent("abcabcabcabcabcabc"))                 # H=1.59
+
+    def test_entropy_high_culls_what_entropy_keeps(self):
+        # the tier gap: a 32-char hex digest (H=3.906) is a high-entropy
+        # NON-secret. entropy keeps it; entropy_high (>4.0) culls it.
+        digest = "a3f5c8b1d2e4f6a7b8c9d0e1f2a3b4c5"
+        self.assertTrue(self.V()["entropy"](digest))
+        self.assertFalse(self.V()["entropy_high"](digest))
+        self.assertTrue(self.V()["entropy_high"](
+            "Tm93IGlzIHRoZSB0aW1lIGZvciBhbGwgZ29vZCBtZW4h"))        # H=4.64
+
+    def test_every_validator_is_total(self):
+        # a validator that raises crashes the scan and blinds detection — so
+        # every one must return a bool on hostile input, never raise.
+        for name, fn in self.V().items():
+            for hostile in ("", "x" * 50_000, "​﻿", "123"):
+                self.assertIsInstance(fn(hostile), bool,
+                                      f"{name} not total on {hostile[:8]!r}")
 
 
 class TestEnvAutoload(PluginRegistryBase):

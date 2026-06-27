@@ -523,7 +523,21 @@ def _ensure_env_patterns_loaded() -> None:
 #                                    > 3.0, aws_secret_key uses > 4.0)
 # Leaving an entry out means JSON authors cannot name it (unknown name raises).
 _NAMED_VALIDATORS: dict[str, Callable[[str], bool]] = {
-    # fill me in
+    # Checksum validators — deterministic, ~0 false positives. Already
+    # str -> bool and already total (return False on malformed input), so
+    # they are named directly with no wrapper.
+    "luhn": _luhn_check,        # credit-card checksum
+    "ssn": _validate_ssn,       # SSA-issued ranges
+    # Entropy gates — the recall-oriented fallback for opaque random tokens.
+    # _calculate_entropy is total (0.0 on empty), so the lambdas can't raise
+    # on the str a regex match always yields. Two tiers, per the cascaded-
+    # model report's per-charset thresholds:
+    #   3.0 — above natural-language's ~3.0 ceiling; catches most secrets
+    #         while culling dictionary words. (gitleaks uses >=3 for api keys)
+    #   4.0 — stricter, base64-grade; culls high-entropy NON-secrets such as a
+    #         32-char hex digest (H~3.9) that 3.0 would keep.
+    "entropy": lambda s: _calculate_entropy(s) > 3.0,
+    "entropy_high": lambda s: _calculate_entropy(s) > 4.0,
 }
 
 
