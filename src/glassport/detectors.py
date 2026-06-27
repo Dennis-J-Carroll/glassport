@@ -22,7 +22,9 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import re
+import sys
 import unicodedata
 from typing import Any, Iterator, NamedTuple, Optional, Callable
 
@@ -440,6 +442,141 @@ def _redact(value: str, category: str) -> str:
     return f"[{category} redacted · {len(value)} chars]"
 
 
+# --- Custom-pattern plugin registry -------------------------------------
+# Consumer-supplied PII patterns live here, kept SEPARATE from the built-in
+# PII_PATTERNS so the baseline can never be corrupted and a reset is a single
+# clear(). Two entry points feed it: register_pii_pattern() (in-code, full
+# callable validators) and load_pii_patterns_from_json() (declarative,
+# validator-by-name). _active_patterns() merges built-ins + customs for the
+# scan; register/clear affect every scan that follows the call.
+_CUSTOM_PATTERNS: list[PIIPattern] = []
+
+
+def register_pii_pattern(pat: PIIPattern) -> None:
+    """Add a custom PII pattern to every subsequent scan.
+
+    The in-code path: the caller is in-process and trusted, so we do NOT
+    re-validate (the PIIPattern type already constrains shape, and this path
+    can carry an arbitrary callable validator that JSON cannot express). All
+    untrusted-input validation lives in the JSON loader instead.
+    """
+    _CUSTOM_PATTERNS.append(pat)
+
+
+def clear_custom_pii_patterns() -> None:
+    """Drop all custom patterns and reset the env-autoload cache. Built-in
+    PII_PATTERNS are untouched. Used for test isolation and config reload."""
+    _CUSTOM_PATTERNS.clear()
+    global _env_loaded
+    _env_loaded = False
+
+
+def _active_patterns() -> list[PIIPattern]:
+    """Built-in patterns + customs, with GLASSPORT_PII_PATTERNS loaded once."""
+    _ensure_env_patterns_loaded()
+    return PII_PATTERNS + _CUSTOM_PATTERNS
+
+
+# Set by _ensure_env_patterns_loaded(); reset by clear_custom_pii_patterns().
+_env_loaded = False
+
+
+# Consumers point this at a JSON file of custom patterns; it is loaded once,
+# on the first scan, into the same registry register_pii_pattern() feeds.
+_ENV_PATTERNS_VAR = "GLASSPORT_PII_PATTERNS"
+
+
+def _ensure_env_patterns_loaded() -> None:
+    """Load GLASSPORT_PII_PATTERNS once, FAIL-SAFE.
+
+    Unlike the explicit load_pii_patterns_from_json() (which raises so the
+    caller learns of a bad file), this implicit path must NEVER let a
+    misconfigured custom-pattern file raise out of a scan: a typo there would
+    crash data_exfiltration and blind the built-in detectors — the one failure
+    this tool cannot have. So we set the cache flag first (no per-scan retry
+    loop), then load, and on any error warn once to stderr and keep the
+    built-ins live. Reset by clear_custom_pii_patterns()."""
+    global _env_loaded
+    if _env_loaded:
+        return
+    _env_loaded = True
+    path = os.environ.get(_ENV_PATTERNS_VAR)
+    if not path:
+        return
+    try:
+        load_pii_patterns_from_json(path)
+    except Exception as e:                                # noqa: BLE001
+        print(f"glassport: ignoring {_ENV_PATTERNS_VAR} ({path}): {e}",
+              file=sys.stderr)
+
+
+# Named validators exposed to the JSON (declarative) path. JSON cannot carry a
+# Python callable, so a declarative pattern references a built-in validator by
+# name here. The in-code register_pii_pattern() path is unaffected — it passes
+# its own callable directly.
+#
+# TODO(you): choose which built-in validators to expose and at what entropy
+# thresholds. The built-ins available above are:
+#   _luhn_check(s)        -> bool   (credit-card checksum)
+#   _validate_ssn(s)      -> bool   (SSA-issued ranges)
+#   _calculate_entropy(s) -> float  (Shannon bits/char; generic_api_key uses
+#                                    > 3.0, aws_secret_key uses > 4.0)
+# Leaving an entry out means JSON authors cannot name it (unknown name raises).
+_NAMED_VALIDATORS: dict[str, Callable[[str], bool]] = {
+    # fill me in
+}
+
+
+def pii_pattern_from_dict(d: dict) -> PIIPattern:
+    """Build one PIIPattern from a JSON object. Fails loud (ValueError) on a
+    missing field, an out-of-range severity, a regex that will not compile, or
+    an unknown validator name — this is the untrusted-input boundary."""
+    try:
+        category = str(d["category"])
+        severity = d["severity"]
+        pattern_src = d["pattern"]
+        description = str(d["description"])
+    except (KeyError, TypeError) as e:
+        raise ValueError(f"custom PII pattern missing field {e}") from e
+    if isinstance(severity, bool) or not isinstance(severity, int) \
+            or not (1 <= severity <= 3):
+        raise ValueError(
+            f"severity must be an int in 1..3, got {severity!r} "
+            f"for category {category!r}")
+    try:
+        compiled = re.compile(pattern_src)
+    except re.error as e:
+        raise ValueError(f"bad regex for category {category!r}: {e}") from e
+    vname = d.get("validator")
+    validator: Optional[Callable[[str], bool]] = None
+    if vname is not None:
+        if vname not in _NAMED_VALIDATORS:
+            raise ValueError(
+                f"unknown validator {vname!r} for category {category!r}; "
+                f"known names: {sorted(_NAMED_VALIDATORS)}")
+        validator = _NAMED_VALIDATORS[vname]
+    return PIIPattern(category, severity, compiled, validator, description)
+
+
+def load_pii_patterns_from_json(path: Any) -> int:
+    """Load and register custom PII patterns from a JSON-array file. Returns
+    the count registered. Atomic: every entry is validated BEFORE any is
+    registered, so a malformed entry never leaves a half-loaded registry."""
+    with open(path, encoding="utf-8") as f:
+        try:
+            data = json.load(f)
+        except json.JSONDecodeError as e:
+            raise ValueError(f"{path}: invalid JSON: {e}") from e
+    if not isinstance(data, list):
+        raise ValueError(
+            f"{path}: expected a JSON array of patterns, "
+            f"got {type(data).__name__}")
+    pats = [pii_pattern_from_dict(d) for d in data]   # validate all first
+    for p in pats:
+        register_pii_pattern(p)
+    return len(pats)
+
+
 def _scan_pii(text: str) -> list[tuple[PIIPattern, str]]:
     """Validated, de-duplicated PII hits in one serialized blob.
 
@@ -452,7 +589,7 @@ def _scan_pii(text: str) -> list[tuple[PIIPattern, str]]:
     text = _normalize_for_scan(text)
     hits: list[tuple[PIIPattern, str]] = []
     seen: set[tuple[str, str]] = set()
-    for pat in PII_PATTERNS:
+    for pat in _active_patterns():
         for m in pat.pattern.finditer(text):
             value = m.group(m.lastindex) if m.lastindex else m.group(0)
             if pat.validator and not pat.validator(value):
