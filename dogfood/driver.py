@@ -186,9 +186,9 @@ def summarize_log(log_path: Path) -> dict:
 
 
 def detect_log(log_path: Path) -> dict:
-    """Run `glassport detect` on a session log."""
+    """Run `glassport detect --sarif` on a session log."""
     proc = subprocess.run(
-        [sys.executable, str(TAP), "detect", str(log_path)],
+        [sys.executable, str(TAP), "detect", "--sarif", str(log_path)],
         capture_output=True,
         text=True,
         check=False,
