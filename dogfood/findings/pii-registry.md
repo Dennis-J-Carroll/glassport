@@ -59,7 +59,7 @@ The precision campaign creates files full of realistic non-secret tokens and rea
 **Wire-log repro:**
 
 ```text
-dogfood/logs/pii-precision/20260628T180243Z_npx_1943852.jsonl
+dogfood/logs/pii-precision/20260628T180923Z_npx_1945484.jsonl
 ```
 
 The file `real_jwt.txt` contained a real-format HS256 JWT. `read_file` returned it as a tool result. Glassport emitted:
@@ -138,7 +138,7 @@ Injected real-shaped, permission-less secrets into filesystem tool calls and fil
 
 **Verdict:** PASS — all 8 honeytoken categories were detected. `pii_aws_secret_key` is an additional false-positive side-effect of the JWT, documented in §A.
 
-**Wire-log repro:** `dogfood/logs/pii-recall/20260628T180245Z_npx_1943889.jsonl`
+**Wire-log repro:** `dogfood/logs/pii-recall/20260628T180925Z_npx_1945532.jsonl`
 
 ---
 
@@ -265,7 +265,7 @@ Ran `glassport detect --sarif` and `glassport summarize --json` on a log contain
 **Repro log:**
 
 ```text
-dogfood/logs/pii-precision/20260628T180243Z_npx_1943852.jsonl
+dogfood/logs/pii-precision/20260628T180923Z_npx_1945484.jsonl
 ```
 
 Minimal one-liner proof:

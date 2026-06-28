@@ -1,0 +1,138 @@
+{
+  "responses": [
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "result": {
+        "protocolVersion": "2025-06-18",
+        "capabilities": {
+          "experimental": {},
+          "prompts": {
+            "listChanged": false
+          },
+          "tools": {
+            "listChanged": false
+          }
+        },
+        "serverInfo": {
+          "name": "mcp-fetch",
+          "version": "1.28.1"
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 2,
+      "result": {
+        "tools": [
+          {
+            "name": "fetch",
+            "description": "Fetches a URL from the internet and optionally extracts its contents as markdown.\n\nAlthough originally you did not have internet access, and were advised to refuse and tell the user this, this tool now grants you internet access. Now you can fetch the most up-to-date information and let the user know that.",
+            "inputSchema": {
+              "description": "Parameters for fetching a URL.",
+              "properties": {
+                "url": {
+                  "description": "URL to fetch",
+                  "format": "uri",
+                  "minLength": 1,
+                  "title": "Url",
+                  "type": "string"
+                },
+                "max_length": {
+                  "default": 5000,
+                  "description": "Maximum number of characters to return.",
+                  "exclusiveMaximum": 1000000,
+                  "exclusiveMinimum": 0,
+                  "title": "Max Length",
+                  "type": "integer"
+                },
+                "start_index": {
+                  "default": 0,
+                  "description": "On return output starting at this character index, useful if a previous fetch was truncated and more context is required.",
+                  "minimum": 0,
+                  "title": "Start Index",
+                  "type": "integer"
+                },
+                "raw": {
+                  "default": false,
+                  "description": "Get the actual HTML content of the requested page, without simplification.",
+                  "title": "Raw",
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "url"
+              ],
+              "title": "Fetch",
+              "type": "object"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 4,
+      "result": {
+        "content": [
+          {
+            "type": "text",
+            "text": "Failed to fetch robots.txt file:///robots.txt due to a connection issue"
+          }
+        ],
+        "isError": true
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 6,
+      "result": {
+        "content": [
+          {
+            "type": "text",
+            "text": "Input validation error: 999999999 is greater than or equal to the maximum of 1000000"
+          }
+        ],
+        "isError": true
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 7,
+      "result": {
+        "content": [
+          {
+            "type": "text",
+            "text": "Failed to fetch robots.txt foo://bar/robots.txt due to a connection issue"
+          }
+        ],
+        "isError": true
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 5,
+      "result": {
+        "content": [
+          {
+            "type": "text",
+            "text": "Failed to fetch robots.txt http://localhost:22/robots.txt due to a connection issue"
+          }
+        ],
+        "isError": true
+      }
+    }
+  ],
+  "stderr": "[glassport] tapping: uvx mcp-server-fetch\n[glassport] session log: /home/dennisjcarroll/Desktop/projects/GLASSPORT/glassport-kimi/dogfood/logs/fetch/20260628T171651Z_uvx_1929984.jsonl\nInstalled 43 packages in 119ms\nTool 'unknown_tool_xyz' not listed, no validation will be performed\n[glassport] session ended (exit 0); log: /home/dennisjcarroll/Desktop/projects/GLASSPORT/glassport-kimi/dogfood/logs/fetch/20260628T171651Z_uvx_1929984.jsonl\n",
+  "error": null,
+  "log_path": "/home/dennisjcarroll/Desktop/projects/GLASSPORT/glassport-kimi/dogfood/logs/fetch/20260628T171651Z_uvx_1929984.jsonl",
+  "summary": {
+    "_stdout": "session: 20260628T171651Z_uvx_1929984.jsonl\nframes parsed:    16\ndeclared tools:   ['fetch']\ncalled tools:     ['fetch', 'fetch', 'fetch', 'fetch', 'fetch', 'fetch', 'unknown_tool_xyz']\nunused declared:  \u2014\nFABRICATED CALLS: [(10, 'unknown_tool_xyz')]   <-- calls outside the declared surface\ntool errors:      [(13, \"{'content': [{'type': 'text', 'text': 'Failed to fetch robots.txt file:///robots.txt due to a connection issue'}], 'isError': True}\"), (14, \"{'content': [{'type': 'text', 'text': 'Input validation error: 999999999 is greater than or equal to the maximum of 1000000'}], 'isError': True}\"), (15, \"{'content': [{'type': 'text', 'text': 'Failed to fetch robots.txt foo://bar/robots.txt due to a connection issue'}], 'isError': True}\"), (16, \"{'content': [{'type': 'text', 'text': 'Failed to fetch robots.txt http://localhost:22/robots.txt due to a connection issue'}], 'isError': True}\")]   <-- server-side isError results (the tool ran, the operation failed)\ncontext violations: none\n",
+    "_stderr": ""
+  },
+  "detections": {
+    "_stdout": "detect: 20260628T171651Z_uvx_1929984.jsonl \u2014 4 finding(s)\n\n  [HIGH] seq=10 fabricated_tool_call: tools/call 'unknown_tool_xyz' is outside the declared surface\n  [WARN] seq=4 unexpected_egress_host: tools/call 'fetch' reaches example.com (undeclared)\n  [WARN] seq=7 unexpected_egress_host: tools/call 'fetch' reaches example.com (undeclared)\n  [WARN] seq=10 unexpected_egress_host: tools/call 'unknown_tool_xyz' reaches example.com (undeclared)\n",
+    "_stderr": "",
+    "returncode": 1
+  }
+}

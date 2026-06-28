@@ -1,0 +1,252 @@
+{
+  "api_key_present": false,
+  "cmd": [
+    "npx",
+    "-y",
+    "exa-mcp-server"
+  ],
+  "responses": [
+    {
+      "result": {
+        "protocolVersion": "2025-06-18",
+        "capabilities": {
+          "tools": {
+            "listChanged": true
+          },
+          "prompts": {
+            "listChanged": true
+          },
+          "completions": {},
+          "resources": {
+            "listChanged": true
+          }
+        },
+        "serverInfo": {
+          "name": "exa-search-server",
+          "title": "Exa",
+          "version": "3.2.1"
+        }
+      },
+      "jsonrpc": "2.0",
+      "id": 1
+    },
+    {
+      "result": {
+        "tools": [
+          {
+            "name": "web_search_exa",
+            "description": "Search the web for any topic and get clean, ready-to-use content.\n\n      Best for: Finding current information, news, facts, people, companies, or answering questions about any topic.\n      Returns: Clean text content from top search results.\n\n      Query tips: \n      describe the ideal page, not keywords. \"blog post comparing React and Vue performance\" not \"React vs Vue\".\n      Use category:people / category:company to search through Linkedin profiles / companies respectively.\n      If highlights are insufficient, follow up with web_fetch_exa on the best URLs.",
+            "inputSchema": {
+              "type": "object",
+              "properties": {
+                "query": {
+                  "type": "string",
+                  "description": "Natural language search query. Should be a semantically rich description of the ideal page, not just keywords. Optionally include category:<type> (company, people) to focus results \u2014 e.g. 'category:people John Doe software engineer'."
+                },
+                "numResults": {
+                  "type": "number",
+                  "minimum": 1,
+                  "maximum": 100,
+                  "description": "Number of search results to return (must be a number, default: 10)."
+                }
+              },
+              "required": [
+                "query"
+              ],
+              "additionalProperties": false,
+              "$schema": "http://json-schema.org/draft-07/schema#"
+            },
+            "annotations": {
+              "readOnlyHint": true,
+              "destructiveHint": false,
+              "openWorldHint": false,
+              "idempotentHint": true
+            },
+            "execution": {
+              "taskSupport": "forbidden"
+            }
+          },
+          {
+            "name": "web_fetch_exa",
+            "description": "Read a webpage's full content as clean markdown. Use after web_search_exa when highlights are insufficient or to read any URL.\n\nBest for: Extracting full content from known URLs. Batch multiple URLs in one call.\nReturns: Clean text content and metadata from the page(s).",
+            "inputSchema": {
+              "type": "object",
+              "properties": {
+                "urls": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "URLs to read. Batch multiple URLs in one call."
+                },
+                "maxCharacters": {
+                  "type": "number",
+                  "minimum": 1,
+                  "description": "Maximum characters to extract per page (must be a positive number, default: 3000)"
+                }
+              },
+              "required": [
+                "urls"
+              ],
+              "additionalProperties": false,
+              "$schema": "http://json-schema.org/draft-07/schema#"
+            },
+            "annotations": {
+              "readOnlyHint": true,
+              "destructiveHint": false,
+              "openWorldHint": false,
+              "idempotentHint": true
+            },
+            "execution": {
+              "taskSupport": "forbidden"
+            }
+          }
+        ]
+      },
+      "jsonrpc": "2.0",
+      "id": 2
+    },
+    {
+      "result": {
+        "content": [
+          {
+            "type": "text",
+            "text": "web_search_exa error (401): API key must be provided as an argument or as an environment variable (EXA_API_KEY)\nTimestamp: 2026-06-28T17:16:58.897Z"
+          }
+        ],
+        "isError": true
+      },
+      "jsonrpc": "2.0",
+      "id": 3
+    },
+    {
+      "result": {
+        "content": [
+          {
+            "type": "text",
+            "text": "MCP error -32602: Input validation error: Invalid arguments for tool web_search_exa: [\n  {\n    \"code\": \"invalid_type\",\n    \"expected\": \"string\",\n    \"received\": \"number\",\n    \"path\": [\n      \"query\"\n    ],\n    \"message\": \"Expected string, received number\"\n  }\n]"
+          }
+        ],
+        "isError": true
+      },
+      "jsonrpc": "2.0",
+      "id": 9
+    },
+    {
+      "result": {
+        "content": [
+          {
+            "type": "text",
+            "text": "web_fetch_exa error (401): API key must be provided as an argument or as an environment variable (EXA_API_KEY)\nTimestamp: 2026-06-28T17:16:58.902Z"
+          }
+        ],
+        "isError": true
+      },
+      "jsonrpc": "2.0",
+      "id": 11
+    },
+    {
+      "result": {
+        "content": [
+          {
+            "type": "text",
+            "text": "web_fetch_exa error (401): API key must be provided as an argument or as an environment variable (EXA_API_KEY)\nTimestamp: 2026-06-28T17:16:58.902Z"
+          }
+        ],
+        "isError": true
+      },
+      "jsonrpc": "2.0",
+      "id": 12
+    },
+    {
+      "result": {
+        "content": [
+          {
+            "type": "text",
+            "text": "web_search_exa error (401): API key must be provided as an argument or as an environment variable (EXA_API_KEY)\nTimestamp: 2026-06-28T17:16:58.901Z"
+          }
+        ],
+        "isError": true
+      },
+      "jsonrpc": "2.0",
+      "id": 7
+    },
+    {
+      "result": {
+        "content": [
+          {
+            "type": "text",
+            "text": "web_search_exa error (401): API key must be provided as an argument or as an environment variable (EXA_API_KEY)\nTimestamp: 2026-06-28T17:16:58.899Z"
+          }
+        ],
+        "isError": true
+      },
+      "jsonrpc": "2.0",
+      "id": 6
+    },
+    {
+      "result": {
+        "content": [
+          {
+            "type": "text",
+            "text": "MCP error -32602: Input validation error: Invalid arguments for tool web_search_exa: [\n  {\n    \"code\": \"invalid_type\",\n    \"expected\": \"string\",\n    \"received\": \"undefined\",\n    \"path\": [\n      \"query\"\n    ],\n    \"message\": \"Required\"\n  }\n]"
+          }
+        ],
+        "isError": true
+      },
+      "jsonrpc": "2.0",
+      "id": 8
+    },
+    {
+      "result": {
+        "content": [
+          {
+            "type": "text",
+            "text": "web_fetch_exa error (401): API key must be provided as an argument or as an environment variable (EXA_API_KEY)\nTimestamp: 2026-06-28T17:16:58.902Z"
+          }
+        ],
+        "isError": true
+      },
+      "jsonrpc": "2.0",
+      "id": 4
+    },
+    {
+      "result": {
+        "content": [
+          {
+            "type": "text",
+            "text": "MCP error -32602: Tool nonexistent_tool_xyz not found"
+          }
+        ],
+        "isError": true
+      },
+      "jsonrpc": "2.0",
+      "id": 5
+    },
+    {
+      "result": {
+        "content": [
+          {
+            "type": "text",
+            "text": "web_fetch_exa error (401): API key must be provided as an argument or as an environment variable (EXA_API_KEY)\nTimestamp: 2026-06-28T17:16:58.902Z"
+          }
+        ],
+        "isError": true
+      },
+      "jsonrpc": "2.0",
+      "id": 10
+    }
+  ],
+  "stderr": "[glassport] tapping: npx -y exa-mcp-server\n[glassport] session log: /home/dennisjcarroll/Desktop/projects/GLASSPORT/glassport-kimi/dogfood/logs/exa/20260628T171652Z_npx_1930024.jsonl\n[smithery] Starting MCP server with stdio transport\n[smithery] Creating server.\n[EXA-MCP-DEBUG] Server initialized with modern MCP SDK and Smithery CLI support\n(node:1930108) [DEP0040] DeprecationWarning: The `punycode` module is deprecated. Please use a userland alternative instead.\n(Use `node --trace-deprecation ...` to show where the warning was created)\n[smithery] MCP server connected to stdio transport\n[smithery] Configuration loaded: { debug: false }\n[EXA-MCP-DEBUG] [web_search_exa-1782667018894-1vcz0] [web_search_exa] Starting search for query: \"python asyncio\"\n[EXA-MCP-DEBUG] [web_search_exa-1782667018894-1vcz0] [web_search_exa] Error: API key must be provided as an argument or as an environment variable (EXA_API_KEY)\n[EXA-MCP-DEBUG] [web_search_exa-1782667018899-bnzta] [web_search_exa] Starting search for query: \"\"\n[EXA-MCP-DEBUG] [web_search_exa-1782667018899-bnzta] [web_search_exa] Error: API key must be provided as an argument or as an environment variable (EXA_API_KEY)\n[EXA-MCP-DEBUG] [web_search_exa-1782667018900-yl20v] [web_search_exa] Starting search for query: \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"\n[EXA-MCP-DEBUG] [web_search_exa-1782667018900-yl20v] [web_search_exa] Error: API key must be provided as an argument or as an environment variable (EXA_API_KEY)\n[EXA-MCP-DEBUG] [web_fetch_exa-1782667018902-h6a4j] [web_fetch_exa] Starting search for query: \"\"\n[EXA-MCP-DEBUG] [web_fetch_exa-1782667018902-h6a4j] [web_fetch_exa] Error: API key must be provided as an argument or as an environment variable (EXA_API_KEY)\n[EXA-MCP-DEBUG] [web_fetch_exa-1782667018902-auo1e] [web_fetch_exa] Starting search for query: \"https://example.com\"\n[EXA-MCP-DEBUG] [web_fetch_exa-1782667018902-auo1e] [web_fetch_exa] Error: API key must be provided as an argument or as an environment variable (EXA_API_KEY)\n[EXA-MCP-DEBUG] [web_fetch_exa-1782667018902-469yh] [web_fetch_exa] Starting search for query: \"file:///etc/passwd\"\n[EXA-MCP-DEBUG] [web_fetch_exa-1782667018902-469yh] [web_fetch_exa] Error: API key must be provided as an argument or as an environment variable (EXA_API_KEY)\n[EXA-MCP-DEBUG] [web_fetch_exa-1782667018902-c8d73] [web_fetch_exa] Starting search for query: \"http://localhost:22\"\n[EXA-MCP-DEBUG] [web_fetch_exa-1782667018902-c8d73] [web_fetch_exa] Error: API key must be provided as an argument or as an environment variable (EXA_API_KEY)\n[glassport] session ended (exit 0); log: /home/dennisjcarroll/Desktop/projects/GLASSPORT/glassport-kimi/dogfood/logs/exa/20260628T171652Z_npx_1930024.jsonl\n",
+  "error": null,
+  "log_path": "/home/dennisjcarroll/Desktop/projects/GLASSPORT/glassport-kimi/dogfood/logs/exa/20260628T171652Z_npx_1930024.jsonl",
+  "summary": {
+    "_stdout": "session: 20260628T171652Z_npx_1930024.jsonl\nframes parsed:    25\ndeclared tools:   ['web_fetch_exa', 'web_search_exa']\ncalled tools:     ['web_search_exa', 'web_fetch_exa', 'nonexistent_tool_xyz', 'web_search_exa', 'web_search_exa', 'web_search_exa', 'web_search_exa', 'web_fetch_exa', 'web_fetch_exa', 'web_fetch_exa']\nunused declared:  \u2014\nFABRICATED CALLS: [(6, 'nonexistent_tool_xyz')]   <-- calls outside the declared surface\ntool errors:      [(16, \"{'content': [{'type': 'text', 'text': 'web_search_exa error (401): API key must be provided as an argument or as an environment variable (EXA_API_KEY)\\\\nTimestamp: 2026-06-28T17:16:58.897Z'}], 'isError': True}\"), (17, '{\\'content\\': [{\\'type\\': \\'text\\', \\'text\\': \\'MCP error -32602: Input validation error: Invalid arguments for tool web_search_exa: [\\\\n  {\\\\n    \"code\": \"invalid_type\",\\\\n    \"expected\": \"string\",\\\\n    \"received\": \"number\",\\\\n    \"path\": [\\\\n      \"query\"\\\\n    ],\\\\n    \"message\": \"Expected string, received number\"\\\\n  }\\\\n]\\'}], \\'isError\\': True}'), (18, \"{'content': [{'type': 'text', 'text': 'web_fetch_exa error (401): API key must be provided as an argument or as an environment variable (EXA_API_KEY)\\\\nTimestamp: 2026-06-28T17:16:58.902Z'}], 'isError': True}\"), (19, \"{'content': [{'type': 'text', 'text': 'web_fetch_exa error (401): API key must be provided as an argument or as an environment variable (EXA_API_KEY)\\\\nTimestamp: 2026-06-28T17:16:58.902Z'}], 'isError': True}\"), (20, \"{'content': [{'type': 'text', 'text': 'web_search_exa error (401): API key must be provided as an argument or as an environment variable (EXA_API_KEY)\\\\nTimestamp: 2026-06-28T17:16:58.901Z'}], 'isError': True}\"), (21, \"{'content': [{'type': 'text', 'text': 'web_search_exa error (401): API key must be provided as an argument or as an environment variable (EXA_API_KEY)\\\\nTimestamp: 2026-06-28T17:16:58.899Z'}], 'isError': True}\"), (22, '{\\'content\\': [{\\'type\\': \\'text\\', \\'text\\': \\'MCP error -32602: Input validation error: Invalid arguments for tool web_search_exa: [\\\\n  {\\\\n    \"code\": \"invalid_type\",\\\\n    \"expected\": \"string\",\\\\n    \"received\": \"undefined\",\\\\n    \"path\": [\\\\n      \"query\"\\\\n    ],\\\\n    \"message\": \"Required\"\\\\n  }\\\\n]\\'}], \\'isError\\': True}'), (23, \"{'content': [{'type': 'text', 'text': 'web_fetch_exa error (401): API key must be provided as an argument or as an environment variable (EXA_API_KEY)\\\\nTimestamp: 2026-06-28T17:16:58.902Z'}], 'isError': True}\"), (24, \"{'content': [{'type': 'text', 'text': 'MCP error -32602: Tool nonexistent_tool_xyz not found'}], 'isError': True}\"), (25, \"{'content': [{'type': 'text', 'text': 'web_fetch_exa error (401): API key must be provided as an argument or as an environment variable (EXA_API_KEY)\\\\nTimestamp: 2026-06-28T17:16:58.902Z'}], 'isError': True}\")]   <-- server-side isError results (the tool ran, the operation failed)\nCONTEXT VIOLATIONS:\n  [sev 2] seq 9 schema_violation: 'web_search_exa': missing required argument 'query'\n  [sev 2] seq 9 schema_violation: 'web_search_exa': unexpected argument 'bad_param' (additionalProperties: false)\n  [sev 2] seq 10 schema_violation: 'web_search_exa': argument 'query' is int, schema expects string\n",
+    "_stderr": ""
+  },
+  "detections": {
+    "_stdout": "detect: 20260628T171652Z_npx_1930024.jsonl \u2014 5 finding(s)\n\n  [HIGH] seq=6 fabricated_tool_call: tools/call 'nonexistent_tool_xyz' is outside the declared surface\n  [WARN] seq=5 unexpected_egress_host: tools/call 'web_fetch_exa' reaches example.com (undeclared)\n  [WARN] seq=9 schema_violation: 'web_search_exa': missing required argument 'query'\n  [WARN] seq=9 schema_violation: 'web_search_exa': unexpected argument 'bad_param' (additionalProperties: false)\n  [WARN] seq=10 schema_violation: 'web_search_exa': argument 'query' is int, schema expects string\n",
+    "_stderr": "",
+    "returncode": 1
+  }
+}
