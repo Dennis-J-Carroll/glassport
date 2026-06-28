@@ -20,6 +20,8 @@ or hallucinated unless proven otherwise.
 """
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
 import math
 import os
@@ -389,6 +391,61 @@ def _entropy_by_charset(s: str) -> bool:
     return h > 3.0                                     # natural-language ceiling
 
 
+_B58_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+_B58_INDEX = {c: i for i, c in enumerate(_B58_ALPHABET)}
+
+
+def _base58check_check(s: str) -> bool:
+    """Base58check (Bitcoin/Solana addresses): decode base58, split off the
+    trailing 4-byte checksum, and verify it equals the first 4 bytes of
+    SHA-256(SHA-256(payload)). A 32-bit checksum makes a coincidental pass
+    ~1 in 4 billion. Total — False on any non-base58 / too-short input."""
+    if not 26 <= len(s) <= 35 or any(c not in _B58_INDEX for c in s):
+        return False
+    try:
+        n = 0
+        for c in s:
+            n = n * 58 + _B58_INDEX[c]
+        body = n.to_bytes((n.bit_length() + 7) // 8, "big")
+        body = b"\x00" * (len(s) - len(s.lstrip("1"))) + body   # leading-1 pads
+        if len(body) < 5:
+            return False
+        payload, checksum = body[:-4], body[-4:]
+        digest = hashlib.sha256(hashlib.sha256(payload).digest()).digest()
+        return digest[:4] == checksum
+    except Exception:                                  # pragma: no cover
+        return False
+
+
+def _jwt_check(s: str) -> bool:
+    """JWT structural validation: three base64url segments whose FIRST segment
+    decodes to a JSON object carrying an "alg" claim. Cheap structural proof
+    (not signature verification) — enough to cull an eyJ.* string that merely
+    looks like a JWT but isn't one. Total."""
+    parts = s.split(".")
+    if len(parts) != 3:
+        return False
+    head = parts[0]
+    try:
+        raw = base64.urlsafe_b64decode(head + "=" * (-len(head) % 4))
+        obj = json.loads(raw)
+        return isinstance(obj, dict) and "alg" in obj
+    except Exception:
+        return False
+
+
+_UUID4_RE = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+    re.I)
+
+
+def _uuid4_check(s: str) -> bool:
+    """UUIDv4 structural check: the version nibble is 4 and the variant nibble
+    is 8/9/a/b (RFC 4122). Total. (A UUID is an identifier, not a secret — this
+    is a format primitive for custom patterns, not a default detection.)"""
+    return bool(_UUID4_RE.match(s))
+
+
 class PIIPattern(NamedTuple):
     category: str
     severity: int                       # 1 worth a look · 2 should not · 3 hostile
@@ -439,7 +496,7 @@ PII_PATTERNS: list[PIIPattern] = [
         None, "database URL with credentials"),
     PIIPattern("jwt_token", 2, re.compile(
         r"(eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,})"),
-        None, "JSON Web Token"),
+        _jwt_check, "JSON Web Token"),
     PIIPattern("generic_api_key", 2, re.compile(
         r"(?i)(?:api[_-]?key|apikey|secret[_-]?key|access[_-]?token|"
         r"auth[_-]?token|client[_-]?secret)"
@@ -595,6 +652,9 @@ _NAMED_VALIDATORS: dict[str, Callable[[str], bool]] = {
     "ssn": _validate_ssn,       # SSA-issued ranges
     "iban": _iban_check,        # ISO 13616 MOD-97-10
     "aba": _aba_check,          # routing weighted-sum + Fed leading-range
+    "base58": _base58check_check,  # Bitcoin/Solana address SHA-256d checksum
+    "jwt": _jwt_check,          # three base64url segments, header decodes to JSON
+    "uuid4": _uuid4_check,      # RFC 4122 version/variant bits
     # Entropy gates — the recall-oriented fallback for opaque random tokens.
     # _calculate_entropy is total (0.0 on empty), so the lambdas can't raise
     # on the str a regex match always yields. Two tiers, per the cascaded-
