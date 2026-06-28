@@ -287,6 +287,40 @@ Three properties keep this honest:
 
 The detector pass is also **fault-isolated**: if one detector raises, `annotate()` records a `detector_error` annotation and the rest still run, so a single bad pass can't blind the overwatch.
 
+### Custom PII patterns
+
+The built-in catalog covers the common credentials, but your secrets are your own. Two ways to extend it — both feed the same scan, kept separate from the built-ins so the baseline can't be corrupted:
+
+**Declarative (CI-friendly, no code).** Point an env var at a JSON file:
+
+```bash
+export GLASSPORT_PII_PATTERNS=/etc/glassport/pii.json
+```
+
+```json
+[
+  { "category": "acme_token", "severity": 3,
+    "pattern": "acme-[A-Za-z0-9]{32}",
+    "description": "Acme API token",
+    "validator": "entropy" }
+]
+```
+
+`severity` is `1`–`3`; `validator` is optional and names a built-in precision check — `luhn`, `ssn`, `entropy` (>3.0 bits/char), or `entropy_high` (>4.0, culls high-entropy non-secrets like a hex digest). A bad regex, an out-of-range severity, or an unknown validator name is rejected **loudly** when loaded explicitly — but the env-var path is **fail-safe**: a misconfigured file warns to stderr and the built-in scan keeps running. A typo in your custom patterns can never blind the detector.
+
+**In code (full power).** Register a `PIIPattern` with your own callable validator — anything JSON can't express:
+
+```python
+from glassport.detectors import register_pii_pattern, PIIPattern
+import re
+
+register_pii_pattern(PIIPattern(
+    "acme_token", 3, re.compile(r"acme-[A-Za-z0-9]{32}-(?:live|test)"),
+    lambda s: s.endswith("-live"), "Acme live token"))
+```
+
+Custom patterns are first-class: same dedup, same non-reversible redaction, same egress escalation as the built-ins.
+
 ---
 
 ## Session reports
