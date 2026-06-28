@@ -160,6 +160,37 @@ class TestNamedValidators(PluginRegistryBase):
                                       f"{name} not total on {hostile[:8]!r}")
 
 
+class TestPerCharsetEntropy(PluginRegistryBase):
+    """M3: entropy_auto picks the threshold from the value's own alphabet —
+    hex 3.0, alphanumeric 3.7, base64 4.5 — because one global number is too
+    loose for base64 and too tight for hex. Values measured (H bits/char)."""
+    def fn(self):
+        return detectors._NAMED_VALIDATORS["entropy_auto"]
+
+    def test_named_in_menu(self):
+        self.assertIn("entropy_auto", detectors._NAMED_VALIDATORS)
+
+    def test_hex_uses_the_low_threshold(self):
+        self.assertTrue(self.fn()("a3f5c8b1d2e4f6a7b8c9d0e1f2a3b4c5"))  # H=3.91
+        self.assertFalse(self.fn()("aaaa1111bbbb2222"))                 # H=2.00
+
+    def test_alnum_tier_culls_what_plain_entropy_keeps(self):
+        # the headline: a structured-ish alnum string (H=3.15) clears the
+        # global >3.0 gate but is culled by the 3.7 alphanumeric threshold.
+        # (must contain a non-hex letter, else it reads as hex / 3.0 tier.)
+        v = "xyzXYZ789xyzXYZ789xy"
+        self.assertTrue(detectors._NAMED_VALIDATORS["entropy"](v))   # plain keeps
+        self.assertFalse(self.fn()(v))                                # auto culls
+
+    def test_base64_tier_is_strictest(self):
+        self.assertFalse(self.fn()("aB3+dE6/gH9=aB3+dE6/jK2"))        # H=3.83 cull
+        self.assertTrue(self.fn()("kJ8x+Q2m/Z9p=L4vR7tB1nW6"))        # H=4.59 keep
+
+    def test_total_on_hostile_input(self):
+        for s in ("", "x" * 50_000, "!!!", "123"):
+            self.assertIsInstance(self.fn()(s), bool)
+
+
 class TestEnvAutoload(PluginRegistryBase):
     def write_json(self, tmp, data):
         p = Path(tmp) / "pii.json"

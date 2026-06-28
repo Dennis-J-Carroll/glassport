@@ -306,7 +306,7 @@ export GLASSPORT_PII_PATTERNS=/etc/glassport/pii.json
 ]
 ```
 
-`severity` is `1`–`3`; `validator` is optional and names a built-in precision check — `luhn`, `ssn`, `iban` (ISO 13616 MOD-97), `aba` (routing checksum + Federal Reserve range), `entropy` (>3.0 bits/char), or `entropy_high` (>4.0, culls high-entropy non-secrets like a hex digest). A bad regex, an out-of-range severity, or an unknown validator name is rejected **loudly** when loaded explicitly — but the env-var path is **fail-safe**: a misconfigured file warns to stderr and the built-in scan keeps running. A typo in your custom patterns can never blind the detector.
+`severity` is `1`–`3`; `validator` is optional and names a built-in precision check — `luhn`, `ssn`, `iban` (ISO 13616 MOD-97), `aba` (routing checksum + Federal Reserve range), `entropy` (>3.0 bits/char), `entropy_high` (>4.0, culls high-entropy non-secrets like a hex digest), or `entropy_auto` (per-charset threshold — hex 3.0 / alphanumeric 3.7 / base64 4.5, chosen from the value's own alphabet). A bad regex, an out-of-range severity, or an unknown validator name is rejected **loudly** when loaded explicitly — but the env-var path is **fail-safe**: a misconfigured file warns to stderr and the built-in scan keeps running. A typo in your custom patterns can never blind the detector.
 
 **In code (full power).** Register a `PIIPattern` with your own callable validator — anything JSON can't express:
 
