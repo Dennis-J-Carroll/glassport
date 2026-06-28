@@ -1,0 +1,147 @@
+{
+  "campaign_a_precision": {
+    "allowed_dir": "/tmp/glassport-pii-precision-tqexx3sq",
+    "log_path": "/home/dennisjcarroll/Desktop/projects/GLASSPORT/glassport-kimi/dogfood/logs/pii-precision/20260628T180243Z_npx_1943852.jsonl",
+    "error": null,
+    "stderr": "[glassport] tapping: npx -y @modelcontextprotocol/server-filesystem /tmp/glassport-pii-precision-tqexx3sq\n[glassport] session log: /home/dennisjcarroll/Desktop/projects/GLASSPORT/glassport-kimi/dogfood/logs/pii-precision/20260628T180243Z_npx_1943852.jsonl\nSecure MCP Filesystem Server running on stdio\nClient does not support MCP Roots, using allowed directories set from server args: [ '/tmp/glassport-pii-precision-tqexx3sq' ]\n[glassport] session ended (exit 0); log: /home/dennisjcarroll/Desktop/projects/GLASSPORT/glassport-kimi/dogfood/logs/pii-precision/20260628T180243Z_npx_1943852.jsonl\n",
+    "fp_count": 1,
+    "false_positives": [
+      {
+        "ruleId": "glassport/pii_in_result_aws_secret_key",
+        "message": "tool result leaks AWS secret access key (entropy)"
+      }
+    ]
+  },
+  "campaign_b_recall": {
+    "allowed_dir": "/tmp/glassport-pii-recall-3yh6z99q",
+    "log_path": "/home/dennisjcarroll/Desktop/projects/GLASSPORT/glassport-kimi/dogfood/logs/pii-recall/20260628T180245Z_npx_1943889.jsonl",
+    "error": null,
+    "found_subcategories": [
+      "pii_aws_secret_key",
+      "pii_credit_card",
+      "pii_in_result_aws_access_key",
+      "pii_in_result_credit_card",
+      "pii_in_result_database_url",
+      "pii_in_result_github_token",
+      "pii_in_result_iban",
+      "pii_in_result_openai_key",
+      "pii_in_result_rsa_private_key",
+      "pii_in_result_ssn",
+      "pii_jwt_token"
+    ],
+    "expected_categories": [
+      "aws_access_key",
+      "credit_card",
+      "database_url",
+      "github_token",
+      "iban",
+      "jwt_token",
+      "openai_key",
+      "ssn"
+    ],
+    "missed_categories": [],
+    "recall_miss_count": 0
+  },
+  "campaign_c_registry_failsafe": {
+    "tmp": "/tmp/glassport-pii-failsafe-tfnlnyod",
+    "cases": {
+      "malformed_json": {
+        "crashed": false,
+        "email_found": true,
+        "stderr": "glassport: ignoring GLASSPORT_PII_PATTERNS (/tmp/glassport-pii-failsafe-tfnlnyod/malformed_json.json): /tmp/glassport-pii-failsafe-tfnlnyod/malformed_json.json: invalid JSON: Expecting property name enclosed in double quotes: line 1 column 3 (char 2)\n",
+        "annotations": 1
+      },
+      "non_array": {
+        "crashed": false,
+        "email_found": true,
+        "stderr": "glassport: ignoring GLASSPORT_PII_PATTERNS (/tmp/glassport-pii-failsafe-tfnlnyod/non_array.json): /tmp/glassport-pii-failsafe-tfnlnyod/non_array.json: expected a JSON array of patterns, got dict\n",
+        "annotations": 1
+      },
+      "missing_field": {
+        "crashed": false,
+        "email_found": true,
+        "stderr": "glassport: ignoring GLASSPORT_PII_PATTERNS (/tmp/glassport-pii-failsafe-tfnlnyod/missing_field.json): custom PII pattern missing field 'description'\n",
+        "annotations": 1
+      },
+      "bad_severity": {
+        "crashed": false,
+        "email_found": true,
+        "stderr": "glassport: ignoring GLASSPORT_PII_PATTERNS (/tmp/glassport-pii-failsafe-tfnlnyod/bad_severity.json): severity must be an int in 1..3, got 9 for category 'x'\n",
+        "annotations": 1
+      },
+      "bad_regex": {
+        "crashed": false,
+        "email_found": true,
+        "stderr": "glassport: ignoring GLASSPORT_PII_PATTERNS (/tmp/glassport-pii-failsafe-tfnlnyod/bad_regex.json): bad regex for category 'x': missing ), unterminated subpattern at position 0\n",
+        "annotations": 1
+      },
+      "unknown_validator": {
+        "crashed": false,
+        "email_found": true,
+        "stderr": "glassport: ignoring GLASSPORT_PII_PATTERNS (/tmp/glassport-pii-failsafe-tfnlnyod/unknown_validator.json): unknown validator 'no_such' for category 'x'; known names: ['aba', 'base58', 'entropy', 'entropy_auto', 'entropy_high', 'iban', 'jwt', 'luhn', 'ssn', 'uuid4']\n",
+        "annotations": 1
+      },
+      "redos_regex": {
+        "crashed": false,
+        "email_found": true,
+        "stderr": "",
+        "annotations": 1
+      },
+      "aba_off_by_default": {
+        "aba_found": false
+      },
+      "aba_on_with_pack": {
+        "aba_found": true
+      }
+    }
+  },
+  "campaign_d_checksums": {
+    "iban": {
+      "tp": 2,
+      "fp": 0
+    },
+    "aba": {
+      "tp": 2,
+      "fp": 0
+    },
+    "base58": {
+      "tp": 1,
+      "fp": 0
+    },
+    "jwt": {
+      "tp": 1,
+      "fp": 0
+    },
+    "uuid4": {
+      "tp": 1,
+      "fp": 0
+    },
+    "corrupted_iban_e2e_no_fire": true
+  },
+  "campaign_e_evasion_dos": {
+    "zero_width": {
+      "hit": true
+    },
+    "fullwidth": {
+      "hit": true
+    },
+    "redos_ms_1mb": {
+      "iban": 169.05,
+      "jwt": 173.31,
+      "base58_pack": 148.85,
+      "email": 175.08,
+      "credit_card": 151.23
+    },
+    "oversize": {
+      "cap_bytes": 1000000,
+      "secret_at_start_hit": true,
+      "secret_at_end_hit": false
+    }
+  },
+  "campaign_f_redaction": {
+    "allowed_dir": "/tmp/glassport-pii-redact-a0ugjj3x",
+    "log_path": "/home/dennisjcarroll/Desktop/projects/GLASSPORT/glassport-kimi/dogfood/logs/pii-redaction/20260628T180248Z_npx_1943927.jsonl",
+    "leaks": [],
+    "pii_count": 3
+  }
+}
