@@ -170,8 +170,10 @@ Decided and fixed — implement within these, don't re-litigate:
 "ssn":          _validate_ssn                    # already a str->bool
 ```
 
-Financial checksums (IBAN/ABA/base58) are a **Phase-B PR** — new
-`PII_PATTERNS` + validators + their own corpus.
+Financial checksums were the **Phase-B PR**. ✅ **IBAN (`iban`) and ABA
+routing (`aba`) shipped** — new `PII_PATTERNS` + validators + a P/R fixture
+corpus (`tests/test_checksums.py`). Base58check / UUIDv4 / JWT-structural
+remain available to add by the same recipe.
 
 ### Per-charset entropy reference (if you make entropy the creative piece)
 
