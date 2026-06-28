@@ -24,6 +24,7 @@ import json
 import math
 import os
 import re
+import string
 import sys
 import unicodedata
 from typing import Any, Iterator, NamedTuple, Optional, Callable
@@ -362,6 +363,32 @@ def _aba_check(s: str) -> bool:
     return sum(int(d) * w for d, w in zip(s, weights)) % 10 == 0
 
 
+_HEX_CHARS = frozenset(string.hexdigits)              # 0-9 a-f A-F
+_ALNUM_CHARS = frozenset(string.ascii_letters + string.digits)
+_B64_EXTRA = frozenset("+/=")
+
+
+def _entropy_by_charset(s: str) -> bool:
+    """M3 — entropy gate whose threshold is chosen from the value's own
+    alphabet, because a single global number is too loose for base64 (6
+    bits/char ceiling) and too tight for hex. Thresholds from the cascaded-
+    model report: hex 3.0, alphanumeric 3.7, base64 4.5. Total.
+
+    A pure-alnum string is indistinguishable from padless base64, so only an
+    actual +/= character promotes a value to the stricter base64 tier."""
+    if not s:
+        return False
+    h = _calculate_entropy(s)
+    cs = set(s)
+    if cs <= _HEX_CHARS:
+        return h > 3.0
+    if cs & _B64_EXTRA and cs <= (_ALNUM_CHARS | _B64_EXTRA):
+        return h > 4.5
+    if cs <= _ALNUM_CHARS:
+        return h > 3.7
+    return h > 3.0                                     # natural-language ceiling
+
+
 class PIIPattern(NamedTuple):
     category: str
     severity: int                       # 1 worth a look · 2 should not · 3 hostile
@@ -578,6 +605,9 @@ _NAMED_VALIDATORS: dict[str, Callable[[str], bool]] = {
     #         32-char hex digest (H~3.9) that 3.0 would keep.
     "entropy": lambda s: _calculate_entropy(s) > 3.0,
     "entropy_high": lambda s: _calculate_entropy(s) > 4.0,
+    # M3: per-charset threshold (hex 3.0 / alnum 3.7 / base64 4.5) — sharper
+    # than a single global number; picks the threshold from the value itself.
+    "entropy_auto": _entropy_by_charset,
 }
 
 

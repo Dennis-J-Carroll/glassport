@@ -184,10 +184,14 @@ Placement split by false-positive risk:
 
 Base58check / UUIDv4 / JWT-structural remain available by the same recipe.
 
-### Per-charset entropy reference (if you make entropy the creative piece)
+### Per-charset entropy reference — ✅ shipped as `entropy_auto` (M3)
 
-A single global threshold is the report's named "common mistake." Optional
-upgrade: detect the alphabet from the value, pick the threshold.
+A single global threshold is the report's named "common mistake." `entropy_auto`
+detects the alphabet from the value and picks the threshold. **Order is
+load-bearing: hex ⊆ alphanumeric**, so check hex first — `abcABC123` is all
+hex digits and must take the 3.0 tier, not 3.7. A pure-alnum string is
+indistinguishable from padless base64, so only an actual `+/=` promotes a value
+to the 4.5 base64 tier.
 
 | Charset | Max bits/char | Practical threshold |
 |---|---|---|
