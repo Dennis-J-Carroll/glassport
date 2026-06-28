@@ -306,7 +306,7 @@ export GLASSPORT_PII_PATTERNS=/etc/glassport/pii.json
 ]
 ```
 
-`severity` is `1`–`3`; `validator` is optional and names a built-in precision check — `luhn`, `ssn`, `iban` (ISO 13616 MOD-97), `aba` (routing checksum + Federal Reserve range), `entropy` (>3.0 bits/char), `entropy_high` (>4.0, culls high-entropy non-secrets like a hex digest), or `entropy_auto` (per-charset threshold — hex 3.0 / alphanumeric 3.7 / base64 4.5, chosen from the value's own alphabet). A bad regex, an out-of-range severity, or an unknown validator name is rejected **loudly** when loaded explicitly — but the env-var path is **fail-safe**: a misconfigured file warns to stderr and the built-in scan keeps running. A typo in your custom patterns can never blind the detector.
+`severity` is `1`–`3`; `validator` is optional and names a built-in precision check: checksum/format validators `luhn`, `ssn`, `iban` (ISO 13616 MOD-97), `aba` (routing checksum + Federal Reserve range), `base58` (Bitcoin/Solana address SHA-256d), `jwt` (three base64url segments, header decodes to JSON), `uuid4` (RFC 4122 version/variant); and entropy gates `entropy` (>3.0 bits/char), `entropy_high` (>4.0, culls high-entropy non-secrets like a hex digest), `entropy_auto` (per-charset threshold — hex 3.0 / alphanumeric 3.7 / base64 4.5, chosen from the value's own alphabet). A bad regex, an out-of-range severity, or an unknown validator name is rejected **loudly** when loaded explicitly — but the env-var path is **fail-safe**: a misconfigured file warns to stderr and the built-in scan keeps running. A typo in your custom patterns can never blind the detector.
 
 **In code (full power).** Register a `PIIPattern` with your own callable validator — anything JSON can't express:
 
@@ -321,11 +321,18 @@ register_pii_pattern(PIIPattern(
 
 Custom patterns are first-class: same dedup, same non-reversible redaction, same egress escalation as the built-ins.
 
-A ready-made pack lives at [`examples/pii-financial.json`](examples/pii-financial.json): ABA bank routing numbers, *opt-in* because the bare 9-digit regex is too broad to spend every user's precision budget on by default (the `aba` validator gates it on the Federal Reserve range + mod-10). IBAN, which is structured enough to barely false-positive, ships on by default. Point `GLASSPORT_PII_PATTERNS` at the pack if your server handles banking data:
+Two ready-made opt-in packs ship in [`examples/`](examples/) — both broad-regex patterns kept out of the default scan, gated by a checksum so they barely false-positive once enabled:
+
+- [`pii-financial.json`](examples/pii-financial.json) — ABA bank routing numbers (`aba` validator: Federal Reserve range + mod-10).
+- [`pii-crypto.json`](examples/pii-crypto.json) — Base58check cryptocurrency addresses (`base58` validator: SHA-256d checksum).
+
+IBAN (structured, barely false-positives) ships on by default; the broad ones are opt-in. Point `GLASSPORT_PII_PATTERNS` at a pack if your server handles that data:
 
 ```bash
-export GLASSPORT_PII_PATTERNS=examples/pii-financial.json
+export GLASSPORT_PII_PATTERNS=examples/pii-crypto.json
 ```
+
+JWTs are detected by default — and the `eyJ…` pattern is now gated by the `jwt` validator (the header must decode to JSON), so a string that merely *looks* like a JWT is no longer a false positive.
 
 ---
 

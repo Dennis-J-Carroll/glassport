@@ -1,0 +1,9 @@
+[
+  {
+    "category": "crypto_address",
+    "severity": 2,
+    "pattern": "(?<![1-9A-HJ-NP-Za-km-z])([1-9A-HJ-NP-Za-km-z]{26,35})(?![1-9A-HJ-NP-Za-km-z])",
+    "validator": "base58",
+    "description": "Base58check cryptocurrency address (opt-in: broad base58 regex, validator-gated by SHA-256d checksum)"
+  }
+]
