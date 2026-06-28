@@ -488,9 +488,12 @@ def campaign_evasion_dos() -> dict:
     zwsp = "\u200b"
     obfuscated_cc = zwsp.join(base_cc)
     fullwidth_cc = "".join(chr(ord(c) + 0xFEE0) for c in base_cc)
+    # Cyrillic 'а' (U+0430) looks like Latin 'a' but NFKC does not map it.
+    cyrillic_key = "sk-proj-аbcdefghijklmnopqrstuvwxyzABCDEFGHIJ"
 
     zwsp_hits = detectors.data_exfiltration(from_mcp_session(_build_log_with_arg(obfuscated_cc)))
     fullwidth_hits = detectors.data_exfiltration(from_mcp_session(_build_log_with_arg(fullwidth_cc)))
+    cyrillic_hits = detectors.data_exfiltration(from_mcp_session(_build_log_with_arg(cyrillic_key)))
 
     # ReDoS timing per pattern family against ~1 MB adversarial input.
     redos_inputs = {
@@ -519,6 +522,10 @@ def campaign_evasion_dos() -> dict:
         },
         "fullwidth": {
             "hit": any(a.metadata.get("pii_category") == "credit_card" for a in fullwidth_hits),
+        },
+        "cyrillic_homoglyph": {
+            "value_contains_cyrillic_a": "\u0430" in cyrillic_key,
+            "hit": any(a.metadata.get("pii_category") == "openai_key" for a in cyrillic_hits),
         },
         "redos_ms_1mb": timings,
         "oversize": {

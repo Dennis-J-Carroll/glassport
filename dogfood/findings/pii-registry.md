@@ -14,7 +14,7 @@
 | Recall with honeytokens | **Pass** | 8/8 honeytoken categories detected (IBAN, Luhn-valid card, SSN, JWT, AWS access key, OpenAI key, GitHub token, DB URL). |
 | Registry fail-safe | **Pass** | Malformed JSON, non-array, missing field, bad severity, bad regex, unknown validator, and ReDoS regex all warn to stderr and keep built-ins live. |
 | Checksum correctness | **Pass** | IBAN, ABA, base58, JWT, UUID4 validators are 100% correct on valid/corrupted fixture corpora. |
-| Evasion + DoS | **Pass** | Zero-width / fullwidth obfuscation is normalized and caught. No built-in pattern ReDoSes on ~1 MB (≤400 ms). `MAX_SCAN_BYTES` cap holds. |
+| Evasion + DoS | **Partial fail** | Zero-width / fullwidth obfuscation is normalized and caught. **Cyrillic homoglyph (`а` U+0430) evades OpenAI-key detection** because NFKC does not map Cyrillic to Latin. No built-in pattern ReDoSes on ~1 MB (≤400 ms). `MAX_SCAN_BYTES` cap holds. |
 | SARIF + redaction | **Pass** | No raw secret or 6-char prefix leaked in SARIF or summarize output. |
 
 ---
@@ -193,8 +193,28 @@ glassport: ignoring GLASSPORT_PII_PATTERNS (/tmp/.../malformed_json.json):
 |---|---|---|
 | Credit card split with zero-width spaces (`\u200b`) | detected after normalization | ✅ detected |
 | Credit card in fullwidth Latin homoglyphs | detected after NFKC | ✅ detected |
+| OpenAI key with Cyrillic `а` (U+0430) homoglyph | detected after normalization | ❌ **missed** |
 
-**Verdict:** PASS — `_normalize_for_scan` strips invisible controls and NFKC-folds homoglyphs.
+**Verdict:** PARTIAL FAIL — `_normalize_for_scan` handles invisible controls and fullwidth Latin, but NFKC does **not** map Cyrillic homoglyphs to ASCII, so a secret with a Cyrillic `а` slips through.
+
+### Defect: Cyrillic homoglyph evades key detection
+
+**Verdict:** FAIL — normalization gap.
+
+**What happens:** the OpenAI key regex `[A-Za-z0-9]{32,}` only accepts ASCII letters. Replacing the first Latin `a` with a visually identical Cyrillic `а` (U+0430) breaks the match. NFKC leaves U+0430 unchanged, so `_normalize_for_scan` does not help.
+
+**Minimal repro:**
+
+```python
+from glassport import detectors
+latin_key = "sk-proj-abcdefghijklmnopqrstuvwxyzABCDEFGHIJ"    # detected
+cyr_key = "sk-proj-аbcdefghijklmnopqrstuvwxyzABCDEFGHIJ"     # 'а' is U+0430
+print([p.category for p, _ in detectors._scan_pii(latin_key)])  # ['openai_key']
+print([p.category for p, _ in detectors._scan_pii(cyr_key)])    # []
+```
+
+**Suggested fix:** add a homoglyph-confusables map (at least the high-risk Cyrillic/Greek lookalikes of ASCII letters) before pattern matching, or document that NFKC-only normalization does not cover cross-script homoglyphs.
+
 
 ### ReDoS timing (~1 MB adversarial input per pattern)
 
@@ -238,9 +258,11 @@ Ran `glassport detect --sarif` and `glassport summarize --json` on a log contain
 
 ---
 
-## Recommended bug
+## Recommended bugs
 
-File a defect for the **JWT-as-AWS-secret false positive**. The repro log is:
+### 1. JWT flagged as AWS secret access key
+
+**Repro log:**
 
 ```text
 dogfood/logs/pii-precision/20260628T180243Z_npx_1943852.jsonl
@@ -256,3 +278,17 @@ print([p.category for p, _ in detectors._scan_pii(jwt)])
 ```
 
 A JWT should not simultaneously be reported as an AWS secret access key.
+
+### 2. Cyrillic homoglyph (`а` U+0430) evades OpenAI-key detection
+
+Minimal one-liner proof:
+
+```python
+from glassport import detectors
+latin_key = "sk-proj-abcdefghijklmnopqrstuvwxyzABCDEFGHIJ"
+cyr_key = "sk-proj-аbcdefghijklmnopqrstuvwxyzABCDEFGHIJ"  # 'а' is U+0430
+print([p.category for p, _ in detectors._scan_pii(latin_key)])  # ['openai_key']
+print([p.category for p, _ in detectors._scan_pii(cyr_key)])    # []
+```
+
+Cross-script homoglyphs are a known evasion class that NFKC alone does not defeat.
