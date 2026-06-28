@@ -1,0 +1,9 @@
+[
+  {
+    "category": "aba_routing",
+    "severity": 2,
+    "pattern": "(?<!\\d)(\\d{9})(?!\\d)",
+    "validator": "aba",
+    "description": "ABA bank routing number (opt-in: bare 9-digit regex, validator-gated by Federal Reserve range + mod-10 checksum)"
+  }
+]

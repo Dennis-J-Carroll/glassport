@@ -333,6 +333,35 @@ def _validate_ssn(ssn: str) -> bool:
     return group != "00" and serial != "0000"
 
 
+def _iban_check(s: str) -> bool:
+    """ISO 13616 MOD-97-10. Strip spaces/case, move the first 4 chars to the
+    end, map A=10…Z=35, and validate as a big integer: valid iff % 97 == 1.
+    Total — returns False on anything that isn't a structural IBAN."""
+    s = s.replace(" ", "").upper()
+    if not re.match(r"^[A-Z]{2}\d{2}[A-Z0-9]{11,30}$", s):
+        return False
+    rearranged = s[4:] + s[:4]
+    try:
+        return int("".join(str(int(c, 36)) for c in rearranged)) % 97 == 1
+    except ValueError:                                   # pragma: no cover
+        return False
+
+
+def _aba_check(s: str) -> bool:
+    """ABA routing number: 9 digits, a Federal Reserve leading-range guard
+    (00–12, 21–32, 61–72, 80 — cuts the ~10% of random 9-digit strings a bare
+    checksum would pass), then the weighted-sum test mod 10 == 0 with the
+    repeating 3,7,1 weights. Total."""
+    if len(s) != 9 or not s.isdigit():
+        return False
+    prefix = int(s[:2])
+    if not (prefix <= 12 or 21 <= prefix <= 32 or 61 <= prefix <= 72
+            or prefix == 80):
+        return False
+    weights = (3, 7, 1, 3, 7, 1, 3, 7, 1)
+    return sum(int(d) * w for d, w in zip(s, weights)) % 10 == 0
+
+
 class PIIPattern(NamedTuple):
     category: str
     severity: int                       # 1 worth a look · 2 should not · 3 hostile
@@ -395,6 +424,15 @@ PII_PATTERNS: list[PIIPattern] = [
         r"(?<!\d)(4[0-9]{12}(?:[0-9]{3})?|5[1-5][0-9]{14}|"
         r"3[47][0-9]{13}|6(?:011|5[0-9]{2})[0-9]{12})(?!\d)"),
         _luhn_check, "credit card number (Luhn)"),
+    PIIPattern("iban", 3, re.compile(
+        r"(?<![A-Z0-9])([A-Z]{2}\d{2}[A-Z0-9]{11,30})(?![A-Z0-9])"),
+        _iban_check, "International Bank Account Number (IBAN, MOD-97)"),
+    # NB: ABA routing is deliberately NOT a default pattern. Its regex is a
+    # bare \d{9}, which even with the leading-range + mod-10 guard passes ~3.8%
+    # of random 9-digit strings — too broad to spend every user's precision
+    # budget on. The validator + menu name "aba" still ship, so a consumer who
+    # handles banking data opts in via GLASSPORT_PII_PATTERNS (see
+    # examples/pii-financial.json). The registry exists precisely for this.
     PIIPattern("email_address", 1, re.compile(
         # bounded quantifiers — the unbounded `+@+` form catastrophically
         # backtracks on long attacker-controlled strings with no '@' (ReDoS)
@@ -528,6 +566,8 @@ _NAMED_VALIDATORS: dict[str, Callable[[str], bool]] = {
     # they are named directly with no wrapper.
     "luhn": _luhn_check,        # credit-card checksum
     "ssn": _validate_ssn,       # SSA-issued ranges
+    "iban": _iban_check,        # ISO 13616 MOD-97-10
+    "aba": _aba_check,          # routing weighted-sum + Fed leading-range
     # Entropy gates — the recall-oriented fallback for opaque random tokens.
     # _calculate_entropy is total (0.0 on empty), so the lambdas can't raise
     # on the str a regex match always yields. Two tiers, per the cascaded-

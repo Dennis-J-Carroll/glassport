@@ -274,7 +274,7 @@ Severity-3 findings drive the session verdict to `HOSTILE OR HALLUCINATED`. INFO
 
 | Subcategory | Sev | What the wire proved |
 |---|:---:|---|
-| `pii_<category>` | **3**/2/1 | credential or PII in tool-call arguments — `pii_rsa_private_key`, `pii_openai_key`, `pii_aws_secret_key`, `pii_github_token`, `pii_ssn`, `pii_credit_card`, … (sev by category) |
+| `pii_<category>` | **3**/2/1 | credential or PII in tool-call arguments — `pii_rsa_private_key`, `pii_openai_key`, `pii_aws_secret_key`, `pii_github_token`, `pii_ssn`, `pii_credit_card`, `pii_iban`, … (sev by category) |
 | `unexpected_egress_host` | **3**/2 | tool call reaches a host outside the declared surface; **3** when sensitive data rides along, **2** otherwise |
 | `pii_in_result_<category>` | **3** | a credential came back in a tool *result* — a server leaking secrets to the client |
 
@@ -306,7 +306,7 @@ export GLASSPORT_PII_PATTERNS=/etc/glassport/pii.json
 ]
 ```
 
-`severity` is `1`–`3`; `validator` is optional and names a built-in precision check — `luhn`, `ssn`, `entropy` (>3.0 bits/char), or `entropy_high` (>4.0, culls high-entropy non-secrets like a hex digest). A bad regex, an out-of-range severity, or an unknown validator name is rejected **loudly** when loaded explicitly — but the env-var path is **fail-safe**: a misconfigured file warns to stderr and the built-in scan keeps running. A typo in your custom patterns can never blind the detector.
+`severity` is `1`–`3`; `validator` is optional and names a built-in precision check — `luhn`, `ssn`, `iban` (ISO 13616 MOD-97), `aba` (routing checksum + Federal Reserve range), `entropy` (>3.0 bits/char), or `entropy_high` (>4.0, culls high-entropy non-secrets like a hex digest). A bad regex, an out-of-range severity, or an unknown validator name is rejected **loudly** when loaded explicitly — but the env-var path is **fail-safe**: a misconfigured file warns to stderr and the built-in scan keeps running. A typo in your custom patterns can never blind the detector.
 
 **In code (full power).** Register a `PIIPattern` with your own callable validator — anything JSON can't express:
 
@@ -320,6 +320,12 @@ register_pii_pattern(PIIPattern(
 ```
 
 Custom patterns are first-class: same dedup, same non-reversible redaction, same egress escalation as the built-ins.
+
+A ready-made pack lives at [`examples/pii-financial.json`](examples/pii-financial.json): ABA bank routing numbers, *opt-in* because the bare 9-digit regex is too broad to spend every user's precision budget on by default (the `aba` validator gates it on the Federal Reserve range + mod-10). IBAN, which is structured enough to barely false-positive, ships on by default. Point `GLASSPORT_PII_PATTERNS` at the pack if your server handles banking data:
+
+```bash
+export GLASSPORT_PII_PATTERNS=examples/pii-financial.json
+```
 
 ---
 

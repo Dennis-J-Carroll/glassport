@@ -170,8 +170,19 @@ Decided and fixed — implement within these, don't re-litigate:
 "ssn":          _validate_ssn                    # already a str->bool
 ```
 
-Financial checksums (IBAN/ABA/base58) are a **Phase-B PR** — new
-`PII_PATTERNS` + validators + their own corpus.
+Financial checksums were the **Phase-B PR**. ✅ **IBAN (`iban`) and ABA
+(`aba`) validators shipped** + a P/R fixture corpus (`tests/test_checksums.py`).
+Placement split by false-positive risk:
+- **IBAN** is a default `PII_PATTERN` — structured (2 letters + 2 digits +
+  MOD-97), barely false-positives, earns the default scan.
+- **ABA** is **menu-only + opt-in** (`examples/pii-financial.json`). Its regex
+  is a bare `\d{9}`; even with the Federal-Reserve-range + mod-10 guard it
+  passes ~3.8% of random 9-digit strings — too broad to spend every user's
+  precision budget on. Consumers who handle banking data opt in via
+  `GLASSPORT_PII_PATTERNS`. This is the registry's own thesis applied to a
+  built-in: broad patterns belong in opt-in packs, not core.
+
+Base58check / UUIDv4 / JWT-structural remain available by the same recipe.
 
 ### Per-charset entropy reference (if you make entropy the creative piece)
 
