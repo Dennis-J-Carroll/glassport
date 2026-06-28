@@ -274,7 +274,7 @@ Severity-3 findings drive the session verdict to `HOSTILE OR HALLUCINATED`. INFO
 
 | Subcategory | Sev | What the wire proved |
 |---|:---:|---|
-| `pii_<category>` | **3**/2/1 | credential or PII in tool-call arguments — `pii_rsa_private_key`, `pii_openai_key`, `pii_aws_secret_key`, `pii_github_token`, `pii_ssn`, `pii_credit_card`, `pii_iban`, `pii_aba_routing`, … (sev by category) |
+| `pii_<category>` | **3**/2/1 | credential or PII in tool-call arguments — `pii_rsa_private_key`, `pii_openai_key`, `pii_aws_secret_key`, `pii_github_token`, `pii_ssn`, `pii_credit_card`, `pii_iban`, … (sev by category) |
 | `unexpected_egress_host` | **3**/2 | tool call reaches a host outside the declared surface; **3** when sensitive data rides along, **2** otherwise |
 | `pii_in_result_<category>` | **3** | a credential came back in a tool *result* — a server leaking secrets to the client |
 
@@ -320,6 +320,12 @@ register_pii_pattern(PIIPattern(
 ```
 
 Custom patterns are first-class: same dedup, same non-reversible redaction, same egress escalation as the built-ins.
+
+A ready-made pack lives at [`examples/pii-financial.json`](examples/pii-financial.json): ABA bank routing numbers, *opt-in* because the bare 9-digit regex is too broad to spend every user's precision budget on by default (the `aba` validator gates it on the Federal Reserve range + mod-10). IBAN, which is structured enough to barely false-positive, ships on by default. Point `GLASSPORT_PII_PATTERNS` at the pack if your server handles banking data:
+
+```bash
+export GLASSPORT_PII_PATTERNS=examples/pii-financial.json
+```
 
 ---
 

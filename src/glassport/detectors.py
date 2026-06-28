@@ -427,9 +427,12 @@ PII_PATTERNS: list[PIIPattern] = [
     PIIPattern("iban", 3, re.compile(
         r"(?<![A-Z0-9])([A-Z]{2}\d{2}[A-Z0-9]{11,30})(?![A-Z0-9])"),
         _iban_check, "International Bank Account Number (IBAN, MOD-97)"),
-    PIIPattern("aba_routing", 2,
-        re.compile(r"(?<!\d)(\d{9})(?!\d)"),
-        _aba_check, "ABA bank routing number"),
+    # NB: ABA routing is deliberately NOT a default pattern. Its regex is a
+    # bare \d{9}, which even with the leading-range + mod-10 guard passes ~3.8%
+    # of random 9-digit strings — too broad to spend every user's precision
+    # budget on. The validator + menu name "aba" still ship, so a consumer who
+    # handles banking data opts in via GLASSPORT_PII_PATTERNS (see
+    # examples/pii-financial.json). The registry exists precisely for this.
     PIIPattern("email_address", 1, re.compile(
         # bounded quantifiers — the unbounded `+@+` form catastrophically
         # backtracks on long attacker-controlled strings with no '@' (ReDoS)

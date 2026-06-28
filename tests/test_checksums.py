@@ -12,6 +12,7 @@ Checksum vectors are real and verified:
 Pure stdlib.
 """
 import unittest
+from pathlib import Path
 
 from glassport.adapters.mcp_session import from_mcp_session
 from glassport import detectors
@@ -74,17 +75,31 @@ class TestAbaValidator(TestChecksumBase):
 
 
 class TestEndToEndDetection(TestChecksumBase):
-    def test_iban_in_tool_call_is_flagged(self):
+    FINANCIAL_PACK = (Path(__file__).resolve().parent.parent
+                      / "examples" / "pii-financial.json")
+
+    def test_iban_in_tool_call_is_flagged_by_default(self):
         anns = self.exfil({"transfer_to": "DE89370400440532013000"})
         self.assertIn("iban", self.categories(anns))
-
-    def test_aba_routing_in_tool_call_is_flagged(self):
-        anns = self.exfil({"routing": "021000021"})
-        self.assertIn("aba_routing", self.categories(anns))
 
     def test_corrupted_iban_not_flagged(self):
         anns = self.exfil({"x": "GB82WEST12345698765433"})
         self.assertNotIn("iban", self.categories(anns))
+
+    def test_aba_routing_NOT_in_default_scan(self):
+        # opt-in by design: the bare \d{9} regex is too broad for core.
+        anns = self.exfil({"routing": "021000021"})
+        self.assertNotIn("aba_routing", self.categories(anns))
+
+    def test_aba_routing_flagged_when_financial_pack_loaded(self):
+        detectors.load_pii_patterns_from_json(str(self.FINANCIAL_PACK))
+        anns = self.exfil({"routing": "021000021"})
+        self.assertIn("aba_routing", self.categories(anns))
+
+    def test_financial_pack_validator_culls_invalid_aba(self):
+        detectors.load_pii_patterns_from_json(str(self.FINANCIAL_PACK))
+        anns = self.exfil({"routing": "123456789"})   # fails mod-10
+        self.assertNotIn("aba_routing", self.categories(anns))
 
 
 class TestMenuNames(TestChecksumBase):
