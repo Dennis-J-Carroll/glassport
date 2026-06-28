@@ -31,4 +31,16 @@ agent editing the main checkout. Branched from `main` at v0.4.0.
 4. **Batch-detector stress** — measure where the full-in-memory trace model
    strains on huge sessions; informs the streaming-detector roadmap item.
 
-Current state: glassport 0.4.0, repo and PyPI in sync.
+## Round 3 (current)
+
+This worktree was advanced from 0.4.0 to **current `main` (0.5.0 + the PII
+plugin-registry / validator-menu work)**. The round-3 testing brief is
+[`KIMI_ROUND3_PROMPT.md`](KIMI_ROUND3_PROMPT.md) — the target surface is the new
+custom-PII-pattern registry, the 10-name validator menu, the opt-in packs
+(`examples/pii-*.json`), and the now-validator-gated `jwt_token`. The mission is
+to measure **precision on real traffic** (FP rate against UUIDs/hashes/base64)
+and **recall with honeytokens** (not obvious fakes), and to attack the
+fail-safe env-autoload path.
+
+Current state: glassport **0.5.0** + PII registry/menu; worktree at `main` HEAD,
+314 tests green.
