@@ -550,13 +550,36 @@ _INVISIBLE_RE = re.compile(
     "[\\u200b-\\u200f\\u2060-\\u2064\\u202a-\\u202e\\u2066-\\u2069\\ufeff]")
 
 
+# Cross-script homoglyphs visually identical to ASCII letters. NFKC does not
+# fold these (they are distinct scripts, not compatibility variants), so an
+# attacker can swap one into a secret to dodge an ASCII-only pattern while it
+# still reads correctly to a human. Curated to letters that look IDENTICAL to
+# ASCII — kept minimal to avoid folding legitimate Cyrillic/Greek text into
+# spurious matches. Extend only with a same-glyph pair.
+_CONFUSABLES = str.maketrans({
+    # Cyrillic lowercase -> ASCII
+    "а": "a", "е": "e", "о": "o", "р": "p", "с": "c",
+    "у": "y", "х": "x", "і": "i", "ј": "j", "ѕ": "s",
+    # Cyrillic uppercase -> ASCII
+    "А": "A", "В": "B", "Е": "E", "К": "K", "М": "M",
+    "Н": "H", "О": "O", "Р": "P", "С": "C", "Т": "T",
+    "У": "Y", "Х": "X",
+    # Greek -> ASCII (visually identical capitals + a few lowercase)
+    "Α": "A", "Β": "B", "Ε": "E", "Η": "H", "Ι": "I",
+    "Κ": "K", "Μ": "M", "Ν": "N", "Ο": "O", "Ρ": "P",
+    "Τ": "T", "Υ": "Y", "Χ": "X", "ο": "o", "α": "a",
+})
+
+
 def _normalize_for_scan(text: str) -> str:
     """Defeat obfuscation before pattern-matching: drop invisible/bidi
-    characters, then NFKC-fold homoglyphs (fullwidth, etc.) to their
-    canonical ascii. A secret split with zero-width joiners or disguised
-    in fullwidth Latin reads as plaintext to the validators."""
+    characters, fold cross-script homoglyphs to ASCII, then NFKC-fold
+    compatibility variants (fullwidth, etc.). A secret split with zero-width
+    joiners, disguised in fullwidth Latin, or wearing a Cyrillic/Greek
+    look-alike reads as plaintext to the validators."""
     stripped = _INVISIBLE_RE.sub("", text)
-    return unicodedata.normalize("NFKC", stripped)
+    deconfused = stripped.translate(_CONFUSABLES)
+    return unicodedata.normalize("NFKC", deconfused)
 
 
 def _redact(value: str, category: str) -> str:
@@ -721,28 +744,54 @@ def load_pii_patterns_from_json(path: Any) -> int:
     return len(pats)
 
 
+# Categories whose match is a CONTAINER: any generic-secret match that falls
+# entirely inside one of these spans is part of the structure, not a separate
+# credential, and is suppressed (Kimi R3: a JWT header is not an AWS secret).
+_STRUCTURAL_CONTAINERS = frozenset({"jwt_token"})
+# Broad, charset/entropy-only patterns that legitimately fire on a fragment of
+# a larger structured token. Suppressed when contained in a structural span.
+_GENERIC_SECRETS = frozenset({"aws_secret_key", "generic_api_key"})
+
+
 def _scan_pii(text: str) -> list[tuple[PIIPattern, str]]:
     """Validated, de-duplicated PII hits in one serialized blob.
 
     The blob is normalized first (invisible chars stripped, homoglyphs
     NFKC-folded) so obfuscated secrets can't slip past the patterns, and
     capped at MAX_SCAN_BYTES so a multi-megabyte tool payload can't turn
-    the scan itself into a denial of service."""
+    the scan itself into a denial of service.
+
+    Span-aware suppression (Kimi R3): a generic-secret match (aws_secret_key,
+    generic_api_key) that falls entirely inside a structural token match
+    (jwt_token) is part of that structure, not a separate credential."""
     if len(text) > MAX_SCAN_BYTES:
         text = text[:MAX_SCAN_BYTES]
     text = _normalize_for_scan(text)
-    hits: list[tuple[PIIPattern, str]] = []
-    seen: set[tuple[str, str]] = set()
+
+    # collect every validated match WITH its span, before de-duping by value
+    raw: list[tuple[PIIPattern, str, int, int]] = []
+    structural_spans: list[tuple[int, int]] = []
     for pat in _active_patterns():
         for m in pat.pattern.finditer(text):
             value = m.group(m.lastindex) if m.lastindex else m.group(0)
             if pat.validator and not pat.validator(value):
                 continue
-            dedup = (pat.category, value)
-            if dedup in seen:
-                continue
-            seen.add(dedup)
-            hits.append((pat, value))
+            span = m.span(m.lastindex) if m.lastindex else m.span(0)
+            raw.append((pat, value, span[0], span[1]))
+            if pat.category in _STRUCTURAL_CONTAINERS:
+                structural_spans.append(span)
+
+    hits: list[tuple[PIIPattern, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for pat, value, start, end in raw:
+        if pat.category in _GENERIC_SECRETS and any(
+                s <= start and end <= e for s, e in structural_spans):
+            continue                       # a fragment of a structural token
+        dedup = (pat.category, value)
+        if dedup in seen:
+            continue
+        seen.add(dedup)
+        hits.append((pat, value))
     return hits
 
 

@@ -144,6 +144,36 @@ class TestDetectorFaultIsolation(unittest.TestCase):
                          {a.subcategory for a in found})
 
 
+class TestPrecisionAndEvasion(unittest.TestCase):
+    """Kimi R3 regression tests: JWT→AWS false positive + Cyrillic evasion."""
+
+    def test_jwt_header_not_also_flagged_as_aws_secret(self):
+        # Kimi R3 precision bug: a real JWT's 40-char base64 header independently
+        # matches the broad aws_secret_key pattern. The structural jwt_token match
+        # contains it, so the generic match must be suppressed.
+        from glassport import detectors
+        jwt = ("eyJhbGciOiAiSFMyNTYiLCAidHlwIjogIkpXVCJ9"
+               ".eyJzdWIiOiAiY2FuYXJ5In0"
+               ".xVGZOp8m8rN40GwGwU-qIvGjXxJDlQkrOnddiAqaq2Q")
+        cats = sorted(p.category for p, _ in detectors._scan_pii(jwt))
+        self.assertIn("jwt_token", cats)
+        self.assertNotIn("aws_secret_key", cats)
+
+    def test_cyrillic_homoglyph_does_not_evade_key_detection(self):
+        # Kimi R3 evasion bug: NFKC folds fullwidth but NOT cross-script
+        # confusables, so a Cyrillic 'а' (U+0430) inside a key hid it.
+        from glassport import detectors
+        cyr = "sk-proj-аbcdefghijklmnopqrstuvwxyzABCDEFGHIJ"  # 'а' is U+0430
+        cats = [p.category for p, _ in detectors._scan_pii(cyr)]
+        self.assertIn("openai_key", cats)
+
+    def test_confusable_fold_does_not_invent_findings_from_real_cyrillic(self):
+        # folding must not turn ordinary Cyrillic prose into a spurious secret
+        from glassport import detectors
+        prose = "Пример текста на русском языке без секретов и ключей"
+        self.assertEqual(detectors._scan_pii(prose), [])
+
+
 class TestSourceWalk(unittest.TestCase):
     def test_walk_is_a_lazy_generator(self):
         import types
