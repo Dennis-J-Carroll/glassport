@@ -22,6 +22,7 @@ Source is the truth; this is the index.
 | TUI | `tui.py` | live curses session inspector |
 | Custom-PII plugin registry | `detectors.py` | consumer-extensible patterns separate from built-ins: `register_pii_pattern()`, `load_pii_patterns_from_json()`, `GLASSPORT_PII_PATTERNS` env autoload |
 | Named validators | `detectors.py` | precision menu: `luhn`/`ssn`/`entropy`/`entropy_high`/`entropy_auto` (per-charset) + checksum `iban`/`aba` + crypto `base58`/`jwt`/`uuid4` |
+| Agent advisory (`advise`) | `advise.py` / `tap.py` | folds audit Report + runtime annotations into a fenced agent-md block; stdout or `--write` |
 
 ## Tier 2 — Built but NOT shipped to PyPI
 
@@ -36,7 +37,7 @@ Roughly in dependency order — earlier unlocks later.
 
 1. **Network-enriched audit** *(medium)* — opt-in npm/PyPI/GitHub provenance
    lookups; kept off the default path so the core audit stays offline/reproducible.
-2. **Agent-advisory output (`advise`)** *(small)* — emit a `CLAUDE.md` /
+2. ~~**Agent-advisory output (`advise`)** *(small)* — emit a `CLAUDE.md` /
    `AGENTS.md` / `GEMINI.md` "observations worth noting" section from a run's
    findings, so the next agent session inherits what the watchdog saw. A fourth
    renderer over existing data (audit `Report` + detector annotations); no new
@@ -44,7 +45,7 @@ Roughly in dependency order — earlier unlocks later.
    instruction surface — the exact tool-poisoning vector glassport audits for —
    so it must emit glassport's own classification sentences + redacted tags,
    never echo attacker-controlled bytes. Fenced `glassport:begin/end` markers
-   for idempotent, human-reversible writes.
+   for idempotent, human-reversible writes.~~ ✅ Shipped
 3. **Streaming detector path** *(large, architectural)* — detectors currently
    consume a *full in-memory trace* (batch). Streaming means processing frames as
    they arrive. This is the prerequisite for #4.
@@ -56,6 +57,17 @@ Roughly in dependency order — earlier unlocks later.
 
 ## Recently shipped
 
+- **Agent advisory (`advise`)** — `advise.py` + `tap.py` CLI verb.
+  `glassport advise [--audit <path>] [--session <s.jsonl>] [--write FILE] [--all]`
+  folds a static audit `Report` and runtime detector `Annotation`s into a single
+  ranked markdown block for agent-instruction files (`CLAUDE.md` / `AGENTS.md` /
+  `GEMINI.md`). Default severity floor 2; `--all` lowers to 0. Output is wrapped in
+  `<!-- glassport:begin -->`/`<!-- glassport:end -->` markers; `--write` splices
+  the block in place (idempotent; append when absent, replace when present; refuses
+  on malformed markers). Reporter-not-gate: exits 0 on success, 2 when neither
+  `--audit` nor `--session` is given. Output is glassport's own sentences only —
+  never raw server bytes; `_sanitize_inline` wraps every attacker-controlled value;
+  matched source snippets are omitted. 344 tests.
 - **Custom-PII plugin registry + validator menu** (0.5.0, PRs #15–#19) —
   `register_pii_pattern()` / `load_pii_patterns_from_json()` /
   `GLASSPORT_PII_PATTERNS` env autoload (registry kept separate from built-ins);
@@ -72,7 +84,6 @@ Roughly in dependency order — earlier unlocks later.
 
 ## Next action
 
-Repo and PyPI in sync at **0.5.0**. Tier-3 #1 (plugin registry) shipped across
-PRs #15–#19. Pick a Tier-3 item — recommended next: **#1 Network-enriched
-audit** (independent, medium), or **#2 `advise`** (small, high-leverage) if you
-want a quick win before the large streaming rearchitecture (#3).
+Repo and PyPI in sync at **0.5.0**. Tier-3 #1 (plugin registry) and Tier-3 #2
+(`advise`) shipped. Pick a Tier-3 item — recommended next: **#1 Network-enriched
+audit** (independent, medium) before the large streaming rearchitecture (#3).
