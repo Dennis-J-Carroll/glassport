@@ -86,6 +86,25 @@ def _runtime_line(ann) -> str:
     return f"**[{tag}]** flagged by `{_sanitize_inline(sub)}` at severity {ann.severity}."
 
 
+_STATIC_DESC = {
+    "tool-poisoning": "tool/description text matches a prompt-injection pattern",
+    "shell-injection": "untrusted input flows into shell execution",
+    "fs-delete": "code deletes filesystem paths",
+    "runtime-install": "code installs packages at runtime",
+}
+
+
+def _static_line(f) -> str:
+    """One bullet for an audit finding. Renders rule + location only; the
+    matched source snippet (f.detail) is deliberately NOT emitted — the
+    agent opens the file itself."""
+    sev = _sanitize_inline(f.severity)            # e.g. `high`
+    rule = _sanitize_inline(f.rule)
+    loc = f"`{_sanitize_inline(f.path).strip('`')}:{int(f.line)}`"
+    desc = _STATIC_DESC.get(f.rule, "flagged by this rule")
+    return f"**[{f.severity}] {rule}** — {loc}: {desc}. Open the file to inspect."
+
+
 def render_advisory(report, annotations, *, min_severity: int = 2, base: str = "") -> str:
     runtime = [a for a in (annotations or [])
                if _severity_int(a.severity) >= min_severity]
@@ -114,4 +133,8 @@ def render_advisory(report, annotations, *, min_severity: int = 2, base: str = "
         lines += ["", "### Runtime (what this server did)"]
         for a in sorted(runtime, key=lambda x: -_severity_int(x.severity)):
             lines.append(f"- {_runtime_line(a)}")
+    if static:
+        lines += ["", "### Static (what the code looks like)"]
+        for f in sorted(static, key=lambda x: -_severity_int(x.severity)):
+            lines.append(f"- {_static_line(f)}")
     return "\n".join(lines)

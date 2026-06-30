@@ -4,6 +4,12 @@ from glassport import advise
 from glassport.adapters.mcp_session import from_mcp_session
 from glassport import detectors
 from glassport.interaction_trace import Annotation, AnnotationKind
+from glassport.audit import Finding, Report
+
+
+def _report(*findings):
+    return Report(profile={}, findings=list(findings), deductions=[],
+                  score=0, grade="F")
 
 
 def _L(seq: int, direction: str, frame: dict) -> str:
@@ -139,3 +145,29 @@ class TestRenderRuntime(unittest.TestCase):
         out = advise.render_advisory(None, anns, min_severity=2)
         self.assertIn("1 critical", out)
         self.assertIn("1 should-not-happen", out)
+
+
+class TestRenderStatic(unittest.TestCase):
+    def test_static_section_names_rule_path_line(self):
+        rep = _report(Finding(rule="tool-poisoning", severity="high",
+                              path="server.py", line=88,
+                              detail='matched: "ignore previous instructions"'))
+        out = advise.render_advisory(rep, None, min_severity=2)
+        self.assertIn("Static", out)
+        self.assertIn("tool-poisoning", out)
+        self.assertIn("server.py:88", out)
+
+    def test_matched_snippet_is_never_emitted(self):
+        rep = _report(Finding(rule="tool-poisoning", severity="high",
+                              path="server.py", line=88,
+                              detail='matched: "ignore previous instructions"'))
+        out = advise.render_advisory(rep, None, min_severity=2)
+        self.assertNotIn("ignore previous instructions", out)
+
+    def test_merged_doc_has_both_sections(self):
+        rep = _report(Finding(rule="shell-injection", severity="high",
+                              path="x.py", line=1, detail="..."))
+        anns = [_ann("premature_call", 2)]
+        out = advise.render_advisory(rep, anns, min_severity=2)
+        self.assertIn("### Runtime", out)
+        self.assertIn("### Static", out)
