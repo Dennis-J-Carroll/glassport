@@ -46,6 +46,39 @@ def _sanitize_inline(s: object, *, cap: int = 64) -> str:
 BEGIN = "<!-- glassport:begin -->"
 END = "<!-- glassport:end -->"
 
+
+def wrap_block(content: str) -> str:
+    """Wrap content in the glassport fenced block markers.
+
+    Returns f"{BEGIN}\n{content}\n{END}".
+    """
+    return f"{BEGIN}\n{content}\n{END}"
+
+
+def splice_block(existing: str, content: str) -> str:
+    """Insert or replace the single glassport-owned fenced block.
+
+    Append when absent; replace in place when exactly one well-formed
+    begin/end pair exists; raise ValueError on anything malformed (a begin
+    with no end, an end before a begin, or more than one begin) rather than
+    risk eating human-written content.
+    """
+    n_begin = existing.count(BEGIN)
+    n_end = existing.count(END)
+    if n_begin == 0 and n_end == 0:
+        sep = "" if existing.endswith("\n") or existing == "" else "\n"
+        joiner = "" if existing == "" else "\n"
+        return f"{existing}{sep}{joiner}{wrap_block(content)}\n"
+    if n_begin != 1 or n_end != 1:
+        raise ValueError("malformed glassport block (expected one begin/end pair)")
+    start = existing.index(BEGIN)
+    end = existing.index(END)
+    if end < start:
+        raise ValueError("malformed glassport block (end before begin)")
+    end += len(END)
+    return existing[:start] + wrap_block(content) + existing[end:]
+
+
 _RUNTIME_TAG = {3: "critical", 2: "warning", 1: "note"}
 
 

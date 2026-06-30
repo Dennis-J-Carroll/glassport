@@ -171,3 +171,34 @@ class TestRenderStatic(unittest.TestCase):
         out = advise.render_advisory(rep, anns, min_severity=2)
         self.assertIn("### Runtime", out)
         self.assertIn("### Static", out)
+
+
+class TestSpliceBlock(unittest.TestCase):
+    def test_append_when_absent(self):
+        out = advise.splice_block("# My instructions\n", "BODY")
+        self.assertIn("# My instructions", out)
+        self.assertIn(advise.BEGIN, out)
+        self.assertIn("BODY", out)
+        self.assertIn(advise.END, out)
+
+    def test_replace_when_present(self):
+        existing = f"top\n{advise.BEGIN}\nOLD\n{advise.END}\nbottom\n"
+        out = advise.splice_block(existing, "NEW")
+        self.assertIn("top", out)
+        self.assertIn("bottom", out)
+        self.assertIn("NEW", out)
+        self.assertNotIn("OLD", out)
+
+    def test_idempotent(self):
+        once = advise.splice_block("base\n", "BODY")
+        twice = advise.splice_block(once, "BODY")
+        self.assertEqual(once, twice)
+
+    def test_malformed_begin_without_end_raises(self):
+        with self.assertRaises(ValueError):
+            advise.splice_block(f"x\n{advise.BEGIN}\nno end\n", "BODY")
+
+    def test_malformed_two_begins_raises(self):
+        bad = f"{advise.BEGIN}\na\n{advise.END}\n{advise.BEGIN}\nb\n{advise.END}\n"
+        with self.assertRaises(ValueError):
+            advise.splice_block(bad, "BODY")
