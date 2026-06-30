@@ -8,6 +8,8 @@ import unittest
 sys.path.insert(0, "src")
 from dogfood import oracle, redteam_fixtures as rf
 from glassport.advise import BEGIN, END
+from glassport.adapters.mcp_session import from_mcp_session
+from glassport import detectors
 
 
 class TestHostileFixtures(unittest.TestCase):
@@ -71,8 +73,16 @@ class TestOracle(unittest.TestCase):
 
 
 class TestDetectionRows(unittest.TestCase):
-    def test_homoglyph_result_leak_present_in_session(self):
+    def test_homoglyph_result_leak_detected_and_redacted(self):
+        """Assert that data_exfiltration catches a ZWJ-split RSA key in a TOOL_RESULT
+        and that the raw key is redacted from the annotation explanation."""
         lines = rf.hostile_session_lines_with_result_leak()
-        frames = [json.loads(l) for l in lines]
-        results = [f for f in frames if f["frame"].get("result")]
-        self.assertTrue(results, "expected at least one result frame")
+        trace = from_mcp_session(lines)
+        anns = detectors.data_exfiltration(trace)
+        result_anns = [a for a in anns
+                       if (a.subcategory or "").startswith("pii_in_result_")]
+        self.assertTrue(result_anns,
+                        "data_exfiltration must catch the ZWJ-split result-side leak")
+        for a in result_anns:
+            self.assertNotIn("BEGIN RSA", a.explanation,
+                             "raw key must not appear in the annotation explanation")
