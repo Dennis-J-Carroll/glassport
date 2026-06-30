@@ -2,6 +2,7 @@ import json
 import os
 import tempfile
 import unittest
+from pathlib import Path
 from glassport import advise
 from glassport.adapters.mcp_session import from_mcp_session
 from glassport import detectors
@@ -230,10 +231,10 @@ class TestAdviseCLI(unittest.TestCase):
             target = os.path.join(tmp, "AGENTS.md")
             s = self._session(tmp)
             self.assertEqual(main(["advise", "--session", s, "--write", target]), 0)
-            first = open(target).read()
+            first = Path(target).read_text()
             self.assertIn(advise.BEGIN, first)
             self.assertEqual(main(["advise", "--session", s, "--write", target]), 0)
-            self.assertEqual(open(target).read(), first)  # idempotent
+            self.assertEqual(Path(target).read_text(), first)  # idempotent
 
     def test_malformed_target_refuses(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -242,3 +243,7 @@ class TestAdviseCLI(unittest.TestCase):
                 fh.write(advise.BEGIN + "\nno end\n")
             rc = main(["advise", "--session", self._session(tmp), "--write", target])
             self.assertNotEqual(rc, 0)
+
+    def test_trailing_value_flag_no_traceback(self):
+        # --session with no following value must not raise; clean exit 2
+        self.assertEqual(main(["advise", "--session"]), 2)

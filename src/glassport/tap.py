@@ -624,7 +624,10 @@ def main(argv: list[str]) -> int:
         min_sev = 0 if "--all" in args else 2
 
         def _val(flag):
-            return args[args.index(flag) + 1] if flag in args else None
+            if flag in args:
+                idx = args.index(flag) + 1
+                return args[idx] if idx < len(args) else None
+            return None
 
         return _cmd_advise(_val("--audit"), _val("--session"),
                            _val("--write"), min_sev)
