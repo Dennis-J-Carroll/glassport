@@ -150,6 +150,12 @@ class TestRenderRuntime(unittest.TestCase):
         self.assertIn("1 critical", out)
         self.assertIn("1 should-not-happen", out)
 
+    def test_runtime_generic_fallback(self):
+        anns = [_ann("some_new_subcategory", 2)]
+        out = advise.render_advisory(None, anns, min_severity=2)
+        self.assertIn("some_new_subcategory", out)
+        self.assertNotIn("``", out)   # no double-backtick
+
 
 class TestRenderStatic(unittest.TestCase):
     def test_static_section_names_rule_path_line(self):
@@ -175,6 +181,19 @@ class TestRenderStatic(unittest.TestCase):
         out = advise.render_advisory(rep, anns, min_severity=2)
         self.assertIn("### Runtime", out)
         self.assertIn("### Static", out)
+
+    def test_base_makes_path_repo_relative(self):
+        rep = _report(Finding(rule="tool-poisoning", severity="high",
+                              path="server.py", line=88, detail="..."))
+        out = advise.render_advisory(rep, None, min_severity=2, base="src")
+        self.assertIn("src/server.py:88", out)
+
+    def test_static_generic_fallback(self):
+        rep = _report(Finding(rule="some-new-rule", severity="high",
+                              path="x.py", line=1, detail="..."))
+        out = advise.render_advisory(rep, None, min_severity=2)
+        self.assertIn("some-new-rule", out)
+        self.assertIn("flagged by this rule", out)
 
 
 class TestSpliceBlock(unittest.TestCase):

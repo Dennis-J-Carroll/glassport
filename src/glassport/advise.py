@@ -31,9 +31,12 @@ def _sanitize_inline(s: object, *, cap: int = 64) -> str:
 
     Stages: normalize away invisible/homoglyph obfuscation (reusing the
     scanner's own defense), collapse all whitespace to single spaces, strip
-    residual control bytes, neutralize backticks so the span cannot be
-    closed early, cap length, wrap in inline code so any survivor is inert.
+    residual control bytes, cap length, neutralize backticks so the span
+    cannot be closed early, wrap in inline code so any survivor is inert.
     """
+    # NFKC (in _normalize_for_scan) must run BEFORE backtick-defang: NFKC can
+    # synthesize a real backtick from a compatibility codepoint, and defang
+    # must catch it. Do not reorder.
     norm = _normalize_for_scan(str(s))
     flat = _WS_RE.sub(" ", norm)
     flat = _CTRL_RE.sub("", flat).strip()
@@ -116,7 +119,7 @@ def _runtime_line(ann) -> str:
     if sub == "detector_error":
         det = _sanitize_inline(md.get("detector", "?"))
         return f"**[{tag}] Detector error** — detector {det} crashed; coverage was incomplete."
-    return f"**[{tag}]** flagged by `{_sanitize_inline(sub)}` at severity {ann.severity}."
+    return f"**[{tag}]** flagged by {_sanitize_inline(sub)} at severity {ann.severity}."
 
 
 _STATIC_DESC = {
@@ -127,15 +130,18 @@ _STATIC_DESC = {
 }
 
 
-def _static_line(f) -> str:
+def _static_line(f, base: str = "") -> str:
     """One bullet for an audit finding. Renders rule + location only; the
     matched source snippet (f.detail) is deliberately NOT emitted — the
     agent opens the file itself."""
     sev = _sanitize_inline(f.severity)            # e.g. `high`
     rule = _sanitize_inline(f.rule)
-    loc = f"`{_sanitize_inline(f.path).strip('`')}:{int(f.line)}`"
+    path = f.path
+    if base and not path.startswith("/") and not path.startswith(base):
+        path = f"{base.rstrip('/')}/{path}"
+    loc = f"`{_sanitize_inline(path).strip('`')}:{int(f.line)}`"
     desc = _STATIC_DESC.get(f.rule, "flagged by this rule")
-    return f"**[{f.severity}] {rule}** — {loc}: {desc}. Open the file to inspect."
+    return f"**[{sev}] {rule}** — {loc}: {desc}. Open the file to inspect."
 
 
 def render_advisory(report, annotations, *, min_severity: int = 2, base: str = "") -> str:
@@ -169,5 +175,5 @@ def render_advisory(report, annotations, *, min_severity: int = 2, base: str = "
     if static:
         lines += ["", "### Static (what the code looks like)"]
         for f in sorted(static, key=lambda x: -_severity_int(x.severity)):
-            lines.append(f"- {_static_line(f)}")
+            lines.append(f"- {_static_line(f, base)}")
     return "\n".join(lines)
