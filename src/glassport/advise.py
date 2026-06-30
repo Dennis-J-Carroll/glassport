@@ -18,6 +18,10 @@ from glassport.sarif import _sarif_level
 _LEVEL_INT = {"error": 3, "warning": 2, "note": 1}
 _WS_RE = re.compile(r"\s+")
 _CTRL_RE = re.compile(r"[\x00-\x1f\x7f]")
+# Identifier-shaped: word chars + the punctuation real tool names / hosts /
+# paths use. Deliberately EXCLUDES whitespace, '<', '>', '#', '`', '|', '[',
+# ']', '!', so fence markers and markdown/directive payloads can never qualify.
+_SAFE_VALUE = re.compile(r"[\w.\-/:@]+")
 
 
 def _severity_int(severity: str | int) -> int:
@@ -26,24 +30,20 @@ def _severity_int(severity: str | int) -> int:
     return _LEVEL_INT[_sarif_level(severity)]
 
 
-def _sanitize_inline(s: object, *, cap: int = 64) -> str:
-    """Render an attacker-controlled value as an inert inline-code span.
-
-    Stages: normalize away invisible/homoglyph obfuscation (reusing the
-    scanner's own defense), collapse all whitespace to single spaces, strip
-    residual control bytes, cap length, neutralize backticks so the span
-    cannot be closed early, wrap in inline code so any survivor is inert.
-    """
-    # NFKC (in _normalize_for_scan) must run BEFORE backtick-defang: NFKC can
-    # synthesize a real backtick from a compatibility codepoint, and defang
-    # must catch it. Do not reorder.
+def _sanitize_inline(s: object, *, label: str = "value", cap: int = 64) -> str:
+    """Render an attacker-controlled value safely. Identifier-shaped values are
+    quoted as an inline-code span; anything carrying whitespace, markdown,
+    HTML-comment, or directive characters is REDACTED to a structural tag, so a
+    hostile value can neither forge a glassport fence boundary nor smuggle a
+    directive an LLM might obey from inside a code span."""
     norm = _normalize_for_scan(str(s))
     flat = _WS_RE.sub(" ", norm)
     flat = _CTRL_RE.sub("", flat).strip()
-    if len(flat) > cap:
-        flat = flat[: cap - 1] + "…"
-    flat = flat.replace("`", "ˋ")  # modifier grave: visible, never closes the span
-    return f"`{flat}`"
+    if flat and _SAFE_VALUE.fullmatch(flat):
+        if len(flat) > cap:
+            flat = flat[: cap - 1] + "…"
+        return f"`{flat}`"
+    return f"[{label} redacted · {len(flat)} chars]"
 
 
 BEGIN = "<!-- glassport:begin -->"
@@ -93,19 +93,21 @@ def _runtime_line(ann) -> str:
     sub = ann.subcategory or "finding"
     md = ann.metadata or {}
     tool = md.get("tool")
-    tool_s = _sanitize_inline(tool) if tool else None
+    tool_s = _sanitize_inline(tool, label="tool") if tool else None
 
     if sub == "unexpected_egress_host":
-        host = _sanitize_inline(md.get("host", "?"))
+        host = _sanitize_inline(md.get("host", "?"), label="host")
         who = f"tool {tool_s} " if tool_s else ""
         trust = "allowlisted" if md.get("trusted") else "undeclared"
         carry = " carrying sensitive data" if md.get("has_pii") else ""
         return f"**[{tag}] Undeclared egress** — {who}reached {host} ({trust}){carry}."
     if sub.startswith("pii_in_result_"):
-        cat = _sanitize_inline(md.get("pii_category", sub[len("pii_in_result_"):]))
+        cat = _sanitize_inline(md.get("pii_category", sub[len("pii_in_result_"):]),
+                               label="category")
         return f"**[{tag}] Secret in result** — a tool result leaked a value matching {cat}."
     if sub.startswith("pii_"):
-        cat = _sanitize_inline(md.get("pii_category", sub[len("pii_"):]))
+        cat = _sanitize_inline(md.get("pii_category", sub[len("pii_"):]),
+                               label="category")
         who = f"tool {tool_s} " if tool_s else ""
         return f"**[{tag}] Exfiltration** — {who}argument contained a value matching {cat}."
     if sub == "premature_call":
@@ -114,12 +116,12 @@ def _runtime_line(ann) -> str:
         return f"**[{tag}] Undeclared call** — a tools/call ran with no tools/list declaration."
     if sub == "surface_change":
         delta = md.get("delta") or []
-        names = ", ".join(_sanitize_inline(n) for n in delta[:8]) or "(unknown)"
+        names = ", ".join(_sanitize_inline(n, label="tool") for n in delta[:8]) or "(unknown)"
         return f"**[{tag}] Surface change** — the tool list changed mid-session; delta: {names}."
     if sub == "detector_error":
-        det = _sanitize_inline(md.get("detector", "?"))
+        det = _sanitize_inline(md.get("detector", "?"), label="detector")
         return f"**[{tag}] Detector error** — detector {det} crashed; coverage was incomplete."
-    return f"**[{tag}]** flagged by {_sanitize_inline(sub)} at severity {ann.severity}."
+    return f"**[{tag}]** flagged by {_sanitize_inline(sub, label='label')} at severity {ann.severity}."
 
 
 _STATIC_DESC = {
@@ -139,7 +141,7 @@ def _static_line(f, base: str = "") -> str:
     path = f.path
     if base and not path.startswith("/") and not path.startswith(base):
         path = f"{base.rstrip('/')}/{path}"
-    loc = f"`{_sanitize_inline(path).strip('`')}:{int(f.line)}`"
+    loc = f"`{_sanitize_inline(path, label='path').strip('`')}:{int(f.line)}`"
     desc = _STATIC_DESC.get(f.rule, "flagged by this rule")
     return f"**[{sev}] {rule}** — {loc}: {desc}. Open the file to inspect."
 
