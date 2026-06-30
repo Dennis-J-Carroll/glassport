@@ -68,3 +68,11 @@ class TestOracle(unittest.TestCase):
         text = f"{BEGIN}\n## ⚠️ glassport observations\n{END}\n"
         ok, detail = oracle.no_live_directive(text)
         self.assertTrue(ok, f"oracle false-positive on fence markers: {detail}")
+
+
+class TestDetectionRows(unittest.TestCase):
+    def test_homoglyph_result_leak_present_in_session(self):
+        lines = rf.hostile_session_lines_with_result_leak()
+        frames = [json.loads(l) for l in lines]
+        results = [f for f in frames if f["frame"].get("result")]
+        self.assertTrue(results, "expected at least one result frame")

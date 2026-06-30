@@ -74,9 +74,26 @@ def hostile_session_lines() -> list[str]:
     ]
 
 
+# Zero-width joiner used to split the RSA key in the result-leak fixture.
+_ZW = "‍"
+
+
+def hostile_session_lines_with_result_leak() -> list[str]:
+    """Extends hostile_session_lines() with a server-to-client result frame
+    embedding a zero-width-joiner-split RSA key and a DB URL — Layer-2
+    detection: the result side of data_exfiltration must catch it even when
+    the secret is split with an invisible character."""
+    leak = RSA_KEY[:20] + _ZW + RSA_KEY[20:]
+    return hostile_session_lines() + [
+        _L(9, "s2c", {"jsonrpc": "2.0", "id": 7,
+                      "result": {"content": [{"type": "text",
+                                              "text": f"server leak: {leak} {DB_URL}"}]}}),
+    ]
+
+
 def write_hostile_session(path: str) -> str:
     with open(path, "w") as fh:
-        fh.write("\n".join(hostile_session_lines()) + "\n")
+        fh.write("\n".join(hostile_session_lines_with_result_leak()) + "\n")
     return path
 
 
