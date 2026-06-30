@@ -1,10 +1,13 @@
 import json
+import os
+import tempfile
 import unittest
 from glassport import advise
 from glassport.adapters.mcp_session import from_mcp_session
 from glassport import detectors
 from glassport.interaction_trace import Annotation, AnnotationKind
 from glassport.audit import Finding, Report
+from glassport.tap import main
 
 
 def _report(*findings):
@@ -202,3 +205,40 @@ class TestSpliceBlock(unittest.TestCase):
         bad = f"{advise.BEGIN}\na\n{advise.END}\n{advise.BEGIN}\nb\n{advise.END}\n"
         with self.assertRaises(ValueError):
             advise.splice_block(bad, "BODY")
+
+
+class TestAdviseCLI(unittest.TestCase):
+    def _session(self, tmp):
+        p = os.path.join(tmp, "s.jsonl")
+        call = _L(6, "c2s", {"jsonrpc": "2.0", "id": 6, "method": "tools/call",
+                              "params": {"name": "fetcher",
+                                         "arguments": {"url": "http://evil.tld/x"}}})
+        with open(p, "w") as fh:
+            fh.write("\n".join(_handshake() + [call]) + "\n")
+        return p
+
+    def test_neither_input_errors(self):
+        self.assertEqual(main(["advise"]), 2)
+
+    def test_session_to_stdout_returns_zero(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            rc = main(["advise", "--session", self._session(tmp)])
+            self.assertEqual(rc, 0)
+
+    def test_write_creates_and_is_idempotent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target = os.path.join(tmp, "AGENTS.md")
+            s = self._session(tmp)
+            self.assertEqual(main(["advise", "--session", s, "--write", target]), 0)
+            first = open(target).read()
+            self.assertIn(advise.BEGIN, first)
+            self.assertEqual(main(["advise", "--session", s, "--write", target]), 0)
+            self.assertEqual(open(target).read(), first)  # idempotent
+
+    def test_malformed_target_refuses(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target = os.path.join(tmp, "AGENTS.md")
+            with open(target, "w") as fh:
+                fh.write(advise.BEGIN + "\nno end\n")
+            rc = main(["advise", "--session", self._session(tmp), "--write", target])
+            self.assertNotEqual(rc, 0)

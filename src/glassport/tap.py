@@ -511,6 +511,51 @@ def _cmd_detect(log_path: Path, as_sarif: bool = False) -> int:
 
 
 # ─────────────────────────────────────────────────────────────────
+# Advise mode — render findings as a markdown advisory block for an
+# agent-instruction file (CLAUDE.md / AGENTS.md / GEMINI.md).
+# I/O lives only here; advise.py stays pure.
+# ─────────────────────────────────────────────────────────────────
+def _cmd_advise(audit: str | None, session: str | None,
+                write: str | None, min_severity: int) -> int:
+    from glassport.advise import render_advisory, wrap_block, splice_block
+
+    if not audit and not session:
+        print("usage: glassport advise [--audit <path>] [--session <s.jsonl>] "
+              "[--write <FILE>] [--all]", file=sys.stderr)
+        return 2
+
+    report = None
+    if audit:
+        from glassport.audit import audit_path
+        report = audit_path(audit)
+
+    annotations = None
+    if session:
+        from glassport.adapters.mcp_session import from_mcp_session_file
+        from glassport.detectors import annotate
+        annotations = annotate(from_mcp_session_file(Path(session)))
+
+    content = render_advisory(report, annotations,
+                              min_severity=min_severity, base=audit or "")
+
+    if not write:
+        print(wrap_block(content))
+        return 0
+
+    target = Path(write)
+    existing = target.read_text() if target.exists() else ""
+    try:
+        new_text = splice_block(existing, content)
+    except ValueError as exc:
+        print(f"advise: {exc}; fix or remove the glassport block in {write}",
+              file=sys.stderr)
+        return 1
+    target.write_text(new_text)
+    print(f"advise: wrote observations to {write}")
+    return 0
+
+
+# ─────────────────────────────────────────────────────────────────
 # CLI
 # ─────────────────────────────────────────────────────────────────
 USAGE = """\
@@ -525,6 +570,7 @@ glassport — passive MCP stdio proxy
   detect:          glassport detect [--sarif] <session.jsonl>
                    (run all behavioral detectors; exit 1 if findings,
                     or emit SARIF 2.1.0 with --sarif)
+  advise:          glassport advise [--audit <path>] [--session <s.jsonl>] [--write FILE] [--all]
   report:          glassport report <session.jsonl> [-o out.html]
   watch:           glassport watch [log-dir] [--json]
   serve:           glassport serve [--log-dir DIR]
@@ -572,6 +618,16 @@ def main(argv: list[str]) -> int:
             print(USAGE)
             return 2
         return _cmd_detect(Path(args[0]), as_sarif=as_sarif)
+
+    if argv[0] == "advise":
+        args = argv[1:]
+        min_sev = 0 if "--all" in args else 2
+
+        def _val(flag):
+            return args[args.index(flag) + 1] if flag in args else None
+
+        return _cmd_advise(_val("--audit"), _val("--session"),
+                           _val("--write"), min_sev)
 
     if argv[0] == "serve":
         # glassport as a queryable MCP audit server. Lazy import.
