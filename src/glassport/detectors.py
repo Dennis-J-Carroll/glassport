@@ -859,7 +859,7 @@ def data_exfiltration(trace: InteractionTrace) -> list[Annotation]:
                         f"{_redact(value, pat.category)}",
                         severity=pat.severity,
                         category=HallucinationCategory.TOOL_USE,
-                        pii_category=pat.category))
+                        pii_category=pat.category, tool=name))
 
                 has_pii = any(p.severity >= 2 for p, _ in hits)
                 for host in _extract_hosts_from_args(args):
@@ -875,7 +875,7 @@ def data_exfiltration(trace: InteractionTrace) -> list[Annotation]:
                         + (" (allowlisted)" if trusted else " (undeclared)")
                         + (" CARRYING SENSITIVE DATA" if has_pii else ""),
                         severity=severity,
-                        host=host, has_pii=has_pii, trusted=trusted))
+                        host=host, has_pii=has_pii, trusted=trusted, tool=name))
 
         elif e.kind == EventKind.TOOL_RESULT:
             blob = json.dumps([p.content for p in e.parts],
