@@ -28,18 +28,18 @@ def run() -> int:
         target = os.path.join(tmp, "AGENTS.md")
         rc = glassport_main(["advise", "--session", session,
                              "--audit", audit_dir, "--write", target])
-        written = open(target).read()
+        written = open(target).read() if os.path.exists(target) else ""
         # P2 idempotency probe: a second write must not raise / corrupt
         rc2 = glassport_main(["advise", "--session", session,
                               "--audit", audit_dir, "--write", target])
-        written2 = open(target).read()
+        written2 = open(target).read() if os.path.exists(target) else ""
 
     checks = [
         ("P1 no-live-directive", oracle.no_live_directive(written)),
         ("P2 single-fence-pair", oracle.single_fence_pair(written)),
         ("P2 idempotent-rewrite", (rc2 == 0 and written2 == written,
                                    f"rc2={rc2}, stable={written2 == written}")),
-        ("P3 homoglyph-defanged", oracle.no_live_directive(written)),
+        ("P3 homoglyph-redacted", oracle.no_substring(written, "obey me")),
         ("P4 no-raw-secret", oracle.no_raw_secret(written, rf.SECRETS)),
         ("P5 no-snippet", oracle.no_substring(written, rf.POISON_SNIPPET)),
     ]

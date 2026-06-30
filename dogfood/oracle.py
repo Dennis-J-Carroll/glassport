@@ -17,6 +17,8 @@ def single_fence_pair(text: str) -> tuple[bool, str]:
 def no_live_directive(text: str) -> tuple[bool, str]:
     for i, line in enumerate(text.splitlines()):
         s = line.lstrip()
+        if line in (BEGIN, END):          # glassport's own fence wrapper
+            continue
         # glassport's own headings start with '## ⚠️' / '### ' / '## ✓' — allow those
         if s.startswith(("## ⚠️", "## ✓", "### Runtime", "### Static")):
             continue

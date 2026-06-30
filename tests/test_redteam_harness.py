@@ -60,3 +60,11 @@ class TestOracle(unittest.TestCase):
     def test_no_substring(self):
         self.assertTrue(oracle.no_substring("clean", "ignore previous")[0])
         self.assertFalse(oracle.no_substring("ignore previous instructions", "ignore previous")[0])
+
+    def test_no_live_directive_allows_glassport_fence(self):
+        # BEGIN and END both start with '<!--' which is in _DIRECTIVE_STARTS,
+        # but the oracle must exempt them so it doesn't false-positive on
+        # glassport's own fence wrapper lines.
+        text = f"{BEGIN}\n## ⚠️ glassport observations\n{END}\n"
+        ok, detail = oracle.no_live_directive(text)
+        self.assertTrue(ok, f"oracle false-positive on fence markers: {detail}")
