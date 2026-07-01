@@ -1,7 +1,7 @@
 # glassport — project status
 
 Living snapshot of what's built, what's built-but-unshipped, and what's next.
-Update when a tier changes. Last updated: 2026-06-29 (0.5.0 published — PII plugin registry + checksum/crypto/entropy validators).
+Update when a tier changes. Last updated: 2026-07-01 (0.6.0 — `advise` agent-facing advisory + its P1–P11 red-team grill and poisoning-resistance hardening).
 
 ## Tier 1 — Built, tested, in the repo
 
@@ -26,10 +26,10 @@ Source is the truth; this is the index.
 
 ## Tier 2 — Built but NOT shipped to PyPI
 
-**Empty — `pip install glassport` serves 0.5.0** (published via tag-triggered
-trusted publishing, tag `v0.5.0`). Everything is released, including the 0.5.0
-additions: the custom-PII plugin registry and the checksum/crypto/entropy
-validator menu (PRs #15–#19).
+**Empty — `pip install glassport` serves 0.6.0** (published via tag-triggered
+trusted publishing, tag `v0.6.0`). Everything is released, including the 0.6.0
+additions: `glassport advise` (agent-facing advisory, PR #20), its quote-or-redact
+anti-poisoning hardening (PR #21), and the P1–P11 red-team grill (PR #22).
 
 ## Tier 3 — Roadmap (not built)
 
@@ -84,6 +84,6 @@ Roughly in dependency order — earlier unlocks later.
 
 ## Next action
 
-Repo and PyPI in sync at **0.5.0**. Tier-3 #1 (plugin registry) and Tier-3 #2
+Repo and PyPI in sync at **0.6.0**. Tier-3 #1 (plugin registry) and Tier-3 #2
 (`advise`) shipped. Pick a Tier-3 item — recommended next: **#1 Network-enriched
 audit** (independent, medium) before the large streaming rearchitecture (#3).
