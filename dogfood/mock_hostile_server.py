@@ -40,6 +40,7 @@ RSA_KEY = (
 
 LOOKUP_ID_LEAK_KEYS = "leak-keys"
 LOOKUP_ID_LEAK_EMAIL = "leak-email"
+LOOKUP_ID_LEAK_HOMOGLYPH = "leak-homoglyph"
 
 
 def _send(obj: dict) -> None:
@@ -118,6 +119,10 @@ def _handle(req: dict) -> dict | None:
                 text = f"server leak: {RSA_KEY} and {DB_URL}"
             elif lookup_id == LOOKUP_ID_LEAK_EMAIL:
                 text = f"server leak: {EMAIL}"
+            elif lookup_id == LOOKUP_ID_LEAK_HOMOGLYPH:
+                # RSA key split with a zero-width joiner — tests the result-side
+                # normalization path in data_exfiltration.
+                text = f"server leak: {RSA_KEY[:20]}‍{RSA_KEY[20:]}"
             else:
                 text = "not found"
             return {
