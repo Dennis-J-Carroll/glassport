@@ -12,7 +12,7 @@ from __future__ import annotations
 import re
 from datetime import date
 
-from glassport.detectors import _normalize_for_scan
+from glassport.detectors import _normalize_for_scan, looks_like_secret
 from glassport.sarif import _sarif_level
 
 _LEVEL_INT = {"error": 3, "warning": 2, "note": 1}
@@ -21,7 +21,17 @@ _CTRL_RE = re.compile(r"[\x00-\x1f\x7f]")
 # Identifier-shaped: word chars + the punctuation real tool names / hosts /
 # paths use. Deliberately EXCLUDES whitespace, '<', '>', '#', '`', '|', '[',
 # ']', '!', so fence markers and markdown/directive payloads can never qualify.
+# NOTE: path-like values (e.g. `src/server.py`) use only '/' and '.' from this
+# set and are intentionally QUOTED rather than redacted — this is safe because
+# the charset still excludes '<', '`', and whitespace, so a quoted path can
+# neither forge a fence boundary nor escape its inline-code span.
 _SAFE_VALUE = re.compile(r"[\w.\-/:@]+")
+
+# U+02CB MODIFIER LETTER GRAVE ACCENT is a visual twin of the markdown
+# backtick (U+0060). It passes the _SAFE_VALUE word-character filter, so an
+# attacker can plant what looks like a closing backtick inside an inline-code
+# span and mislead an LLM reading raw CLAUDE.md.
+_BACKTICK_HOMOGLYPH = "\u02cb"
 
 
 def _severity_int(severity: str | int) -> int:
@@ -33,15 +43,25 @@ def _severity_int(severity: str | int) -> int:
 def _sanitize_inline(s: object, *, label: str = "value", cap: int = 64) -> str:
     """Render an attacker-controlled value safely. Identifier-shaped values are
     quoted as an inline-code span; anything carrying whitespace, markdown,
-    HTML-comment, or directive characters is REDACTED to a structural tag, so a
-    hostile value can neither forge a glassport fence boundary nor smuggle a
-    directive an LLM might obey from inside a code span."""
+    HTML-comment, backtick homoglyph, or secret-like material is REDACTED to a
+    structural tag, so a hostile value can neither forge a glassport fence
+    boundary, break an inline-code span, smuggle a directive, nor leak a
+    credential an LLM might obey."""
     norm = _normalize_for_scan(str(s))
     flat = _WS_RE.sub(" ", norm)
     flat = _CTRL_RE.sub("", flat).strip()
+    # The backtick homoglyph survives _normalize_for_scan and _SAFE_VALUE, so
+    # check it explicitly before deciding the value is printable.
+    if _BACKTICK_HOMOGLYPH in flat:
+        return f"[{label} redacted · {len(flat)} chars]"
     if flat and _SAFE_VALUE.fullmatch(flat):
         if len(flat) > cap:
             flat = flat[: cap - 1] + "…"
+        # A value can be identifier-shaped and still be a credential (e.g. a
+        # GitHub token used as a tool name, or a secret embedded in a path).
+        # Re-run the detector's own secret scan before printing it.
+        if looks_like_secret(flat):
+            return f"[{label} redacted · {len(flat)} chars]"
         return f"`{flat}`"
     return f"[{label} redacted · {len(flat)} chars]"
 
