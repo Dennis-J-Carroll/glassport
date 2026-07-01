@@ -639,6 +639,7 @@ Still on the horizon:
 - ~~TUI: terminal interface for live session inspection and drift review~~ ✅ Built (`glassport tui`)
 - ~~CI integration: JSON + SARIF export and a GitHub Action that uploads audit findings to the Security tab~~ ✅ Built (`audit --sarif`, `.github/workflows/ci.yml`)
 - ~~Agent advisory: render findings into a fenced block for `CLAUDE.md` / `AGENTS.md`~~ ✅ Built (`glassport advise`)
+- ~~Adversarial red-team grill for `advise` poisoning-resistance~~ ✅ Built (`dogfood/eval_advise_redteam.py`, P1–P11: directive injection, fence-marker breakout, homoglyph, secret/snippet leak, markdown-link, Hangul/Armenian evasion, backtick-twin)
 
 ---
 
