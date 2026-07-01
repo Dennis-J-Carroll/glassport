@@ -36,8 +36,11 @@ class TestHostileFixtures(unittest.TestCase):
     def test_audit_fixture_plants_snippet(self):
         with tempfile.TemporaryDirectory() as tmp:
             d = rf.write_audit_fixture(tmp)
-            blob = "".join(open(os.path.join(d, f)).read()
-                           for f in os.listdir(d))
+            blob = ""
+            for root, _dirs, files in os.walk(d):
+                for f in files:
+                    if f.endswith(".py"):
+                        blob += open(os.path.join(root, f)).read()
             self.assertIn(rf.POISON_SNIPPET, blob)
 
 
