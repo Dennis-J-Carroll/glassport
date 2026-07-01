@@ -546,8 +546,11 @@ _BARE_DOMAIN_RE = re.compile(r"^[a-z0-9.\-]+\.[a-z]{2,}$")
 # characters of a secret to break a raw-byte match while leaving the
 # value intact for a downstream model/parser. Same set the audit flags
 # as unicode-hidden; here we strip them so the scan sees through them.
+# Includes Hangul filler letters (U+115F, U+1160) which are invisible but
+# classify as word characters, so they evade naive \w-based allowlists.
 _INVISIBLE_RE = re.compile(
-    "[\\u200b-\\u200f\\u2060-\\u2064\\u202a-\\u202e\\u2066-\\u2069\\ufeff]")
+    "[\\u200b-\\u200f\\u2060-\\u2064\\u202a-\\u202e\\u2066-\\u2069"
+    "\\ufeff\\u115f\\u1160]")
 
 
 # Cross-script homoglyphs visually identical to ASCII letters. NFKC does not
@@ -568,6 +571,13 @@ _CONFUSABLES = str.maketrans({
     "Α": "A", "Β": "B", "Ε": "E", "Η": "H", "Ι": "I",
     "Κ": "K", "Μ": "M", "Ν": "N", "Ο": "O", "Ρ": "P",
     "Τ": "T", "Υ": "Y", "Χ": "X", "ο": "o", "α": "a",
+    # Armenian -> ASCII (visually identical lowercase; uppercase block is U+0531-)
+    "ա": "a", "բ": "b", "գ": "g", "դ": "d", "ե": "e", "զ": "z",
+    "է": "e", "ը": "e", "թ": "t", "ժ": "j", "ի": "i", "լ": "l",
+    "խ": "x", "ծ": "u", "կ": "k", "հ": "h", "ձ": "j", "ղ": "n",
+    "մ": "m", "յ": "y", "ն": "n", "շ": "w", "ո": "n", "չ": "q",
+    "պ": "p", "ջ": "j", "ռ": "r", "ս": "u", "վ": "v", "տ": "t",
+    "ր": "r", "ց": "u", "փ": "p", "ք": "q", "օ": "o", "ֆ": "f",
 })
 
 
@@ -580,6 +590,13 @@ def _normalize_for_scan(text: str) -> str:
     stripped = _INVISIBLE_RE.sub("", text)
     deconfused = stripped.translate(_CONFUSABLES)
     return unicodedata.normalize("NFKC", deconfused)
+
+
+def looks_like_secret(value: str, min_severity: int = 3) -> bool:
+    """True if `value` matches a built-in or custom PII pattern at/above
+    `min_severity`. Exposed so the advisory renderer can refuse to print
+    identifier-shaped secrets (e.g., a GitHub token used as a tool name)."""
+    return any(p.severity >= min_severity for p, _ in _scan_pii(value))
 
 
 def _redact(value: str, category: str) -> str:
