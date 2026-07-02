@@ -123,26 +123,12 @@ def _neutralize(text: str) -> str:
                    for ch in text)
 
 
-def _redact_secrets(text: str) -> str:
-    """Replace any credential/PII the detectors recognize with a
-    non-reversible tag, so the rendered report is safe to share. Reuses the
-    exact scan + redaction the runtime detector uses — a tool argument or
-    result carrying a live key must never reach the HTML verbatim."""
-    try:
-        hits = detectors._scan_pii(text)
-    except Exception:
-        return text
-    for pat, value in hits:
-        if value and value in text:
-            text = text.replace(value, detectors._redact(value, pat.category))
-    return text
-
-
 def _esc(value) -> str:
     """Render an attacker-controlled value inert. Order matters: redact secrets
     on the raw bytes first (the detector normalizes internally), then reveal
     deceptive Unicode, then HTML-escape the markup."""
-    return html.escape(_neutralize(_redact_secrets(str(value))), quote=True)
+    return html.escape(_neutralize(detectors.redact_secrets(str(value))),
+                       quote=True)
 
 
 def _pretty(content) -> str:

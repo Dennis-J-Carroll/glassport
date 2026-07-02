@@ -604,6 +604,23 @@ def _redact(value: str, category: str) -> str:
     return f"[{category} redacted · {len(value)} chars]"
 
 
+def redact_secrets(text: str) -> str:
+    """Replace every credential/PII the detectors recognize with a
+    non-reversible tag. The canonical scrubber for any renderer that emits
+    attacker-influenced text (report HTML, SARIF), so a live key sent as a
+    tool argument, embedded in a result, or hidden in a file path never
+    reaches a shareable artifact. Total: returns the input unchanged if the
+    scan raises."""
+    try:
+        hits = _scan_pii(text)
+    except Exception:
+        return text
+    for pat, value in hits:
+        if value and value in text:
+            text = text.replace(value, _redact(value, pat.category))
+    return text
+
+
 # --- Custom-pattern plugin registry -------------------------------------
 # Consumer-supplied PII patterns live here, kept SEPARATE from the built-in
 # PII_PATTERNS so the baseline can never be corrupted and a reset is a single

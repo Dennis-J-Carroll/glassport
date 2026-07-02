@@ -137,5 +137,38 @@ class TestAuditCliSarif(unittest.TestCase):
         self.assertEqual(rc, 1)
 
 
+class TestSecretRedaction(unittest.TestCase):
+    """A hostile server can name a file or directory like a credential; that
+    path flows into the SARIF URI, fingerprint and (via a matched snippet) the
+    message. None may reach the committed/uploaded document verbatim."""
+
+    _TOKEN = "ghp_123456789012345678901234567890123456"  # 40-char token shape
+
+    def test_secret_in_path_redacted_everywhere(self):
+        f = Finding("tool-poisoning", "critical",
+                    f"src/{self._TOKEN}/planted.py", 3, "directive text found")
+        doc = sarif.render_sarif(report([f]), base="srv")
+        self.assertNotIn(self._TOKEN, doc)          # not in uri, fp, or anywhere
+        res = json.loads(doc)["runs"][0]["results"][0]
+        self.assertIn("redacted",
+                      res["locations"][0]["physicalLocation"]
+                      ["artifactLocation"]["uri"])
+        self.assertNotIn(self._TOKEN, res["partialFingerprints"]["glassportRulePath"])
+
+    def test_secret_in_detail_redacted(self):
+        f = Finding("secret-hardcoded", "critical", "app.py", 1,
+                    f"leaked: {self._TOKEN}")
+        doc = sarif.render_sarif(report([f]), base="")
+        self.assertNotIn(self._TOKEN, doc)
+
+    def test_directive_snippet_not_a_secret_is_preserved(self):
+        # a quoted poisoning directive is the audit faithfully reporting a
+        # finding, not a credential — it must survive redaction
+        f = Finding("tool-poisoning", "critical", "app.py", 1,
+                    "directive text: 'ignore previous instructions'")
+        doc = sarif.render_sarif(report([f]), base="")
+        self.assertIn("ignore previous instructions", doc)
+
+
 if __name__ == "__main__":
     unittest.main()
