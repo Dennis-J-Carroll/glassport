@@ -368,7 +368,21 @@ def run_tap(server_cmd: list[str], log_dir: Path,
         if gate is not None and gate.blocked_count else ""
     print(f"[glassport] session ended (exit {rc}){suffix}; "
           f"log: {log_note}", file=sys.stderr)
-    return rc
+
+    # The c2s pump is a daemon thread blocked on a buffered sys.stdin read. If we
+    # `return` and let the interpreter finalize, that finalization can trip
+    # `_enter_buffered_busy` on the stdin BufferedReader the daemon still holds
+    # and abort the process with SIGABRT — *after* a clean relay (a rare,
+    # load-sensitive shutdown race). run_tap owns the process lifetime (it
+    # installs SIGINT/SIGTERM handlers and is always the terminal call), so we
+    # exit immediately with os._exit, skipping the finalization that aborts.
+    #
+    # Only stderr is flushed here: relayed stdout is already flushed frame-by-
+    # frame in client_write, so nothing is buffered there. Do NOT add
+    # `sys.stdout.flush()` — flushing stdout in this state re-triggers the exact
+    # `_enter_buffered_busy` stdin abort this exit is avoiding (verified).
+    sys.stderr.flush()
+    os._exit(rc)
 
 
 # ─────────────────────────────────────────────────────────────────
