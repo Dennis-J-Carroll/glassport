@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Union
 
 from glassport.audit import Report, RULES_BY_ID
-from glassport.detectors import redact_secrets
+from glassport.detectors import clamp_text, redact_secrets
 
 DRIVER_VERSION = "0.2.0"
 _INFO_URI = "https://github.com/Dennis-J-Carroll/glassport"
@@ -114,7 +114,7 @@ def render_sarif(report: Report, base: str = "") -> str:
         # (a matched snippet; a file/dir path a hostile server controls and can
         # name like a credential), so both are scrubbed before they reach a
         # SARIF file that gets committed and uploaded to the Security tab.
-        message = redact_secrets(f.detail) if f.detail else (
+        message = clamp_text(redact_secrets(f.detail)) if f.detail else (
             meta.title if meta else f.rule)
         results.append({
             "ruleId": rule_id,
@@ -221,8 +221,8 @@ def render_session_sarif(trace, session_path: str = "", base: str = "") -> str:
         results.append({
             "ruleId": rule_id,
             "level": _sarif_level(a.severity),
-            "message": {"text": redact_secrets(a.explanation or a.subcategory
-                                               or rule_id)},
+            "message": {"text": clamp_text(redact_secrets(
+                a.explanation or a.subcategory or rule_id))},
             "locations": [{
                 "physicalLocation": {
                     "artifactLocation": {"uri": uri},
