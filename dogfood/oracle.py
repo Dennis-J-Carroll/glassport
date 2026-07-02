@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import html as _html
+import json as _json
 
 from glassport.advise import BEGIN, END
 from glassport.detectors import _normalize_for_scan
@@ -115,6 +116,19 @@ def value_escaped(text: str, raw_value: str) -> tuple[bool, str]:
     if raw_value != esc and raw_value in text:
         return (False, f"attacker value present unescaped: {raw_value[:48]!r}")
     return (True, "attacker value not present unescaped")
+
+
+def json_well_formed(text: str) -> tuple[bool, str]:
+    """Attacker bytes in any finding field must not break the SARIF envelope:
+    the document must still parse as JSON."""
+    try:
+        doc = _json.loads(text)
+    except ValueError as e:
+        return (False, f"SARIF is not valid JSON: {e}")
+    runs = doc.get("runs") if isinstance(doc, dict) else None
+    if not runs:
+        return (False, "SARIF has no runs")
+    return (True, f"valid JSON, {len(runs[0].get('results', []))} results")
 
 
 def no_normalized_directive(text: str, payload: str) -> tuple[bool, str]:
