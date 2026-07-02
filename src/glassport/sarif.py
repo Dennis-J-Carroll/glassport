@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Union
 
 from glassport.audit import Report, RULES_BY_ID
+from glassport.detectors import redact_secrets
 
 DRIVER_VERSION = "0.2.0"
 _INFO_URI = "https://github.com/Dennis-J-Carroll/glassport"
@@ -109,18 +110,24 @@ def render_sarif(report: Report, base: str = "") -> str:
         if rule_id not in rules:
             rules[rule_id] = _rule_object(f.rule, f.severity)
         meta = RULES_BY_ID.get(f.rule)
+        # Both the message and the location URI carry attacker-influenced bytes
+        # (a matched snippet; a file/dir path a hostile server controls and can
+        # name like a credential), so both are scrubbed before they reach a
+        # SARIF file that gets committed and uploaded to the Security tab.
+        message = redact_secrets(f.detail) if f.detail else (
+            meta.title if meta else f.rule)
         results.append({
             "ruleId": rule_id,
             "level": _sarif_level(f.severity),
-            "message": {"text": f.detail or (meta.title if meta else f.rule)},
+            "message": {"text": message},
             "locations": [{
                 "physicalLocation": {
-                    "artifactLocation": {"uri": _repo_uri(f.path, base)},
+                    "artifactLocation": {"uri": redact_secrets(_repo_uri(f.path, base))},
                     "region": {"startLine": max(1, int(f.line or 1))},
                 },
             }],
             "partialFingerprints": {
-                "glassportRulePath": f"{f.rule}:{f.path}:{f.line}"},
+                "glassportRulePath": redact_secrets(f"{f.rule}:{f.path}:{f.line}")},
             "properties": {"severity": f.severity, "count": f.count},
         })
 
@@ -214,7 +221,8 @@ def render_session_sarif(trace, session_path: str = "", base: str = "") -> str:
         results.append({
             "ruleId": rule_id,
             "level": _sarif_level(a.severity),
-            "message": {"text": a.explanation or a.subcategory or rule_id},
+            "message": {"text": redact_secrets(a.explanation or a.subcategory
+                                               or rule_id)},
             "locations": [{
                 "physicalLocation": {
                     "artifactLocation": {"uri": uri},

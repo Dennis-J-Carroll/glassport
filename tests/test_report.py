@@ -113,6 +113,47 @@ class TestEscaping(unittest.TestCase):
         self.assertIn("&lt;img", h)
 
 
+class TestUnicodeDeception(unittest.TestCase):
+    """html.escape neutralizes markup but not deceptive Unicode; the renderer
+    must REVEAL bidi/invisible/homoglyph bytes as visible ‹U+XXXX› sentinels so
+    a hostile server can't spoof the report a human reads."""
+
+    def test_bidi_override_revealed_not_survived(self):
+        evil = "admin‮gpj.exe"          # RTL override reorders glyphs
+        h = render(handshake() + [call(6, 3, evil, {"query": "x"})])
+        self.assertNotIn("‮", h)
+        self.assertIn("‹U+202E›", h)
+
+    def test_homoglyph_and_invisible_revealed(self):
+        evil = "obեy‍ˋ"        # Armenian e + ZWJ + grave twin
+        h = render(handshake() + [call(6, 3, evil, {"query": "x"})])
+        for cp in ("ե", "‍", "ˋ"):
+            self.assertNotIn(cp, h)
+        for tag in ("‹U+0565›", "‹U+200D›",
+                    "‹U+02CB›"):
+            self.assertIn(tag, h)
+
+    def test_ordinary_text_untouched(self):
+        h = render(handshake() + [call(6, 3, "web_search", {"query": "café 中文"})])
+        self.assertIn("café 中文", h)           # legit non-ASCII must pass through
+        self.assertNotIn("‹U+", h)             # no spurious sentinels
+
+
+class TestSecretRedaction(unittest.TestCase):
+    """A tool argument or result carrying a live credential must never reach the
+    rendered HTML verbatim — the report is a shareable artifact."""
+
+    def test_secret_in_args_redacted(self):
+        secret = "postgres://admin:s3cr3tpassw0rd@db.internal:5432/prod"
+        # precondition: the detector recognizes this value as a secret
+        self.assertTrue(detectors._scan_pii(json.dumps({"dsn": secret})),
+                        "fixture value must be detectable for the test to mean anything")
+        h = render(handshake() + [call(6, 3, "web_search",
+                                       {"query": "x", "dsn": secret})])
+        self.assertNotIn("s3cr3tpassw0rd", h)
+        self.assertIn("redacted", h)
+
+
 class TestReportFile(unittest.TestCase):
     def _write_log(self, tmp, lines):
         p = Path(tmp) / "session.jsonl"

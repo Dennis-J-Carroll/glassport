@@ -24,11 +24,13 @@ from __future__ import annotations
 import html
 import json
 import sys
+import unicodedata
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+from glassport import detectors
 from glassport.interaction_trace import (
     ActorKind, Annotation, AnnotationKind, Event, EventKind,
     InteractionTrace, PartKind,
@@ -89,8 +91,44 @@ footer { color: var(--dim); border-top: 1px solid var(--line);
 """
 
 
+# Look-alike / hidden characters html.escape leaves untouched. A hostile
+# server can name a tool with a right-to-left override, a zero-width joiner, or
+# a Cyrillic/Armenian homoglyph; escaping renders the markup inert but the
+# *deception* survives into the report a human reads to make a trust decision.
+# We REVEAL each such character as a visible codepoint sentinel (‹U+XXXX›)
+# rather than silently dropping it — the analyst must see the server used one.
+_HOMOGLYPHS = frozenset(chr(k) for k in detectors._CONFUSABLES) | {
+    "ˋ",   # MODIFIER LETTER GRAVE ACCENT — backtick look-alike
+    "Ѕ",   # CYRILLIC CAPITAL LETTER DZE — 'S' look-alike
+}
+_SAFE_WS = frozenset("\t\n\r ")
+
+
+def _is_deceptive(ch: str) -> bool:
+    if ch in _SAFE_WS:                       # ordinary layout whitespace stays
+        return False
+    if ch in _HOMOGLYPHS:
+        return True
+    if detectors._INVISIBLE_RE.match(ch):    # bidi + zero-width + Hangul filler
+        return True
+    return unicodedata.category(ch) in ("Cc", "Cf", "Cn", "Co", "Cs")
+
+
+def _neutralize(text: str) -> str:
+    """Reveal deceptive Unicode as visible ‹U+XXXX› sentinels; legitimate text
+    (letters, whitespace, CJK, emoji) passes through untouched."""
+    if text.isascii() and text.isprintable():          # common fast path
+        return text
+    return "".join(f"‹U+{ord(ch):04X}›" if _is_deceptive(ch) else ch
+                   for ch in text)
+
+
 def _esc(value) -> str:
-    return html.escape(str(value), quote=True)
+    """Render an attacker-controlled value inert. Order matters: redact secrets
+    on the raw bytes first (the detector normalizes internally), then reveal
+    deceptive Unicode, then HTML-escape the markup."""
+    return html.escape(_neutralize(detectors.redact_secrets(str(value))),
+                       quote=True)
 
 
 def _pretty(content) -> str:
@@ -210,9 +248,9 @@ def render_html(trace: InteractionTrace, source_name: str = "") -> str:
         for a in sorted(anns_by_event.get(e.id, ()),
                         key=lambda a: -a.severity):
             marker = "•" if a.kind.value == "info" else "⚠"
-            w(f'<div class="ann" data-sev="{a.severity}" '
+            w(f'<div class="ann" data-sev="{_esc(a.severity)}" '
               f'data-kind="{_esc(a.kind.value)}">'
-              f"{marker} {_esc(a.subcategory)} · sev {a.severity} · "
+              f"{marker} {_esc(a.subcategory)} · sev {_esc(a.severity)} · "
               f"{_esc(a.kind.value)}<br>{_esc(a.explanation)}</div>")
         w("</div>")
 

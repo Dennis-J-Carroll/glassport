@@ -2,6 +2,9 @@
 (ok, detail). A False is a real glassport finding."""
 from __future__ import annotations
 
+import html as _html
+import json as _json
+
 from glassport.advise import BEGIN, END
 from glassport.detectors import _normalize_for_scan
 
@@ -62,6 +65,70 @@ def no_modifier_grave(text: str) -> tuple[bool, str]:
     if _MODIFIER_GRAVE in text:
         return (False, "modifier grave U+02CB (backtick homoglyph) present")
     return (True, "no modifier grave present")
+
+
+# ---------------------------------------------------------------------------
+# report.py (session.html) HTML-renderer invariants. Defined independently of
+# the renderer's own neutralizer so the check can never be circular: these sets
+# describe the raw attacker bytes that must NOT survive into the rendered page.
+# ---------------------------------------------------------------------------
+
+# Bidi / directional-formatting controls: reorder rendered glyphs without
+# changing bytes, so a hostile name can visually masquerade as a benign one.
+_BIDI_CONTROLS = frozenset(
+    "‪‫‬‭‮⁦⁧⁨⁩"
+    "‎‏؜")
+# Zero-width / invisible characters that are word-shaped or paste-invisible.
+_INVISIBLE_CHARS = frozenset(
+    "​‌‍⁠⁡⁢⁣⁤﻿"
+    "ᅟᅠ᠎­ˋ")
+
+
+def _present(text: str, chars: frozenset) -> list[str]:
+    return sorted({f"U+{ord(c):04X}" for c in text if c in chars})
+
+
+def no_bidi_control(text: str) -> tuple[bool, str]:
+    hit = _present(text, _BIDI_CONTROLS)
+    return (not hit, f"bidi controls present: {hit}" if hit
+            else "no bidi/directional control survived")
+
+
+def no_invisible_char(text: str) -> tuple[bool, str]:
+    hit = _present(text, _INVISIBLE_CHARS)
+    return (not hit, f"invisible chars present: {hit}" if hit
+            else "no invisible/zero-width char survived")
+
+
+def no_live_markup(text: str, payloads) -> tuple[bool, str]:
+    """No attacker markup payload may appear verbatim (i.e. unescaped) in the
+    rendered HTML. If the raw '<...>' bytes are present, escaping failed."""
+    for p in payloads:
+        if "<" in p and p in text:
+            return (False, f"raw markup payload survived unescaped: {p[:48]!r}")
+    return (True, "no attacker markup payload survived unescaped")
+
+
+def value_escaped(text: str, raw_value: str) -> tuple[bool, str]:
+    """An attacker value that contains HTML-special bytes must appear only in
+    its html.escape'd form, never verbatim."""
+    esc = _html.escape(raw_value, quote=True)
+    if raw_value != esc and raw_value in text:
+        return (False, f"attacker value present unescaped: {raw_value[:48]!r}")
+    return (True, "attacker value not present unescaped")
+
+
+def json_well_formed(text: str) -> tuple[bool, str]:
+    """Attacker bytes in any finding field must not break the SARIF envelope:
+    the document must still parse as JSON."""
+    try:
+        doc = _json.loads(text)
+    except ValueError as e:
+        return (False, f"SARIF is not valid JSON: {e}")
+    runs = doc.get("runs") if isinstance(doc, dict) else None
+    if not runs:
+        return (False, "SARIF has no runs")
+    return (True, f"valid JSON, {len(runs[0].get('results', []))} results")
 
 
 def no_normalized_directive(text: str, payload: str) -> tuple[bool, str]:
