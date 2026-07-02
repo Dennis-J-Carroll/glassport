@@ -42,11 +42,18 @@ def run() -> int:
     detectors.annotate(trace)
     runtime_doc = sarif.render_session_sarif(trace, session_path="s.jsonl", base="srv")
 
+    # A hostile multi-megabyte tool name rides into a.explanation; the SARIF
+    # must stay bounded (a session findings SARIF is far smaller than this).
+    dos_trace = from_mcp_session(rf.dos_report_lines())
+    detectors.annotate(dos_trace)
+    dos_doc = sarif.render_session_sarif(dos_trace, session_path="s.jsonl")
+
     checks = [
         ("S1 static-json-well-formed", oracle.json_well_formed(static_doc)),
         ("S2 runtime-json-well-formed", oracle.json_well_formed(runtime_doc)),
         ("S3 static-no-raw-secret", oracle.no_raw_secret(static_doc, rf.SECRETS)),
         ("S4 runtime-no-raw-secret", oracle.no_raw_secret(runtime_doc, rf.SECRETS)),
+        ("S5 dos-output-bounded", oracle.bounded_output(dos_doc, 2_000_000)),
     ]
 
     lines = ["# sarif red-team — findings", "",
@@ -68,7 +75,9 @@ def run() -> int:
               "`render_sarif` now scrubs the message, URI and fingerprint with "
               "`detectors.redact_secrets` (S3). A poisoning *directive* the audit "
               "quotes in a finding is NOT redacted — that is the tool faithfully "
-              "reporting the attack it found, not a leak.", ""]
+              "reporting the attack it found, not a leak. S5 bounds output "
+              "against a hostile multi-megabyte tool name that rides into "
+              "a.explanation — the message is clamped per field.", ""]
 
     os.makedirs(os.path.dirname(FINDINGS), exist_ok=True)
     with open(FINDINGS, "w") as fh:

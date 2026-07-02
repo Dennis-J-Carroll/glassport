@@ -26,10 +26,21 @@ sys.path.insert(0, "src")
 sys.path.insert(0, ".")
 
 from glassport import detectors
-from glassport.adapters.mcp_session import from_mcp_session_file
+from glassport.adapters.mcp_session import from_mcp_session, from_mcp_session_file
 from glassport.report import render_html
 
 from dogfood import oracle, redteam_fixtures as rf
+
+# A hostile 2 MB field must not inflate the report past this; the largest legit
+# session is far smaller. Generous enough that no honest report is truncated.
+MAX_REPORT_BYTES = 2_000_000
+MAX_COMBINING_RUN = 4
+
+
+def _render(lines) -> str:
+    trace = from_mcp_session(lines)
+    detectors.annotate(trace)
+    return render_html(trace, source_name="session.jsonl")
 
 LOG_DIR = "dogfood/logs/report-redteam"
 FINDINGS = "dogfood/findings/report-redteam.md"
@@ -63,6 +74,10 @@ def run() -> int:
         ("R6 markup-name-escaped", oracle.value_escaped(html, rf.MARKUP_NAME_PAYLOAD)),
         ("R7 script-result-escaped", oracle.value_escaped(html, rf.SCRIPT_RESULT_PAYLOAD)),
         ("R8 no-raw-secret", oracle.no_raw_secret(html, rf.SECRETS)),
+        ("R9 dos-output-bounded",
+         oracle.bounded_output(_render(rf.dos_report_lines()), MAX_REPORT_BYTES)),
+        ("R10 no-zalgo-run",
+         oracle.no_zalgo_run(_render(rf.zalgo_report_lines()), MAX_COMBINING_RUN)),
     ]
 
     lines = ["# report red-team — findings", "",
@@ -80,7 +95,10 @@ def run() -> int:
               "Unicode deception — bidi overrides, zero-width joiners and "
               "cross-script homoglyphs render as inert-but-misleading text. "
               "R2–R5 lock that gap; R1/R6/R7 regression-lock the markup escaping "
-              "that already held.", ""]
+              "that already held. R9 bounds output against a multi-megabyte "
+              "field (a resource/DoS shape — the renderer amplified a 5 MB name "
+              "4× before the per-field clamp); R10 collapses Zalgo combining-mark "
+              "runs that an escape-only renderer let overflow the row.", ""]
 
     os.makedirs(os.path.dirname(FINDINGS), exist_ok=True)
     with open(FINDINGS, "w") as fh:

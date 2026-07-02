@@ -102,6 +102,10 @@ _HOMOGLYPHS = frozenset(chr(k) for k in detectors._CONFUSABLES) | {
     "Ѕ",   # CYRILLIC CAPITAL LETTER DZE — 'S' look-alike
 }
 _SAFE_WS = frozenset("\t\n\r ")
+# A base glyph may legitimately carry a few combining marks (Vietnamese, IPA);
+# a Zalgo stack piles on dozens to overflow and obscure the row. Keep a handful,
+# then collapse the rest into a count so the deception is visible but bounded.
+_MAX_COMBINING_RUN = 4
 
 
 def _is_deceptive(ch: str) -> bool:
@@ -115,20 +119,37 @@ def _is_deceptive(ch: str) -> bool:
 
 
 def _neutralize(text: str) -> str:
-    """Reveal deceptive Unicode as visible ‹U+XXXX› sentinels; legitimate text
-    (letters, whitespace, CJK, emoji) passes through untouched."""
+    """Reveal deceptive Unicode as visible ‹U+XXXX› sentinels and collapse
+    Zalgo combining-mark runs; legitimate text (letters, whitespace, CJK, emoji,
+    a few diacritics) passes through untouched."""
     if text.isascii() and text.isprintable():          # common fast path
         return text
-    return "".join(f"‹U+{ord(ch):04X}›" if _is_deceptive(ch) else ch
-                   for ch in text)
+    out: list[str] = []
+    run = 0                                            # consecutive combining marks
+    for ch in text:
+        if unicodedata.category(ch) in ("Mn", "Mc", "Me"):
+            run += 1
+            if run > _MAX_COMBINING_RUN:
+                if run == _MAX_COMBINING_RUN + 1:
+                    out.append("‹combining…›")         # once per overflowing run
+                continue
+            out.append(ch)
+            continue
+        run = 0
+        out.append(f"‹U+{ord(ch):04X}›" if _is_deceptive(ch) else ch)
+    return "".join(out)
 
 
 def _esc(value) -> str:
     """Render an attacker-controlled value inert. Order matters: redact secrets
-    on the raw bytes first (the detector normalizes internally), then reveal
-    deceptive Unicode, then HTML-escape the markup."""
-    return html.escape(_neutralize(detectors.redact_secrets(str(value))),
-                       quote=True)
+    on the raw bytes first (the detector scans internally), THEN clamp the length
+    (a hostile multi-MB field must not inflate the page), then reveal deceptive
+    Unicode, then HTML-escape the markup. Clamp-after-redact is leak-safe: the
+    clamp bound is well within the scanned window, so a secret can't survive by
+    straddling the truncation point."""
+    return html.escape(
+        _neutralize(detectors.clamp_text(detectors.redact_secrets(str(value)))),
+        quote=True)
 
 
 def _pretty(content) -> str:

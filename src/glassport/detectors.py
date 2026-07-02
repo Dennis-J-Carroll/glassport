@@ -604,6 +604,20 @@ def _redact(value: str, category: str) -> str:
     return f"[{category} redacted · {len(value)} chars]"
 
 
+MAX_RENDER_CHARS = 50_000       # per-field display cap for renderers
+
+
+def clamp_text(text: str, limit: int = MAX_RENDER_CHARS) -> str:
+    """Bound a single rendered field so a hostile multi-megabyte tool name,
+    argument or result cannot inflate a report/SARIF artifact (or the time to
+    build it) without limit. The tap's raw session log stays the full-fidelity
+    source of truth; the human-facing renders are summaries. Mirrors
+    MAX_SCAN_BYTES, which bounds the scan for the same reason."""
+    if len(text) <= limit:
+        return text
+    return text[:limit] + f"… [{len(text) - limit} chars truncated]"
+
+
 def redact_secrets(text: str) -> str:
     """Replace every credential/PII the detectors recognize with a
     non-reversible tag. The canonical scrubber for any renderer that emits

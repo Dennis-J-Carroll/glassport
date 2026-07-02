@@ -154,6 +154,39 @@ class TestSecretRedaction(unittest.TestCase):
         self.assertIn("redacted", h)
 
 
+class TestBounding(unittest.TestCase):
+    """A hostile server can send a multi-megabyte field or a Zalgo stack; the
+    report must stay bounded and readable, and truncation must not leak a
+    secret across the cut."""
+
+    def test_huge_field_is_truncated_and_output_bounded(self):
+        big = "A" * 2_000_000
+        h = render(handshake() + [call(6, 3, big, {"query": "x"})])
+        self.assertLess(len(h.encode("utf-8")), 2_000_000)   # not ~8MB
+        self.assertIn("chars truncated", h)
+
+    def test_truncation_does_not_leak_a_straddling_secret(self):
+        secret = "postgres://admin:s3cr3tpassw0rd@db.internal:5432/prod"
+        # place the secret right at the display-cap boundary
+        pad = "A" * (detectors.MAX_RENDER_CHARS - 10)
+        h = render(handshake() + [call(6, 3, "web_search",
+                                       {"q": pad + secret})])
+        self.assertNotIn("s3cr3tpassw0rd", h)
+
+    def test_zalgo_run_collapsed(self):
+        import unicodedata
+        name = "tool" + "e" + "́̂̃̄̅̆̇̈" * 4
+        h = render(handshake() + [call(6, 3, name, {"query": "x"})])
+        run = worst = 0
+        for ch in h:
+            if unicodedata.category(ch) in ("Mn", "Mc", "Me"):
+                run += 1; worst = max(worst, run)
+            else:
+                run = 0
+        self.assertLessEqual(worst, 4)
+        self.assertIn("‹combining…›", h)
+
+
 class TestReportFile(unittest.TestCase):
     def _write_log(self, tmp, lines):
         p = Path(tmp) / "session.jsonl"

@@ -170,5 +170,16 @@ class TestSecretRedaction(unittest.TestCase):
         self.assertIn("ignore previous instructions", doc)
 
 
+class TestBounding(unittest.TestCase):
+    """A hostile finding detail must not inflate the SARIF without limit."""
+
+    def test_huge_detail_is_clamped(self):
+        f = Finding("tool-poisoning", "critical", "app.py", 1, "X" * 2_000_000)
+        doc = sarif.render_sarif(report([f]), base="")
+        self.assertLess(len(doc.encode("utf-8")), 500_000)
+        msg = json.loads(doc)["runs"][0]["results"][0]["message"]["text"]
+        self.assertIn("chars truncated", msg)
+
+
 if __name__ == "__main__":
     unittest.main()
