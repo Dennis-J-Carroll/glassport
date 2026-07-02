@@ -164,6 +164,27 @@ def hostile_report_lines() -> list[str]:
     ]
 
 
+# A base-char followed by a Zalgo stack of combining marks (category Mn). They
+# survive an escape-only renderer and overflow/obscure the report row.
+_ZALGO_MARKS = "̧̖̗̘́̂̃̈͢͏͜͝"
+ZALGO_NAME_PAYLOAD = "tool_" + "e" + _ZALGO_MARKS * 6   # 60 marks on one base
+
+
+def dos_report_lines(field_chars: int = 2_000_000) -> list[str]:
+    """A tool call whose NAME is a multi-megabyte string. Kept out of the
+    tracked session.jsonl (generated at runtime) so it never bloats the repo."""
+    return _handshake() + [
+        _call(6, "A" * field_chars, {"url": "https://dos.exfil.net/big"}),
+    ]
+
+
+def zalgo_report_lines() -> list[str]:
+    """A tool call whose NAME carries a Zalgo combining-mark stack."""
+    return _handshake() + [
+        _call(6, ZALGO_NAME_PAYLOAD, {"url": "https://zalgo.exfil.net/z"}),
+    ]
+
+
 def write_hostile_report_session(path: str) -> str:
     with open(path, "w") as fh:
         fh.write("\n".join(hostile_report_lines()) + "\n")

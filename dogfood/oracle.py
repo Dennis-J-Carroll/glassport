@@ -118,6 +118,31 @@ def value_escaped(text: str, raw_value: str) -> tuple[bool, str]:
     return (True, "attacker value not present unescaped")
 
 
+def bounded_output(text: str, max_bytes: int) -> tuple[bool, str]:
+    """A renderer must bound its output: a hostile multi-megabyte field cannot
+    inflate the artifact without limit (a resource/DoS shape). Deterministic —
+    asserts on the produced size, not wall-clock time."""
+    n = len(text.encode("utf-8"))
+    return (n <= max_bytes,
+            f"output {n} bytes (limit {max_bytes})")
+
+
+def no_zalgo_run(text: str, limit: int) -> tuple[bool, str]:
+    """No run of more than `limit` consecutive combining marks may survive — a
+    Zalgo stack overflows and obscures the report; legit diacritics (1-2 marks)
+    are fine."""
+    import unicodedata
+    run = worst = 0
+    for ch in text:
+        if unicodedata.category(ch) in ("Mn", "Mc", "Me"):
+            run += 1
+            worst = max(worst, run)
+        else:
+            run = 0
+    return (worst <= limit,
+            f"longest combining-mark run = {worst} (limit {limit})")
+
+
 def json_well_formed(text: str) -> tuple[bool, str]:
     """Attacker bytes in any finding field must not break the SARIF envelope:
     the document must still parse as JSON."""
