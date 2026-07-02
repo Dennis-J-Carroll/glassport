@@ -33,6 +33,27 @@ jobs:
       - name: Static audit smoke test (fake server is misbehaving by design)
         run: glassport audit examples/fake_server.py || true
 
+  # Poisoning-resistance merge gate. Each grill drives the REAL renderer
+  # against hostile fixtures and exits non-zero on any FAIL, so a regression
+  # that lets attacker-controlled bytes escape into an agent instruction file
+  # (advise), an HTML report a human opens (report), or a SARIF document the
+  # Security tab renders (sarif) cannot merge. Zero-dep: stdlib only, straight
+  # from the clone, no install.
+  redteam-grills:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: advise / report / sarif red-team grills
+        run: |
+          PYTHONPATH=src python dogfood/eval_advise_redteam.py
+          PYTHONPATH=src python dogfood/eval_report_redteam.py
+          PYTHONPATH=src python dogfood/eval_sarif_redteam.py
+
   # End-to-end SARIF path: static audit -> SARIF 2.1.0 -> GitHub Security
   # tab. Result locations are repo-root-relative (the audited path is
   # passed as the SARIF base), so findings annotate the diff. Consumers

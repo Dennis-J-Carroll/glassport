@@ -23,6 +23,15 @@ jobs:
       - name: Run tests (stdlib only, no install)
         run: python -m unittest discover -s tests -t . -v
 
+      # A poisoning/credential-leak regression in a renderer must not ship to
+      # PyPI: the red-team grills gate the release too (also verifies them
+      # across the 3.10-3.13 matrix).
+      - name: Poisoning-resistance red-team grills
+        run: |
+          PYTHONPATH=src python dogfood/eval_advise_redteam.py
+          PYTHONPATH=src python dogfood/eval_report_redteam.py
+          PYTHONPATH=src python dogfood/eval_sarif_redteam.py
+
   build:
     needs: test
     runs-on: ubuntu-latest
