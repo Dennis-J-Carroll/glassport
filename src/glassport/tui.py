@@ -199,6 +199,62 @@ class UIState:
     overlay_scroll: int = 0
 
 
+# ─────────────────────────────────────────────────────────────────
+# Tabs — one open session per tab, each with its own UIState and
+# ingest cache so switching back is instant. Pure operations; the
+# curses loop only reads tabs.active and fills the cache fields.
+# ─────────────────────────────────────────────────────────────────
+
+@dataclass
+class Tab:
+    path: Path
+    state: UIState = field(default_factory=UIState)
+    # ingest cache, owned by the dashboard loop:
+    last_size: int = -1
+    trace: InteractionTrace | None = None
+    vm: ViewModel | None = None
+
+
+@dataclass
+class Tabs:
+    tabs: list[Tab] = field(default_factory=list)
+    active: int = 0
+
+
+def open_tab(tabs: Tabs, path: Path) -> Tabs:
+    """Activate the tab for `path`, appending it if not already open."""
+    for i, t in enumerate(tabs.tabs):
+        if t.path == path:
+            tabs.active = i
+            return tabs
+    tabs.tabs.append(Tab(path=path))
+    tabs.active = len(tabs.tabs) - 1
+    return tabs
+
+
+def format_tab_strip(tabs: Tabs) -> str:
+    """One-line tab bar: `[n:name]` for the active tab, ` n:name ` else."""
+    cells = []
+    for i, t in enumerate(tabs.tabs):
+        label = f"{i + 1}:{t.path.name}"
+        cells.append(f"[{label}]" if i == tabs.active else f" {label} ")
+    return " ".join(cells)
+
+
+def cycle_tab(tabs: Tabs) -> Tabs:
+    if tabs.tabs:
+        tabs.active = (tabs.active + 1) % len(tabs.tabs)
+    return tabs
+
+
+def close_tab(tabs: Tabs) -> Tabs:
+    """Close the active tab; active stays on the same position, clamped."""
+    if tabs.tabs:
+        tabs.tabs.pop(tabs.active)
+        tabs.active = min(tabs.active, max(0, len(tabs.tabs) - 1))
+    return tabs
+
+
 def reduce(state: UIState, action: str, vm: ViewModel) -> UIState:
     """Apply one semantic action to state, in place (curses-free and
     deterministic; returns the same object for chaining)."""
@@ -287,6 +343,8 @@ KEYMAP = {
     ord("f"): "follow", ord("\t"): "tab",
     ord("\n"): "enter", ord("\r"): "enter",
     27: "back",                       # Esc
+    20: "next_tab",                   # Ctrl+T
+    23: "close_tab",                  # Ctrl+W
 }
 
 C_BASE, C_HOT, C_WARN, C_DIM, C_BAR, C_INFO = 1, 2, 3, 4, 5, 6
@@ -333,7 +391,7 @@ def _put(scr, y, x, text, attr=0):
             pass
 
 
-def _draw_dashboard(curses, scr, vm, state):
+def _draw_dashboard(curses, scr, vm, state, tabs=None):
     scr.erase()
     h, w = scr.getmaxyx()
     if w < MIN_COLS or h < MIN_ROWS:
@@ -354,9 +412,15 @@ def _draw_dashboard(curses, scr, vm, state):
                     f"{'' if state.follow else ' · follow OFF'}"
                     .ljust(w - 1), bar)
 
+    strip_h = 0
+    if tabs is not None and len(tabs.tabs) > 1:
+        _put(scr, 2, 0, " " + format_tab_strip(tabs),
+             _attr(curses, C_DIM, dim=True))
+        strip_h = 1
+
     n_findings = min(len(vm.findings), 5)
     findings_h = (n_findings + 1) if n_findings else 0
-    tl_top = 2
+    tl_top = 2 + strip_h
     tl_h = max(1, (h - 1) - findings_h - tl_top)
 
     sel = state.selected if state.focus == "timeline" else -1
@@ -387,7 +451,8 @@ def _draw_dashboard(curses, scr, vm, state):
             _put(scr, fy + 1 + i, 0, " " + f.text, attr)
 
     _put(scr, h - 1, 0,
-         " j/k move · enter expand · tab focus · f follow · q quit ",
+         " j/k move · enter expand · tab focus · f follow · "
+         "^T/^W tabs · q quit ",
          _attr(curses, C_DIM, dim=True))
     scr.refresh()
 
@@ -410,40 +475,50 @@ def _ingest(path: Path) -> InteractionTrace:
     return trace
 
 
-def _dashboard_loop(curses, scr, path: Path) -> None:
-    scr.timeout(250)          # input poll doubles as the re-ingest tick
-    last_size = -1
-    trace = None
-    vm = None
-    state = UIState()
-    while True:
+def _refresh_tab(tab: Tab) -> bool:
+    """Re-ingest the tab's session if its file grew. Returns False when
+    the file vanished before the first successful ingest (dead tab)."""
+    try:
+        st = tab.path.stat()
+        size, mtime = st.st_size, st.st_mtime
+    except OSError:
+        size, mtime = tab.last_size, 0.0
+    if size != tab.last_size or tab.vm is None:
+        tab.last_size = size
         try:
-            st = path.stat()
-            size, mtime = st.st_size, st.st_mtime
+            tab.trace = _ingest(tab.path)
         except OSError:
-            size, mtime = last_size, 0.0
-        if size != last_size or vm is None:
-            last_size = size
-            try:
-                trace = _ingest(path)
-            except OSError:
-                # file vanished mid-rotation: keep showing the last
-                # good trace; the next tick re-stats and recovers
-                if vm is None:
-                    return
-                vm.live = False
-            else:
-                vm = build_view_model(
-                    trace, live=(time.time() - mtime) < LIVE_WINDOW_SECS)
-                if state.follow:
-                    state.selected = max(0, len(vm.rows) - 1)
+            # file vanished mid-rotation: keep showing the last
+            # good trace; the next tick re-stats and recovers
+            if tab.vm is None:
+                return False
+            tab.vm.live = False
         else:
-            vm.live = (time.time() - mtime) < LIVE_WINDOW_SECS
+            tab.vm = build_view_model(
+                tab.trace, live=(time.time() - mtime) < LIVE_WINDOW_SECS)
+            if tab.state.follow:
+                tab.state.selected = max(0, len(tab.vm.rows) - 1)
+    else:
+        tab.vm.live = (time.time() - mtime) < LIVE_WINDOW_SECS
+    return True
+
+
+def _dashboard_loop(curses, scr, tabs: Tabs) -> None:
+    scr.timeout(250)          # input poll doubles as the re-ingest tick
+    while True:
+        if not tabs.tabs:
+            return            # every tab closed -> back to the picker
+        tab = tabs.tabs[tabs.active]
+        if not _refresh_tab(tab):
+            close_tab(tabs)
+            continue
+        state, vm = tab.state, tab.vm
+        assert vm is not None            # _refresh_tab(True) guarantees it
 
         if state.overlay_open:
-            _draw_overlay(curses, scr, trace, state)
+            _draw_overlay(curses, scr, tab.trace, state)
         else:
-            _draw_dashboard(curses, scr, vm, state)
+            _draw_dashboard(curses, scr, vm, state, tabs)
 
         key = scr.getch()
         if key in (-1, curses.KEY_RESIZE):
@@ -458,7 +533,11 @@ def _dashboard_loop(curses, scr, path: Path) -> None:
             action = "up"
         elif key == curses.KEY_DOWN:
             action = "down"
-        if action:
+        if action == "next_tab":
+            cycle_tab(tabs)
+        elif action == "close_tab":
+            close_tab(tabs)
+        elif action:
             reduce(state, action, vm)
 
 
@@ -530,14 +609,17 @@ def main(argv: list[str]) -> int:
             curses.set_escdelay(25)   # Esc should feel instant
         except AttributeError:
             pass                       # not on all curses builds
+        tabs = Tabs()                  # persists across picker round-trips
         if path is not None:
-            _dashboard_loop(curses, scr, path)
+            open_tab(tabs, path)
+            _dashboard_loop(curses, scr, tabs)
             return
         while True:
             chosen = _picker_loop(curses, scr, log_dir)
             if chosen is None:
                 return
-            _dashboard_loop(curses, scr, chosen)
+            open_tab(tabs, chosen)
+            _dashboard_loop(curses, scr, tabs)
 
     curses.wrapper(_run)
     return 0

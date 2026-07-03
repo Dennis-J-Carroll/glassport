@@ -278,6 +278,103 @@ class TestReducer(unittest.TestCase):
         self.assertLess(st.selected, len(vm_fewer.rows))
 
 
+class TestTabs(unittest.TestCase):
+    """Pure tab-state operations — no curses, no filesystem."""
+
+    def test_open_tab_appends_and_activates(self):
+        tabs = tui.Tabs()
+        tui.open_tab(tabs, Path("/a.jsonl"))
+        tui.open_tab(tabs, Path("/b.jsonl"))
+        self.assertEqual([t.path.name for t in tabs.tabs],
+                         ["a.jsonl", "b.jsonl"])
+        self.assertEqual(tabs.active, 1)
+
+    def test_open_existing_path_switches_without_duplicate(self):
+        tabs = tui.Tabs()
+        tui.open_tab(tabs, Path("/a.jsonl"))
+        tui.open_tab(tabs, Path("/b.jsonl"))
+        tui.open_tab(tabs, Path("/a.jsonl"))
+        self.assertEqual(len(tabs.tabs), 2)
+        self.assertEqual(tabs.active, 0)
+
+    def test_cycle_wraps_around(self):
+        tabs = tui.Tabs()
+        for p in ("/a.jsonl", "/b.jsonl", "/c.jsonl"):
+            tui.open_tab(tabs, Path(p))
+        self.assertEqual(tabs.active, 2)
+        tui.cycle_tab(tabs)
+        self.assertEqual(tabs.active, 0)
+        tui.cycle_tab(tabs)
+        self.assertEqual(tabs.active, 1)
+
+    def test_cycle_single_tab_is_noop(self):
+        tabs = tui.Tabs()
+        tui.open_tab(tabs, Path("/a.jsonl"))
+        tui.cycle_tab(tabs)
+        self.assertEqual(tabs.active, 0)
+
+    def test_cycle_empty_is_noop(self):
+        tabs = tui.Tabs()
+        tui.cycle_tab(tabs)   # must not raise
+        self.assertEqual(tabs.active, 0)
+
+    def test_close_removes_active_and_clamps(self):
+        tabs = tui.Tabs()
+        for p in ("/a.jsonl", "/b.jsonl", "/c.jsonl"):
+            tui.open_tab(tabs, Path(p))
+        # active == 2 (c); close it -> active clamps to last remaining
+        tui.close_tab(tabs)
+        self.assertEqual([t.path.name for t in tabs.tabs],
+                         ["a.jsonl", "b.jsonl"])
+        self.assertEqual(tabs.active, 1)
+
+    def test_close_middle_keeps_position(self):
+        tabs = tui.Tabs()
+        for p in ("/a.jsonl", "/b.jsonl", "/c.jsonl"):
+            tui.open_tab(tabs, Path(p))
+        tabs.active = 1
+        tui.close_tab(tabs)
+        self.assertEqual([t.path.name for t in tabs.tabs],
+                         ["a.jsonl", "c.jsonl"])
+        self.assertEqual(tabs.active, 1)   # now points at c
+
+    def test_close_last_tab_leaves_empty(self):
+        tabs = tui.Tabs()
+        tui.open_tab(tabs, Path("/a.jsonl"))
+        tui.close_tab(tabs)
+        self.assertEqual(tabs.tabs, [])
+        self.assertEqual(tabs.active, 0)
+
+    def test_close_empty_is_noop(self):
+        tabs = tui.Tabs()
+        tui.close_tab(tabs)   # must not raise
+        self.assertEqual(tabs.tabs, [])
+
+    def test_each_tab_has_independent_ui_state(self):
+        tabs = tui.Tabs()
+        tui.open_tab(tabs, Path("/a.jsonl"))
+        tui.open_tab(tabs, Path("/b.jsonl"))
+        tabs.tabs[0].state.selected = 7
+        self.assertEqual(tabs.tabs[1].state.selected, 0)
+        self.assertIsNot(tabs.tabs[0].state, tabs.tabs[1].state)
+
+    def test_keymap_binds_ctrl_t_and_ctrl_w(self):
+        self.assertEqual(tui.KEYMAP.get(20), "next_tab")   # Ctrl+T
+        self.assertEqual(tui.KEYMAP.get(23), "close_tab")  # Ctrl+W
+
+    def test_tab_strip_marks_active_and_numbers_tabs(self):
+        tabs = tui.Tabs()
+        tui.open_tab(tabs, Path("/x/alpha.jsonl"))
+        tui.open_tab(tabs, Path("/x/beta.jsonl"))
+        tabs.active = 0
+        strip = tui.format_tab_strip(tabs)
+        self.assertIn("1:alpha.jsonl", strip)
+        self.assertIn("2:beta.jsonl", strip)
+        # active tab is marked, inactive is not
+        self.assertIn("[1:alpha.jsonl]", strip)
+        self.assertNotIn("[2:beta.jsonl]", strip)
+
+
 class TestCLIWiring(unittest.TestCase):
     def test_main_rejects_missing_file(self):
         rc = tui.main(["/nonexistent/session.jsonl"])
