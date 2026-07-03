@@ -465,6 +465,25 @@ class TestSearch(unittest.TestCase):
         tui.reduce(st, "search_next", self.vm)
         self.assertEqual(st.selected, before)
 
+    def test_cancel_after_accept_clears_query(self):
+        # regression: q sends search_cancel after an accepted search;
+        # if the reducer only honors it in input mode, q can never
+        # clear the query and therefore can never quit the dashboard
+        st = tui.UIState()
+        tui.reduce(st, "search_open", self.vm)
+        tui.reduce(st, "input:t", self.vm)
+        tui.reduce(st, "search_accept", self.vm)
+        tui.reduce(st, "search_cancel", self.vm)
+        self.assertEqual(st.search_query, "")
+
+    def test_esc_after_accept_clears_query(self):
+        st = tui.UIState()
+        tui.reduce(st, "search_open", self.vm)
+        tui.reduce(st, "input:t", self.vm)
+        tui.reduce(st, "search_accept", self.vm)
+        tui.reduce(st, "back", self.vm)
+        self.assertEqual(st.search_query, "")
+
     def test_search_ignored_while_overlay_open(self):
         st = tui.UIState(overlay_open=True)
         tui.reduce(st, "search_open", self.vm)

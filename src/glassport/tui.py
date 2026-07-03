@@ -314,6 +314,11 @@ def reduce(state: UIState, action: str, vm: ViewModel) -> UIState:
             state.search_input = False
             state.search_query = ""
         return state
+    if action in ("search_cancel", "back") and state.search_query:
+        # an accepted search is still "active" (highlight + n/N);
+        # esc/q dismiss it from outside input mode too
+        state.search_query = ""
+        return state
     if action in ("search_next", "search_prev"):
         hits = search_matches(vm, state.search_query, state.focus)
         if hits:
