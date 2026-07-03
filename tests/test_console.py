@@ -257,6 +257,25 @@ class TestHTTPEndpoints(unittest.TestCase):
         finally:
             sock.close()
 
+    def test_ws_ping_answered_with_pong(self):
+        sock, head = self._ws_connect(None)     # absent origin: allowed
+        try:
+            self.assertIn(b"101", head.split(b"\r\n", 1)[0])
+            sock.sendall(mask_client_frame(b"echo", opcode=9))
+            deadline = time.time() + 5
+            d = console.WSDecoder()
+            pong = None
+            while time.time() < deadline and pong is None:
+                data = sock.recv(65536)
+                if not data:
+                    break
+                for op, body in d.feed(data):
+                    if op == 10:
+                        pong = body
+            self.assertEqual(pong, b"echo")
+        finally:
+            sock.close()
+
     def test_ws_cross_origin_rejected(self):
         sock, head = self._ws_connect("https://evil.example")
         try:
