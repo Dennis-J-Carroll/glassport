@@ -1,7 +1,7 @@
 # glassport — project status
 
 Living snapshot of what's built, what's built-but-unshipped, and what's next.
-Update when a tier changes. Last updated: 2026-07-02 (0.6.2 — renderer poisoning-resistance: report.py HTML neutralize+redact, sarif.py credential redaction, renderer DoS/Zalgo bounds, and the report/sarif grills as CI merge gates).
+Update when a tier changes. Last updated: 2026-07-03 (0.6.3 — Kimi round-2 renderer hardening: shared `neutralize_text` folds NFKC/fullwidth + math-alphanumeric homoglyphs and exotic whitespace, two-pass Zalgo collapse survives ZWJ interleave, `stripe_key` credential, unit-locked. 0.6.2 was the initial report/sarif poisoning-resistance).
 
 ## Tier 1 — Built, tested, in the repo
 
@@ -26,11 +26,15 @@ Source is the truth; this is the index.
 
 ## Tier 2 — Built but NOT shipped to PyPI
 
-**Empty — `pip install glassport` serves 0.6.2** (published via tag-triggered
-trusted publishing, tag `v0.6.2`). 0.6.2 extends poisoning-resistance to the
-other renderers: `report.py` (`session.html`) neutralizes deceptive Unicode and
-redacts secrets; `sarif.py` redacts credentials from finding path/fingerprint/
-message; both bound output and collapse Zalgo runs against DoS; the report and
+**Empty — `pip install glassport` serves 0.6.3** (published via tag-triggered
+trusted publishing, tag `v0.6.3`). 0.6.3 is the Kimi round-2 renderer hardening
+(PR #33): shared `detectors.neutralize_text` NFKC-folds fullwidth + math-
+alphanumeric homoglyphs, reveals exotic whitespace (Zs/Zl/Zp), collapses Zalgo
+runs in two passes so a ZWJ interleave can't reset the counter, plus a
+`stripe_key` credential pattern — all unit-locked. 0.6.2 was the initial
+report/sarif poisoning-resistance: `report.py` (`session.html`) neutralizes
+deceptive Unicode and redacts secrets; `sarif.py` redacts credentials from
+finding path/fingerprint/message; both bound output against DoS; the report and
 sarif grills join advise as CI merge gates (PRs #29, #30). 0.6.1 was the
 `run_tap` shutdown-abort patch (PR #26); 0.6.0 shipped `advise` (PR #20) + its
 quote-or-redact hardening (PR #21) + the P1–P11 grill (PR #22).
@@ -88,6 +92,6 @@ Roughly in dependency order — earlier unlocks later.
 
 ## Next action
 
-Repo and PyPI in sync at **0.6.2**. Tier-3 #1 (plugin registry) and Tier-3 #2
+Repo and PyPI in sync at **0.6.3**. Tier-3 #1 (plugin registry) and Tier-3 #2
 (`advise`) shipped. Pick a Tier-3 item — recommended next: **#1 Network-enriched
 audit** (independent, medium) before the large streaming rearchitecture (#3).
