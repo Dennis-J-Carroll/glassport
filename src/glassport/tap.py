@@ -633,6 +633,10 @@ glassport — passive MCP stdio proxy
   watch:           glassport watch [log-dir] [--json]
   serve:           glassport serve [--log-dir DIR]
                    (expose glassport itself as a queryable MCP server)
+                   glassport serve --http [--port N] [--bind HOST]
+                        [--log-dir DIR] [--audit PATH]
+                   (web console at http://127.0.0.1:PORT/console —
+                    live timeline, drift, audit, SARIF, advisory)
   tui:             glassport tui [session.jsonl] [--log-dir DIR]
                         [--audit PATH] [--gate-control]
                    (live curses inspector; no argument = session picker.
