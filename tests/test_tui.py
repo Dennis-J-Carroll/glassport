@@ -476,6 +476,80 @@ class TestSearch(unittest.TestCase):
         self.assertEqual(tui.KEYMAP.get(ord("N")), "search_prev")
 
 
+class TestDriftPanel(unittest.TestCase):
+    """build_drift_lines: current session vs the merged baseline of the
+    other logs in the same directory (watch.py is the engine; the TUI
+    only renders). Lines are (severity, text) for severity coloring."""
+
+    def _write(self, tmp, name, lines):
+        p = Path(tmp) / name
+        p.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        return p
+
+    def _session(self, tools=None, calls=()):
+        from tests.test_watch import session
+        return session(tools=tools, calls=calls)
+
+    def test_only_session_is_its_own_baseline(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            p = self._write(tmp, "01_srv_1.jsonl", self._session())
+            lines = tui.build_drift_lines(p, Path(tmp))
+            text = "\n".join(t for _, t in lines)
+            self.assertIn("baseline", text)
+
+    def test_new_declared_tool_surfaces_with_severity(self):
+        two = [{"name": "web_search"}, {"name": "shell_exec"}]
+        with tempfile.TemporaryDirectory() as tmp:
+            self._write(tmp, "01_srv_1.jsonl", self._session())
+            p = self._write(tmp, "02_srv_2.jsonl", self._session(tools=two))
+            lines = tui.build_drift_lines(p, Path(tmp))
+            hot = [(sev, t) for sev, t in lines if "shell_exec" in t]
+            self.assertTrue(hot)
+            self.assertEqual(hot[0][0], 2)          # new_declared_tool sev
+            self.assertIn("new_declared_tool", hot[0][1])
+
+    def test_clean_repeat_session_reports_no_drift(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self._write(tmp, "01_srv_1.jsonl", self._session())
+            p = self._write(tmp, "02_srv_2.jsonl", self._session())
+            lines = tui.build_drift_lines(p, Path(tmp))
+            text = "\n".join(t for _, t in lines)
+            self.assertIn("no drift", text)
+
+    def test_unreadable_dir_degrades_not_raises(self):
+        lines = tui.build_drift_lines(
+            Path("/nonexistent/s.jsonl"), Path("/nonexistent"))
+        self.assertTrue(lines)          # explains itself instead of raising
+
+    def test_d_toggles_drift_panel(self):
+        vm = tui.build_view_model(annotated_trace(handshake()), live=False)
+        st = tui.UIState()
+        tui.reduce(st, "drift", vm)
+        self.assertTrue(st.drift_open)
+        tui.reduce(st, "drift", vm)
+        self.assertFalse(st.drift_open)
+
+    def test_shift_d_opens_full_drift_overlay_and_back_closes(self):
+        vm = tui.build_view_model(annotated_trace(handshake()), live=False)
+        st = tui.UIState()
+        tui.reduce(st, "drift_full", vm)
+        self.assertTrue(st.overlay_open)
+        self.assertEqual(st.overlay_mode, "drift")
+        tui.reduce(st, "back", vm)
+        self.assertFalse(st.overlay_open)
+
+    def test_enter_still_opens_frame_overlay(self):
+        vm = tui.build_view_model(annotated_trace(handshake()), live=False)
+        st = tui.UIState()
+        tui.reduce(st, "enter", vm)
+        self.assertTrue(st.overlay_open)
+        self.assertEqual(st.overlay_mode, "frame")
+
+    def test_keymap_binds_d_and_shift_d(self):
+        self.assertEqual(tui.KEYMAP.get(ord("d")), "drift")
+        self.assertEqual(tui.KEYMAP.get(ord("D")), "drift_full")
+
+
 class TestCLIWiring(unittest.TestCase):
     def test_main_rejects_missing_file(self):
         rc = tui.main(["/nonexistent/session.jsonl"])

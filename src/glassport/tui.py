@@ -199,6 +199,8 @@ class UIState:
     overlay_scroll: int = 0
     search_input: bool = False       # typing in the search bar
     search_query: str = ""           # persists after accept, for n/N
+    drift_open: bool = False         # drift side panel visible
+    overlay_mode: str = "frame"      # "frame" | "drift"
 
 
 def search_matches(vm: ViewModel, query: str, focus: str) -> list[int]:
@@ -226,6 +228,7 @@ class Tab:
     last_size: int = -1
     trace: InteractionTrace | None = None
     vm: ViewModel | None = None
+    drift_lines: list[tuple[int, str]] | None = None   # lazy, per ingest
 
 
 @dataclass
@@ -344,15 +347,68 @@ def reduce(state: UIState, action: str, vm: ViewModel) -> UIState:
     elif action == "tab":
         state.focus = "findings" if state.focus == "timeline" else "timeline"
         state.selected = 0
+    elif action == "drift":
+        state.drift_open = not state.drift_open
+    elif action == "drift_full":
+        state.overlay_open = True
+        state.overlay_mode = "drift"
+        state.overlay_scroll = 0
     elif action == "enter":
         if state.focus == "timeline" and vm.rows:
             state.overlay_open = True
+            state.overlay_mode = "frame"
             state.overlay_scroll = 0
         elif state.focus == "findings" and vm.findings:
             state.focus = "timeline"
             state.selected = vm.findings[state.selected].row_index
             state.follow = False
     return state
+
+
+def build_drift_lines(path: Path, log_dir: Path) -> list[tuple[int, str]]:
+    """Drift of the session at `path` vs the merged baseline of its
+    server's other logs in `log_dir` — watch.py is the engine, this
+    only renders its structured output as (severity, text) lines.
+    Total: degrades to an explanatory line instead of raising, because
+    it runs inside the live render tick."""
+    from glassport import watch
+    try:
+        groups = watch.watch_dir(log_dir)
+    except Exception as exc:                      # noqa: BLE001
+        return [(0, f"drift unavailable: {type(exc).__name__}")]
+
+    for rows in groups.values():
+        for i, row in enumerate(rows):
+            if row["source"] != path.name:
+                continue
+            fp = row["fingerprint"]
+            out: list[tuple[int, str]] = [
+                (0, f"drift · session {i + 1}/{len(rows)} of "
+                    f"{fp['server_name'] or 'unknown server'}"),
+                (0, f"declared {len(fp['declared_tools'])} · called "
+                    f"{len(fp['called_tools'])} · hosts "
+                    f"{len(fp['hosts'])}"),
+                (0, ""),
+            ]
+            if i == 0:
+                out.append((0, "baseline session — no history to "
+                               "compare against"))
+                return out
+            findings = row["findings"]
+            if not findings:
+                out.append((0, f"no drift vs {i} prior session(s)"))
+                return out
+            hist = {3: 0, 2: 0, 1: 0}
+            for f in findings:
+                hist[f.severity] = hist.get(f.severity, 0) + 1
+            out.append((0, f"sev3 ×{hist[3]} · sev2 ×{hist[2]} · "
+                           f"sev1 ×{hist[1]}"))
+            out.append((0, ""))
+            for f in sorted(findings, key=lambda f: -f.severity):
+                out.append((f.severity,
+                            f"[sev {f.severity}] {f.kind}: {f.explanation}"))
+            return out
+    return [(0, f"session {path.name} not found in {log_dir}")]
 
 
 def list_sessions(log_dir: Path, now: float | None = None) -> list[SessionEntry]:
@@ -394,6 +450,7 @@ KEYMAP = {
     23: "close_tab",                  # Ctrl+W
     ord("/"): "search_open",
     ord("n"): "search_next", ord("N"): "search_prev",
+    ord("d"): "drift", ord("D"): "drift_full",
 }
 
 C_BASE, C_HOT, C_WARN, C_DIM, C_BAR, C_INFO = 1, 2, 3, 4, 5, 6
@@ -440,7 +497,27 @@ def _put(scr, y, x, text, attr=0):
             pass
 
 
-def _draw_dashboard(curses, scr, vm, state, tabs=None):
+def _drift_attr(curses, sev):
+    if sev >= 3:
+        return _attr(curses, C_HOT, bold=True)
+    if sev >= 1:
+        return _attr(curses, C_WARN)
+    return _attr(curses, C_DIM, dim=True)
+
+
+def _draw_drift_panel(curses, scr, drift_lines, top, height):
+    """Right-hand side panel; drawn over the timeline columns."""
+    _, w = scr.getmaxyx()
+    pw = min(max(30, w * 2 // 5), w - 10)
+    x0 = w - pw
+    for i in range(height):
+        _put(scr, top + i, x0 - 1, "│", _attr(curses, C_DIM, dim=True))
+        _put(scr, top + i, x0, " " * (pw - 1))
+    for i, (sev, text) in enumerate(drift_lines[: height]):
+        _put(scr, top + i, x0 + 1, text[: pw - 2], _drift_attr(curses, sev))
+
+
+def _draw_dashboard(curses, scr, vm, state, tabs=None, drift_lines=None):
     scr.erase()
     h, w = scr.getmaxyx()
     if w < MIN_COLS or h < MIN_ROWS:
@@ -492,6 +569,9 @@ def _draw_dashboard(curses, scr, vm, state, tabs=None):
             attr |= curses.A_REVERSE
         _put(scr, tl_top + i, 0, " " + row.text, attr)
 
+    if state.drift_open and drift_lines is not None:
+        _draw_drift_panel(curses, scr, drift_lines, tl_top, tl_h)
+
     if n_findings:
         fy = tl_top + tl_h
         _put(scr, fy, 0,
@@ -520,15 +600,18 @@ def _draw_dashboard(curses, scr, vm, state, tabs=None):
     scr.refresh()
 
 
-def _draw_overlay(curses, scr, trace, state):
-    lines = format_overlay(trace, state.selected)
+def _draw_overlay(curses, scr, lines, state, title=" frame detail — esc "
+                                                   "to close "):
     h, w = scr.getmaxyx()
     top = state.overlay_scroll
     scr.erase()
-    _put(scr, 0, 0, " frame detail — esc to close ".ljust(w - 1),
-         _attr(curses, C_BAR, bold=True))
+    _put(scr, 0, 0, title.ljust(w - 1), _attr(curses, C_BAR, bold=True))
     for i, line in enumerate(lines[top: top + h - 2]):
-        _put(scr, 1 + i, 1, line, _attr(curses, C_BASE))
+        if isinstance(line, tuple):
+            sev, text = line
+            _put(scr, 1 + i, 1, text, _drift_attr(curses, sev))
+        else:
+            _put(scr, 1 + i, 1, line, _attr(curses, C_BASE))
     scr.refresh()
 
 
@@ -559,6 +642,7 @@ def _refresh_tab(tab: Tab) -> bool:
         else:
             tab.vm = build_view_model(
                 tab.trace, live=(time.time() - mtime) < LIVE_WINDOW_SECS)
+            tab.drift_lines = None      # history moved; recompute lazily
             if tab.state.follow:
                 tab.state.selected = max(0, len(tab.vm.rows) - 1)
     else:
@@ -576,12 +660,24 @@ def _dashboard_loop(curses, scr, tabs: Tabs) -> None:
             close_tab(tabs)
             continue
         state, vm = tab.state, tab.vm
-        assert vm is not None            # _refresh_tab(True) guarantees it
+        # _refresh_tab(True) guarantees both were ingested at least once
+        assert vm is not None and tab.trace is not None
+
+        needs_drift = state.drift_open or (
+            state.overlay_open and state.overlay_mode == "drift")
+        if needs_drift and tab.drift_lines is None:
+            tab.drift_lines = build_drift_lines(tab.path, tab.path.parent)
 
         if state.overlay_open:
-            _draw_overlay(curses, scr, tab.trace, state)
+            if state.overlay_mode == "drift":
+                _draw_overlay(curses, scr, tab.drift_lines, state,
+                              title=" drift vs baseline — esc to close ")
+            else:
+                _draw_overlay(curses, scr,
+                              format_overlay(tab.trace, state.selected),
+                              state)
         else:
-            _draw_dashboard(curses, scr, vm, state, tabs)
+            _draw_dashboard(curses, scr, vm, state, tabs, tab.drift_lines)
 
         key = scr.getch()
         if key in (-1, curses.KEY_RESIZE):
