@@ -423,5 +423,65 @@ class TestExfilRegisteredInAnnotate(unittest.TestCase):
         self.assertIn("pii_github_token", subcats(anns))
 
 
+class TestNeutralizeText(unittest.TestCase):
+    """The renderer neutralizer (Kimi round 2): reveal deceptive Unicode as
+    visible ‹U+XXXX› sentinels and collapse Zalgo runs, without touching
+    legitimate text. Consumed by report.py / sarif.py."""
+
+    def test_plain_ascii_passes_through(self):
+        self.assertEqual(detectors.neutralize_text("hello tool_x"),
+                         "hello tool_x")
+
+    def test_legit_diacritic_preserved(self):
+        # a lone combining acute (café) is legitimate — not revealed
+        out = detectors.neutralize_text("café")
+        self.assertNotIn("‹U+", out)
+        self.assertNotIn("‹combining", out)
+
+    def test_fullwidth_homoglyph_revealed(self):
+        out = detectors.neutralize_text("ｓystem")   # fullwidth 's'
+        self.assertIn("‹U+FF53›", out)
+
+    def test_math_alphanumeric_revealed(self):
+        out = detectors.neutralize_text("\U0001D42Cystem")  # math bold 's'
+        self.assertIn("‹U+1D42C›", out)
+
+    def test_exotic_whitespace_revealed(self):
+        for cp in (" ", "　", " "):  # NBSP, ideographic, line sep
+            out = detectors.neutralize_text("a" + cp + "b")
+            self.assertIn(f"‹U+{ord(cp):04X}›", out)
+
+    def test_bidi_override_revealed(self):
+        out = detectors.neutralize_text("a‮b")   # RTL override
+        self.assertIn("‹U+202E›", out)
+
+    def test_zalgo_run_collapsed(self):
+        out = detectors.neutralize_text("e" + "́" * 20)
+        self.assertIn("‹combining…›", out)
+
+    def test_zalgo_zwj_interleave_still_collapsed(self):
+        # SECURITY: interleaving each combining mark with a ZWJ must not reset
+        # the run counter (two-pass neutralize treats invisibles as transparent)
+        out = detectors.neutralize_text("e" + "́‍" * 20)
+        self.assertIn("‹combining…›", out)
+
+
+class TestStripeKeyPattern(unittest.TestCase):
+    """The novel-credential gap: stripe_key detection + redaction."""
+
+    def test_stripe_live_key_detected_and_redacted(self):
+        v = "sk_live_" + "A" * 24
+        self.assertTrue(any(p.category == "stripe_key"
+                            for p, _ in detectors._scan_pii(v)))
+        self.assertIn("stripe_key redacted", detectors.redact_secrets(v))
+
+    def test_underscore_body_still_matches(self):
+        # the fixture shape: early underscore keeps it below GitHub secret
+        # scanning's contiguous-alnum bar but glassport still matches it
+        v = "sk_test__EXAMPLE_not_a_real_key_00000000"
+        self.assertTrue(any(p.category == "stripe_key"
+                            for p, _ in detectors._scan_pii(v)))
+
+
 if __name__ == "__main__":
     unittest.main()
