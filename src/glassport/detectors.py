@@ -487,6 +487,9 @@ PII_PATTERNS: list[PIIPattern] = [
     PIIPattern("github_token", 3,
         re.compile(r"((?:gh[poursab]|github_pat)_[A-Za-z0-9_]{36,})"),
         lambda s: len(s) >= 40, "GitHub token"),
+    PIIPattern("stripe_key", 3,
+        re.compile(r"((?:sk|pk|rk)_(?:live|test)_[A-Za-z0-9_]{24,})"),
+        lambda s: len(s) >= 30, "Stripe API key"),
     PIIPattern("slack_token", 3,
         re.compile(r"(xox[baprs]-[0-9]{10,13}-[0-9]{10,13}-[A-Za-z0-9]{24,})"),
         None, "Slack token"),
@@ -590,6 +593,85 @@ def _normalize_for_scan(text: str) -> str:
     stripped = _INVISIBLE_RE.sub("", text)
     deconfused = stripped.translate(_CONFUSABLES)
     return unicodedata.normalize("NFKC", deconfused)
+
+
+# Look-alike / hidden characters html.escape leaves untouched. A hostile
+# server can name a tool with a right-to-left override, a zero-width joiner, or
+# a Cyrillic/Armenian homoglyph; escaping renders the markup inert but the
+# *deception* survives into the report a human reads to make a trust decision.
+# We REVEAL each such character as a visible codepoint sentinel (‹U+XXXX›)
+# rather than silently dropping it — the analyst must see the server used one.
+_HOMOGLYPHS = frozenset(chr(k) for k in _CONFUSABLES) | {
+    "ˋ",   # MODIFIER LETTER GRAVE ACCENT — backtick look-alike
+    "Ѕ",   # CYRILLIC CAPITAL LETTER DZE — 'S' look-alike
+}
+_SAFE_WS = frozenset("\t\n\r ")
+# A base glyph may legitimately carry a few combining marks (Vietnamese, IPA);
+# a Zalgo stack piles on dozens to overflow and obscure the row. Keep a handful,
+# then collapse the rest into a count so the deception is visible but bounded.
+_MAX_COMBINING_RUN = 4
+
+
+def _is_deceptive(ch: str) -> bool:
+    """True for characters that can deceive a human reader or break layout.
+    Includes bidi controls, zero-width/invisible chars, curated cross-script
+    homoglyphs, exotic whitespace, and any compatibility-variant character
+    (fullwidth Latin, mathematical alphanumerics, enclosed forms, small-caps,
+    superscripts) whose NFKC form is ASCII alphanumeric."""
+    if ch in _SAFE_WS:
+        return False
+    if ch in _HOMOGLYPHS:
+        return True
+    if _INVISIBLE_RE.match(ch):
+        return True
+    # NFKC-fold compatibility variants that become ASCII letters/digits.
+    # Catches fullwidth Latin (U+FF21), mathematical alphanumerics (U+1D400),
+    # enclosed alphanumerics, small-caps, superscripts — all common deception
+    # glyphs that evade a curated homoglyph set.
+    nfkc = unicodedata.normalize("NFKC", ch)
+    if nfkc and nfkc.isascii() and nfkc.isalnum() and nfkc != ch:
+        return True
+    return unicodedata.category(ch) in ("Cc", "Cf", "Cn", "Co", "Cs",
+                                         "Zs", "Zl", "Zp")
+
+
+def neutralize_text(text: str) -> str:
+    """Reveal deceptive Unicode as visible ‹U+XXXX› sentinels and collapse
+    Zalgo combining-mark runs; legitimate text (letters, whitespace, CJK,
+    emoji, a few diacritics) passes through untouched.
+
+    Two-pass so an attacker cannot defeat the combining-mark collapse by
+    interleaving each mark with a zero-width joiner: the first pass counts
+    marks across transparent characters, the second pass reveals the
+    transparent characters."""
+    if text.isascii() and text.isprintable():
+        return text
+    # First pass: collapse combining-mark runs, treating zero-width/bidi chars
+    # as transparent so an interleaved Zalgo stack cannot reset the counter.
+    collapsed: list[str] = []
+    run = 0
+    for ch in text:
+        cat = unicodedata.category(ch)
+        if cat in ("Mn", "Mc", "Me"):
+            run += 1
+            if run <= _MAX_COMBINING_RUN:
+                collapsed.append(ch)
+            elif run == _MAX_COMBINING_RUN + 1:
+                collapsed.append("‹combining…›")
+            # else swallow the overflowing mark
+        elif _INVISIBLE_RE.match(ch):
+            collapsed.append(ch)
+        else:
+            run = 0
+            collapsed.append(ch)
+    # Second pass: reveal any remaining deceptive characters.
+    out: list[str] = []
+    for ch in "".join(collapsed):
+        if unicodedata.category(ch) in ("Mn", "Mc", "Me"):
+            out.append(ch)
+        else:
+            out.append(f"‹U+{ord(ch):04X}›" if _is_deceptive(ch) else ch)
+    return "".join(out)
 
 
 def looks_like_secret(value: str, min_severity: int = 3) -> bool:

