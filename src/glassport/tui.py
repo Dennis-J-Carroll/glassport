@@ -456,6 +456,52 @@ def build_audit_lines(report, annotations) -> list[tuple[int, str]]:
 
 
 # ─────────────────────────────────────────────────────────────────
+# Layout — the dashboard's vertical geometry as data, shared by the
+# renderer and the mouse hit-test so they can never disagree.
+# ─────────────────────────────────────────────────────────────────
+
+@dataclass
+class Layout:
+    tl_top: int          # first timeline row
+    tl_h: int            # timeline height
+    findings_top: int    # y of the findings rule; entries start +1
+    n_findings: int      # findings entries shown (<= 5)
+
+
+def layout(h: int, vm: ViewModel, many_tabs: bool) -> Layout:
+    strip_h = 1 if many_tabs else 0
+    n_findings = min(len(vm.findings), 5)
+    findings_h = (n_findings + 1) if n_findings else 0
+    tl_top = 2 + strip_h
+    tl_h = max(1, (h - 1) - findings_h - tl_top)
+    return Layout(tl_top=tl_top, tl_h=tl_h,
+                  findings_top=tl_top + tl_h, n_findings=n_findings)
+
+
+def first_visible(state: UIState, vm: ViewModel, tl_h: int) -> int:
+    """Index of the first timeline row on screen."""
+    if state.follow:
+        return max(0, len(vm.rows) - tl_h)
+    sel = state.selected if state.focus == "timeline" else -1
+    anchor = sel if sel >= 0 else len(vm.rows) - 1
+    return max(0, min(anchor - tl_h // 2, len(vm.rows) - tl_h))
+
+
+def hit_test(y: int, lo: Layout, first: int,
+             vm: ViewModel) -> tuple[str, int] | None:
+    """Map a screen row to ("timeline"|"findings", index), or None."""
+    if lo.tl_top <= y < lo.tl_top + lo.tl_h:
+        idx = first + (y - lo.tl_top)
+        if idx < len(vm.rows):
+            return ("timeline", idx)
+        return None
+    if lo.n_findings and \
+            lo.findings_top < y <= lo.findings_top + lo.n_findings:
+        return ("findings", y - lo.findings_top - 1)
+    return None
+
+
+# ─────────────────────────────────────────────────────────────────
 # Gate override — the TUI end of `glassport gate --controllable`.
 # The tap's reader is fail-closed (owner-only perms, well-formed
 # JSON, or enforcement stays ON), so the writer here must produce
@@ -629,25 +675,20 @@ def _draw_dashboard(curses, scr, vm, state, tabs=None, drift_lines=None,
                     f"{'' if state.follow else ' · follow OFF'}"
                     .ljust(w - 1), bar)
 
-    strip_h = 0
+    many_tabs = False
     if tabs is not None and len(tabs.tabs) > 1:
+        many_tabs = True
         _put(scr, 2, 0, " " + format_tab_strip(tabs),
              _attr(curses, C_DIM, dim=True))
-        strip_h = 1
 
-    n_findings = min(len(vm.findings), 5)
-    findings_h = (n_findings + 1) if n_findings else 0
-    tl_top = 2 + strip_h
-    tl_h = max(1, (h - 1) - findings_h - tl_top)
+    lo = layout(h, vm, many_tabs)
+    n_findings, tl_top, tl_h = lo.n_findings, lo.tl_top, lo.tl_h
 
     hits = set(search_matches(vm, state.search_query, "timeline")) \
         if state.search_query else set()
 
     sel = state.selected if state.focus == "timeline" else -1
-    anchor = sel if sel >= 0 else len(vm.rows) - 1
-    first = max(0, min(anchor - tl_h // 2, len(vm.rows) - tl_h))
-    if state.follow:
-        first = max(0, len(vm.rows) - tl_h)
+    first = first_visible(state, vm, tl_h)
     for i in range(tl_h):
         idx = first + i
         if idx >= len(vm.rows):
@@ -664,7 +705,7 @@ def _draw_dashboard(curses, scr, vm, state, tabs=None, drift_lines=None,
         _draw_drift_panel(curses, scr, drift_lines, tl_top, tl_h)
 
     if n_findings:
-        fy = tl_top + tl_h
+        fy = lo.findings_top
         _put(scr, fy, 0,
              "─" * 18 + " findings " + "─" * max(0, w - 30),
              _attr(curses, C_DIM, dim=True))
@@ -794,6 +835,31 @@ def _dashboard_loop(curses, scr, tabs: Tabs,
         key = scr.getch()
         if key in (-1, curses.KEY_RESIZE):
             continue
+        if key == getattr(curses, "KEY_MOUSE", None):
+            try:
+                _, _mx, my, _, bstate = curses.getmouse()
+            except Exception:       # spurious event; keyboard still works
+                continue
+            if state.overlay_open:
+                if bstate & (curses.BUTTON1_CLICKED
+                             | curses.BUTTON1_PRESSED):
+                    reduce(state, "back", vm)
+                continue
+            if bstate & getattr(curses, "BUTTON4_PRESSED", 0):
+                reduce(state, "up", vm)
+            elif bstate & getattr(curses, "BUTTON5_PRESSED", 0):
+                reduce(state, "down", vm)
+            elif bstate & (curses.BUTTON1_CLICKED
+                           | curses.BUTTON1_PRESSED):
+                h, _w = scr.getmaxyx()
+                lo = layout(h, vm, len(tabs.tabs) > 1)
+                first = first_visible(state, vm, lo.tl_h)
+                hit = hit_test(my, lo, first, vm)
+                if hit is not None:
+                    state.focus, state.selected = hit
+                    if state.focus == "timeline":
+                        state.follow = False
+            continue
         if state.search_input:
             if key in (ord("\n"), ord("\r")):
                 reduce(state, "search_accept", vm)
@@ -917,6 +983,10 @@ def main(argv: list[str]) -> int:
             curses.set_escdelay(25)   # Esc should feel instant
         except AttributeError:
             pass                       # not on all curses builds
+        try:
+            curses.mousemask(curses.ALL_MOUSE_EVENTS)
+        except Exception:
+            pass                       # no mouse: keyboard fallback
         tabs = Tabs()                  # persists across picker round-trips
         if path is not None:
             open_tab(tabs, path)

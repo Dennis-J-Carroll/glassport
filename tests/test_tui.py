@@ -689,6 +689,60 @@ class TestGateOverrideControl(unittest.TestCase):
         self.assertEqual(tui.KEYMAP.get(ord("!")), "gate_toggle")
 
 
+class TestMouse(unittest.TestCase):
+    """Layout + hit-testing are pure so a click maps to a selection
+    without curses. The draw code uses the same layout function, so
+    the hit test can never drift from what is on screen."""
+
+    def _vm(self, n_findings=0):
+        lines = handshake() + [
+            call(6, 3, "web_search", {"query": "x"}), result(7, 3)]
+        if n_findings:
+            lines += [call(8, 4, "shadow_fetch", {"u": "u"}), result(9, 4)]
+        return tui.build_view_model(annotated_trace(lines), live=False)
+
+    def test_layout_no_findings_no_tabs(self):
+        vm = self._vm()
+        lo = tui.layout(24, vm, many_tabs=False)
+        self.assertEqual(lo.tl_top, 2)
+        self.assertEqual(lo.tl_h, 21)        # rows 2..22, footer at 23
+        self.assertEqual(lo.n_findings, 0)
+
+    def test_layout_tabs_shift_timeline_down(self):
+        vm = self._vm()
+        lo = tui.layout(24, vm, many_tabs=True)
+        self.assertEqual(lo.tl_top, 3)
+
+    def test_click_on_timeline_row_selects_it(self):
+        vm = self._vm()
+        st = tui.UIState()
+        lo = tui.layout(24, vm, many_tabs=False)
+        first = tui.first_visible(st, vm, lo.tl_h)
+        hit = tui.hit_test(lo.tl_top + 2, lo, first, vm)
+        self.assertEqual(hit, ("timeline", first + 2))
+
+    def test_click_below_rows_is_none(self):
+        vm = self._vm()   # 7 rows, tall window: clicks past last row
+        lo = tui.layout(40, vm, many_tabs=False)
+        first = tui.first_visible(tui.UIState(), vm, lo.tl_h)
+        self.assertIsNone(tui.hit_test(lo.tl_top + 30, lo, first, vm))
+
+    def test_click_on_finding_row_selects_finding(self):
+        vm = self._vm(n_findings=1)
+        self.assertTrue(vm.findings)
+        lo = tui.layout(24, vm, many_tabs=False)
+        first = tui.first_visible(tui.UIState(), vm, lo.tl_h)
+        y = lo.findings_top + 1          # first finding line (after rule)
+        self.assertEqual(tui.hit_test(y, lo, first, vm), ("findings", 0))
+
+    def test_click_on_header_is_none(self):
+        vm = self._vm()
+        lo = tui.layout(24, vm, many_tabs=False)
+        first = tui.first_visible(tui.UIState(), vm, lo.tl_h)
+        self.assertIsNone(tui.hit_test(0, lo, first, vm))
+        self.assertIsNone(tui.hit_test(1, lo, first, vm))
+
+
 class TestCLIWiring(unittest.TestCase):
     def test_main_rejects_missing_file(self):
         rc = tui.main(["/nonexistent/session.jsonl"])
