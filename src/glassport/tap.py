@@ -150,12 +150,42 @@ class Gate:
     side actually saw, and they legitimately differ.
     """
 
-    def __init__(self, hold_timeout: float = 2.0) -> None:
+    def __init__(self, hold_timeout: float = 2.0,
+                 control_path: "Path | None" = None) -> None:
         self._lock = threading.Lock()
         self._declared: set[str] | None = None   # None until tools/list seen
         self._surface_known = threading.Event()
         self._hold_timeout = hold_timeout
         self.blocked_count = 0
+        # Runtime enable/disable via an override file (M6 TUI control).
+        # None (the default) means enforcement is unconditional. Only a
+        # tap launched with `gate --controllable` sets this.
+        #
+        # Threat-model note: the wrapped server runs as the same user,
+        # so a hostile server process could write this file itself —
+        # same-uid isolation is not achievable here (such a process
+        # could equally kill the tap). The override protects against
+        # accidents and cross-user actors; every call forwarded while
+        # disabled still carries a "gate_disabled" marker in the log.
+        self.control_path = control_path
+
+    def _enforcement_on(self) -> bool:
+        """Consult the override file. Fail-closed: enforcement stays ON
+        unless the file is a well-formed {"enforce": false} owned by
+        this uid with no group/world write bits."""
+        p = self.control_path
+        if p is None:
+            return True
+        try:
+            st = p.stat()
+            if st.st_uid != os.getuid() or (st.st_mode & 0o022):
+                return True
+            data = json.loads(p.read_text(encoding="utf-8"))
+        except (OSError, ValueError, UnicodeDecodeError):
+            return True
+        if not isinstance(data, dict):
+            return True
+        return bool(data.get("enforce", True))
 
     def observe_s2c(self, line: bytes) -> None:
         """Harvest tool declarations from server output. Never raises."""
@@ -204,6 +234,12 @@ class Gate:
                          "reason": "no_surface_timeout", "tool": name})
         if name in declared:
             return ("forward", None, None)
+
+        if not self._enforcement_on():
+            # would have been blocked; forward, but say so in the log
+            return ("forward", None,
+                    {"action": "gate_disabled", "tool": name,
+                     "declared": sorted(declared)})
 
         self.blocked_count += 1
         rid = frame.get("id")
@@ -292,10 +328,13 @@ def pump_stderr(src, dst) -> None:
 # Tap mode — spawn the real server and sit in the middle.
 # ─────────────────────────────────────────────────────────────────
 def run_tap(server_cmd: list[str], log_dir: Path,
-            gate: Gate | None = None) -> int:
+            gate: Gate | None = None,
+            gate_controllable: bool = False) -> int:
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     safe_name = "".join(c if c.isalnum() else "_" for c in server_cmd[0])[:32]
     log_path = log_dir / f"{stamp}_{safe_name}_{os.getpid()}.jsonl"
+    if gate is not None and gate_controllable:
+        gate.control_path = log_path.with_name(log_path.name + ".gate")
     # The relay is sacred: a logging failure must never alter, delay, or kill
     # a live session. If the log dir is unwritable, disable logging and relay
     # anyway — pump() already tolerates a None log.
@@ -312,6 +351,10 @@ def run_tap(server_cmd: list[str], log_dir: Path,
     if gate is not None:
         print("[glassport] GATE ACTIVE: tools/call frames outside the "
               "declared surface will be blocked", file=sys.stderr)
+        if gate.control_path is not None:
+            print(f"[glassport] gate controllable via "
+                  f"{gate.control_path} (tui --gate-control)",
+                  file=sys.stderr)
 
     try:
         child = subprocess.Popen(
@@ -576,8 +619,9 @@ USAGE = """\
 glassport — passive MCP stdio proxy
 
   wrap (default):  glassport [wrap] [--log-dir DIR] -- <server command...>
-  gate:            glassport gate [--log-dir DIR] -- <server command...>
-                   (active: blocks tools/call outside the declared surface)
+  gate:            glassport gate [--controllable] [--log-dir DIR] -- <server command...>
+                   (active: blocks tools/call outside the declared surface;
+                    --controllable lets `tui --gate-control` toggle it)
   audit:           glassport audit <path> [--json] | audit --rubric
                    (static, pre-deployment: reads source, never runs it)
   summarize:       glassport summarize [--json|--sarif] <session.jsonl>
@@ -590,7 +634,10 @@ glassport — passive MCP stdio proxy
   serve:           glassport serve [--log-dir DIR]
                    (expose glassport itself as a queryable MCP server)
   tui:             glassport tui [session.jsonl] [--log-dir DIR]
-                   (live curses inspector; no argument = session picker)
+                        [--audit PATH] [--gate-control]
+                   (live curses inspector; no argument = session picker.
+                    --audit adds the static scorecard to the `a` panel;
+                    --gate-control lets `!` toggle a controllable gate)
 
 (`python3 glassport_tap.py ...` from a clone works identically.)
 """
@@ -604,11 +651,15 @@ def main(argv: list[str]) -> int:
     # "wrap" stays the passive default forever; "gate" is the opt-in
     # enforcing sibling it was reserved for (M5)
     gate: Gate | None = None
+    gate_controllable = False
     if argv[0] == "wrap":
         argv = argv[1:]
     elif argv[0] == "gate":
-        gate = Gate()
         argv = argv[1:]
+        if argv and argv[0] == "--controllable":
+            gate_controllable = True
+            argv = argv[1:]
+        gate = Gate()
     if not argv:
         print(USAGE)
         return 2
@@ -680,7 +731,8 @@ def main(argv: list[str]) -> int:
     if not argv:
         print(USAGE)
         return 2
-    return run_tap(argv, log_dir, gate=gate)
+    return run_tap(argv, log_dir, gate=gate,
+                   gate_controllable=gate_controllable)
 
 
 def cli() -> None:
