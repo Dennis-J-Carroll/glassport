@@ -607,23 +607,86 @@ class TestAuditPanel(unittest.TestCase):
 
 class TestParseArgs(unittest.TestCase):
     def test_defaults(self):
-        path, log_dir, audit_dir, want_help = tui._parse_args([])
+        path, log_dir, audit_dir, gate_control, want_help = \
+            tui._parse_args([])
         self.assertIsNone(path)
         self.assertIsNone(audit_dir)
+        self.assertFalse(gate_control)
         self.assertFalse(want_help)
         self.assertTrue(str(log_dir).endswith("sessions"))
 
     def test_session_path_and_flags(self):
-        path, log_dir, audit_dir, want_help = tui._parse_args(
-            ["s.jsonl", "--log-dir", "/logs", "--audit", "/srv/src"])
+        path, log_dir, audit_dir, gate_control, want_help = \
+            tui._parse_args(["s.jsonl", "--log-dir", "/logs",
+                             "--audit", "/srv/src", "--gate-control"])
         self.assertEqual(path, Path("s.jsonl"))
         self.assertEqual(log_dir, Path("/logs"))
         self.assertEqual(audit_dir, Path("/srv/src"))
+        self.assertTrue(gate_control)
         self.assertFalse(want_help)
 
     def test_help_flag(self):
         *_, want_help = tui._parse_args(["--help"])
         self.assertTrue(want_help)
+
+
+class TestGateOverrideControl(unittest.TestCase):
+    """TUI side of gate control: read/toggle the per-session override
+    file. Toggle only ever runs when the TUI was launched with
+    --gate-control; the file written must be one the tap's fail-closed
+    reader actually accepts (owner-only perms)."""
+
+    def _session(self, tmp):
+        p = Path(tmp) / "s.jsonl"
+        p.write_text("", encoding="utf-8")
+        return p
+
+    def test_read_absent_returns_none(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertIsNone(tui.read_gate_override(self._session(tmp)))
+
+    def test_first_toggle_disables_enforcement(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            s = self._session(tmp)
+            new = tui.toggle_gate_override(s)
+            self.assertFalse(new)                     # on -> off
+            self.assertIs(tui.read_gate_override(s), False)
+
+    def test_second_toggle_reenables(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            s = self._session(tmp)
+            tui.toggle_gate_override(s)
+            self.assertTrue(tui.toggle_gate_override(s))
+            self.assertIs(tui.read_gate_override(s), True)
+
+    def test_written_file_is_owner_only(self):
+        import stat
+        with tempfile.TemporaryDirectory() as tmp:
+            s = self._session(tmp)
+            tui.toggle_gate_override(s)
+            mode = stat.S_IMODE((Path(tmp) / "s.jsonl.gate").stat().st_mode)
+            self.assertEqual(mode & 0o077, 0)         # no group/world bits
+
+    def test_gate_honors_tui_written_override(self):
+        # end-to-end lock: what the TUI writes, the tap's fail-closed
+        # reader accepts — a drifting file format would break silently
+        from glassport.tap import Gate
+        with tempfile.TemporaryDirectory() as tmp:
+            s = self._session(tmp)
+            tui.toggle_gate_override(s)               # enforcement off
+            g = Gate(control_path=Path(tmp) / "s.jsonl.gate")
+            g.observe_s2c((json.dumps(
+                {"jsonrpc": "2.0", "id": 2,
+                 "result": {"tools": [{"name": "web_search"}]}}) +
+                "\n").encode())
+            action, _, info = g.check_c2s((json.dumps(
+                {"jsonrpc": "2.0", "id": 9, "method": "tools/call",
+                 "params": {"name": "shadow_fetch"}}) + "\n").encode())
+            self.assertEqual(action, "forward")
+            self.assertEqual(info["action"], "gate_disabled")
+
+    def test_keymap_binds_bang(self):
+        self.assertEqual(tui.KEYMAP.get(ord("!")), "gate_toggle")
 
 
 class TestCLIWiring(unittest.TestCase):

@@ -455,6 +455,48 @@ def build_audit_lines(report, annotations) -> list[tuple[int, str]]:
     return out
 
 
+# ─────────────────────────────────────────────────────────────────
+# Gate override — the TUI end of `glassport gate --controllable`.
+# The tap's reader is fail-closed (owner-only perms, well-formed
+# JSON, or enforcement stays ON), so the writer here must produce
+# exactly what that reader accepts.
+# ─────────────────────────────────────────────────────────────────
+
+def _gate_override_path(session_path: Path) -> Path:
+    return session_path.with_name(session_path.name + ".gate")
+
+
+def read_gate_override(session_path: Path) -> bool | None:
+    """Current override for this session: True/False = file says
+    enforce on/off, None = no (valid) override file."""
+    try:
+        data = json.loads(_gate_override_path(session_path)
+                          .read_text(encoding="utf-8"))
+    except (OSError, ValueError, UnicodeDecodeError):
+        return None
+    if isinstance(data, dict) and isinstance(data.get("enforce"), bool):
+        return data["enforce"]
+    return None
+
+
+def toggle_gate_override(session_path: Path) -> bool:
+    """Flip enforcement (no file counts as ON) and return the new
+    state. Written atomically with owner-only permissions — anything
+    looser and the tap's fail-closed reader ignores the file."""
+    import os
+    current = read_gate_override(session_path)
+    new = not (True if current is None else current)
+    target = _gate_override_path(session_path)
+    tmp = target.with_name(target.name + ".tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.write(fd, json.dumps({"enforce": new}).encode("utf-8"))
+    finally:
+        os.close(fd)
+    os.replace(tmp, target)
+    return new
+
+
 def list_sessions(log_dir: Path, now: float | None = None) -> list[SessionEntry]:
     """Sessions newest-first; LIVE = grew within LIVE_WINDOW_SECS."""
     if now is None:
@@ -496,6 +538,7 @@ KEYMAP = {
     ord("n"): "search_next", ord("N"): "search_prev",
     ord("d"): "drift", ord("D"): "drift_full",
     ord("a"): "audit",
+    ord("!"): "gate_toggle",
 }
 
 C_BASE, C_HOT, C_WARN, C_DIM, C_BAR, C_INFO = 1, 2, 3, 4, 5, 6
@@ -562,7 +605,8 @@ def _draw_drift_panel(curses, scr, drift_lines, top, height):
         _put(scr, top + i, x0 + 1, text[: pw - 2], _drift_attr(curses, sev))
 
 
-def _draw_dashboard(curses, scr, vm, state, tabs=None, drift_lines=None):
+def _draw_dashboard(curses, scr, vm, state, tabs=None, drift_lines=None,
+                    gate_override=None):
     scr.erase()
     h, w = scr.getmaxyx()
     if w < MIN_COLS or h < MIN_ROWS:
@@ -576,10 +620,12 @@ def _draw_dashboard(curses, scr, vm, state, tabs=None, drift_lines=None):
     _put(scr, 0, 0, f" {vm.title} · {ind} · declared: "
                     f"{', '.join(vm.declared) or '—'} · frames {c['frames']}"
                     .ljust(w - 1), bar)
+    override = "" if gate_override is None else \
+        f" · override: {'enforce' if gate_override else 'DISABLED'}"
     _put(scr, 1, 0, f" fabricated {c['fabricated']} · violations "
                     f"{c['violations']} · server-requests "
                     f"{c['server_requests']} · gate: "
-                    f"{'on' if vm.gate_on else 'off'}"
+                    f"{'on' if vm.gate_on else 'off'}{override}"
                     f"{'' if state.follow else ' · follow OFF'}"
                     .ljust(w - 1), bar)
 
@@ -697,7 +743,8 @@ def _refresh_tab(tab: Tab) -> bool:
 
 
 def _dashboard_loop(curses, scr, tabs: Tabs,
-                    audit_dir: Path | None = None) -> None:
+                    audit_dir: Path | None = None,
+                    gate_control: bool = False) -> None:
     scr.timeout(250)          # input poll doubles as the re-ingest tick
     audit_report = None
     audit_ran = False         # audit the source once per TUI run
@@ -741,7 +788,8 @@ def _dashboard_loop(curses, scr, tabs: Tabs,
                               format_overlay(tab.trace, state.selected),
                               state)
         else:
-            _draw_dashboard(curses, scr, vm, state, tabs, tab.drift_lines)
+            _draw_dashboard(curses, scr, vm, state, tabs, tab.drift_lines,
+                            read_gate_override(tab.path))
 
         key = scr.getch()
         if key in (-1, curses.KEY_RESIZE):
@@ -773,6 +821,12 @@ def _dashboard_loop(curses, scr, tabs: Tabs,
             cycle_tab(tabs)
         elif action == "close_tab":
             close_tab(tabs)
+        elif action == "gate_toggle":
+            # I/O, deliberate, and opt-in: only with --gate-control,
+            # and only meaningful for taps started as
+            # `gate --controllable` (otherwise the file is inert)
+            if gate_control:
+                toggle_gate_override(tab.path)
         elif action:
             reduce(state, action, vm)
 
@@ -813,11 +867,12 @@ def _picker_loop(curses, scr, log_dir: Path) -> Path | None:
 
 
 def _parse_args(argv: list[str]) -> tuple[Path | None, Path,
-                                          Path | None, bool]:
-    """(session path, log dir, audit dir, wants help) from CLI args."""
+                                          Path | None, bool, bool]:
+    """(session path, log dir, audit dir, gate control, wants help)."""
     log_dir = Path.home() / ".glassport" / "sessions"
     path: Path | None = None
     audit_dir: Path | None = None
+    gate_control = False
     i = 0
     while i < len(argv):
         if argv[i] == "--log-dir" and i + 1 < len(argv):
@@ -826,19 +881,22 @@ def _parse_args(argv: list[str]) -> tuple[Path | None, Path,
         elif argv[i] == "--audit" and i + 1 < len(argv):
             audit_dir = Path(argv[i + 1])
             i += 2
+        elif argv[i] == "--gate-control":
+            gate_control = True
+            i += 1
         elif argv[i] in ("-h", "--help"):
-            return path, log_dir, audit_dir, True
+            return path, log_dir, audit_dir, gate_control, True
         else:
             path = Path(argv[i])
             i += 1
-    return path, log_dir, audit_dir, False
+    return path, log_dir, audit_dir, gate_control, False
 
 
 def main(argv: list[str]) -> int:
-    path, log_dir, audit_dir, want_help = _parse_args(argv)
+    path, log_dir, audit_dir, gate_control, want_help = _parse_args(argv)
     if want_help:
         print("usage: glassport tui [session.jsonl] [--log-dir DIR] "
-              "[--audit PATH]")
+              "[--audit PATH] [--gate-control]")
         return 0
 
     if path is not None and not path.is_file():
@@ -862,14 +920,14 @@ def main(argv: list[str]) -> int:
         tabs = Tabs()                  # persists across picker round-trips
         if path is not None:
             open_tab(tabs, path)
-            _dashboard_loop(curses, scr, tabs, audit_dir)
+            _dashboard_loop(curses, scr, tabs, audit_dir, gate_control)
             return
         while True:
             chosen = _picker_loop(curses, scr, log_dir)
             if chosen is None:
                 return
             open_tab(tabs, chosen)
-            _dashboard_loop(curses, scr, tabs, audit_dir)
+            _dashboard_loop(curses, scr, tabs, audit_dir, gate_control)
 
     curses.wrapper(_run)
     return 0

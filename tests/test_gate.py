@@ -193,6 +193,82 @@ def gated_log_lines():
     return handshake() + [json.dumps(blocked), json.dumps(injected)]
 
 
+UNDECLARED_CALL = line({"jsonrpc": "2.0", "id": 9, "method": "tools/call",
+                        "params": {"name": "shadow_fetch"}})
+
+
+class TestGateControl(unittest.TestCase):
+    """Runtime enable/disable via a per-session override file.
+
+    Fail-closed by construction: the gate relaxes enforcement only for a
+    well-formed {"enforce": false} file owned by this uid with no group/
+    world write bits. Anything else — absent, garbage, loose perms —
+    leaves enforcement ON. Every forwarded-because-disabled call carries
+    a "gate_disabled" marker so the log shows enforcement was off.
+    """
+
+    def _gate(self, tmp) -> Gate:
+        g = Gate(control_path=Path(tmp) / "s.jsonl.gate")
+        g.observe_s2c(TOOLS_LIST_RESULT)
+        return g
+
+    def _write_override(self, g: Gate, enforce: bool, mode=0o600):
+        g.control_path.write_text(
+            json.dumps({"enforce": enforce}), encoding="utf-8")
+        g.control_path.chmod(mode)
+
+    def test_no_control_path_enforces(self):
+        g = declared_gate()   # control_path defaults to None
+        action, _, _ = g.check_c2s(UNDECLARED_CALL)
+        self.assertEqual(action, "block")
+
+    def test_absent_file_enforces(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            action, _, _ = self._gate(tmp).check_c2s(UNDECLARED_CALL)
+            self.assertEqual(action, "block")
+
+    def test_disable_forwards_with_visible_marker(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            g = self._gate(tmp)
+            self._write_override(g, enforce=False)
+            action, resp, info = g.check_c2s(UNDECLARED_CALL)
+            self.assertEqual(action, "forward")
+            self.assertIsNone(resp)
+            self.assertEqual(info["action"], "gate_disabled")
+            self.assertEqual(info["tool"], "shadow_fetch")
+
+    def test_reenable_blocks_again(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            g = self._gate(tmp)
+            self._write_override(g, enforce=False)
+            self.assertEqual(g.check_c2s(UNDECLARED_CALL)[0], "forward")
+            self._write_override(g, enforce=True)
+            self.assertEqual(g.check_c2s(UNDECLARED_CALL)[0], "block")
+
+    def test_garbage_file_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            g = self._gate(tmp)
+            g.control_path.write_text("not json", encoding="utf-8")
+            g.control_path.chmod(0o600)
+            self.assertEqual(g.check_c2s(UNDECLARED_CALL)[0], "block")
+
+    def test_loose_permissions_fail_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            g = self._gate(tmp)
+            self._write_override(g, enforce=False, mode=0o666)
+            self.assertEqual(g.check_c2s(UNDECLARED_CALL)[0], "block")
+
+    def test_disable_never_affects_declared_calls(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            g = self._gate(tmp)
+            self._write_override(g, enforce=False)
+            action, _, info = g.check_c2s(
+                line({"jsonrpc": "2.0", "id": 3, "method": "tools/call",
+                      "params": {"name": "web_search"}}))
+            self.assertEqual(action, "forward")
+            self.assertIsNone(info)   # ordinary traffic stays unmarked
+
+
 class TestGateInTrace(unittest.TestCase):
     def test_adapter_carries_gate_metadata(self):
         trace = from_mcp_session(gated_log_lines())
