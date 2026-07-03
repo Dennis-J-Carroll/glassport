@@ -197,6 +197,19 @@ class UIState:
     follow: bool = True
     overlay_open: bool = False
     overlay_scroll: int = 0
+    search_input: bool = False       # typing in the search bar
+    search_query: str = ""           # persists after accept, for n/N
+
+
+def search_matches(vm: ViewModel, query: str, focus: str) -> list[int]:
+    """Indices of rows whose text contains `query`, case-insensitive.
+    Operates on already-sanitized row text — never raw server bytes —
+    so search adds no new attack surface. Empty query matches nothing."""
+    if not query:
+        return []
+    q = query.lower()
+    rows = vm.rows if focus == "timeline" else vm.findings
+    return [i for i, r in enumerate(rows) if q in r.text.lower()]
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -277,6 +290,40 @@ def reduce(state: UIState, action: str, vm: ViewModel) -> UIState:
             state.overlay_scroll += 1
         return state
 
+    if action == "search_open":
+        state.search_input = True
+        state.search_query = ""
+        return state
+    if state.search_input:
+        if action.startswith("input:"):
+            state.search_query += action[len("input:"):]
+            hits = search_matches(vm, state.search_query, state.focus)
+            if hits:                     # jump live while typing
+                state.selected = hits[0]
+                if state.focus == "timeline":
+                    state.follow = False
+        elif action == "search_backspace":
+            state.search_query = state.search_query[:-1]
+        elif action == "search_accept":
+            state.search_input = False
+        elif action in ("search_cancel", "back"):
+            state.search_input = False
+            state.search_query = ""
+        return state
+    if action in ("search_next", "search_prev"):
+        hits = search_matches(vm, state.search_query, state.focus)
+        if hits:
+            if action == "search_next":
+                state.selected = next(
+                    (i for i in hits if i > state.selected), hits[0])
+            else:
+                state.selected = next(
+                    (i for i in reversed(hits) if i < state.selected),
+                    hits[-1])
+            if state.focus == "timeline":
+                state.follow = False
+        return state
+
     if action == "up":
         state.selected = max(0, state.selected - 1)
         if state.focus == "timeline":
@@ -345,6 +392,8 @@ KEYMAP = {
     27: "back",                       # Esc
     20: "next_tab",                   # Ctrl+T
     23: "close_tab",                  # Ctrl+W
+    ord("/"): "search_open",
+    ord("n"): "search_next", ord("N"): "search_prev",
 }
 
 C_BASE, C_HOT, C_WARN, C_DIM, C_BAR, C_INFO = 1, 2, 3, 4, 5, 6
@@ -423,6 +472,9 @@ def _draw_dashboard(curses, scr, vm, state, tabs=None):
     tl_top = 2 + strip_h
     tl_h = max(1, (h - 1) - findings_h - tl_top)
 
+    hits = set(search_matches(vm, state.search_query, "timeline")) \
+        if state.search_query else set()
+
     sel = state.selected if state.focus == "timeline" else -1
     anchor = sel if sel >= 0 else len(vm.rows) - 1
     first = max(0, min(anchor - tl_h // 2, len(vm.rows) - tl_h))
@@ -434,6 +486,8 @@ def _draw_dashboard(curses, scr, vm, state, tabs=None):
             break
         row = vm.rows[idx]
         attr = _row_attr(curses, row)
+        if idx in hits:
+            attr |= curses.A_UNDERLINE
         if idx == sel:
             attr |= curses.A_REVERSE
         _put(scr, tl_top + i, 0, " " + row.text, attr)
@@ -450,10 +504,19 @@ def _draw_dashboard(curses, scr, vm, state, tabs=None):
                 attr |= curses.A_REVERSE
             _put(scr, fy + 1 + i, 0, " " + f.text, attr)
 
-    _put(scr, h - 1, 0,
-         " j/k move · enter expand · tab focus · f follow · "
-         "^T/^W tabs · q quit ",
-         _attr(curses, C_DIM, dim=True))
+    if state.search_input or state.search_query:
+        n = len(hits)
+        cursor = "▏" if state.search_input else ""
+        _put(scr, h - 1, 0,
+             f" /{state.search_query}{cursor}  ({n} match"
+             f"{'' if n == 1 else 'es'})"
+             f"{'' if state.search_input else ' · n/N jump · / new'} ",
+             _attr(curses, C_WARN, bold=True))
+    else:
+        _put(scr, h - 1, 0,
+             " j/k move · enter expand · / search · tab focus · "
+             "f follow · ^T/^W tabs · q quit ",
+             _attr(curses, C_DIM, dim=True))
     scr.refresh()
 
 
@@ -523,9 +586,22 @@ def _dashboard_loop(curses, scr, tabs: Tabs) -> None:
         key = scr.getch()
         if key in (-1, curses.KEY_RESIZE):
             continue
+        if state.search_input:
+            if key in (ord("\n"), ord("\r")):
+                reduce(state, "search_accept", vm)
+            elif key == 27:
+                reduce(state, "search_cancel", vm)
+            elif key in (curses.KEY_BACKSPACE, 127, 8):
+                reduce(state, "search_backspace", vm)
+            elif 32 <= key < 127:
+                reduce(state, f"input:{chr(key)}", vm)
+            continue
         if key == ord("q"):
             if state.overlay_open:
                 reduce(state, "back", vm)
+                continue
+            if state.search_query:      # q clears a lingering search first
+                reduce(state, "search_cancel", vm)
                 continue
             return
         action = KEYMAP.get(key)

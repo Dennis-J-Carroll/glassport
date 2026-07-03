@@ -375,6 +375,107 @@ class TestTabs(unittest.TestCase):
         self.assertNotIn("[2:beta.jsonl]", strip)
 
 
+class TestSearch(unittest.TestCase):
+    """Incremental search over already-sanitized row text (less-style
+    match-jump, never row-hiding: row indices stay stable so findings
+    row_index and the overlay keep working)."""
+
+    def setUp(self):
+        lines = handshake() + [
+            call(6, 3, "web_search", {"query": "x"}),
+            result(7, 3),
+            call(8, 4, "shadow_fetch", {"u": "http://x"}),
+            result(9, 4),
+        ]
+        self.vm = tui.build_view_model(annotated_trace(lines), live=False)
+
+    def test_matches_case_insensitive_on_timeline(self):
+        hits = tui.search_matches(self.vm, "WEB_SEARCH", "timeline")
+        self.assertEqual(len(hits), 1)
+        self.assertIn("web_search", self.vm.rows[hits[0]].text)
+
+    def test_matches_on_findings_focus(self):
+        hits = tui.search_matches(self.vm, "fabricated", "findings")
+        self.assertTrue(hits)
+        for i in hits:
+            self.assertIn("fabricated", self.vm.findings[i].text)
+
+    def test_empty_query_matches_nothing(self):
+        self.assertEqual(tui.search_matches(self.vm, "", "timeline"), [])
+
+    def test_search_open_enters_input_mode(self):
+        st = tui.UIState()
+        tui.reduce(st, "search_open", self.vm)
+        self.assertTrue(st.search_input)
+        self.assertEqual(st.search_query, "")
+
+    def test_typing_appends_and_jumps_to_first_match(self):
+        st = tui.UIState()
+        tui.reduce(st, "search_open", self.vm)
+        for ch in "shadow":
+            tui.reduce(st, f"input:{ch}", self.vm)
+        self.assertEqual(st.search_query, "shadow")
+        self.assertIn("shadow_fetch", self.vm.rows[st.selected].text)
+        self.assertFalse(st.follow)
+
+    def test_backspace_edits_query(self):
+        st = tui.UIState()
+        tui.reduce(st, "search_open", self.vm)
+        tui.reduce(st, "input:w", self.vm)
+        tui.reduce(st, "input:z", self.vm)
+        tui.reduce(st, "search_backspace", self.vm)
+        self.assertEqual(st.search_query, "w")
+
+    def test_accept_leaves_input_mode_keeps_query(self):
+        st = tui.UIState()
+        tui.reduce(st, "search_open", self.vm)
+        tui.reduce(st, "input:t", self.vm)
+        tui.reduce(st, "search_accept", self.vm)
+        self.assertFalse(st.search_input)
+        self.assertEqual(st.search_query, "t")
+
+    def test_cancel_clears_query_and_input_mode(self):
+        st = tui.UIState()
+        tui.reduce(st, "search_open", self.vm)
+        tui.reduce(st, "input:t", self.vm)
+        tui.reduce(st, "search_cancel", self.vm)
+        self.assertFalse(st.search_input)
+        self.assertEqual(st.search_query, "")
+
+    def test_next_prev_cycle_matches_with_wraparound(self):
+        st = tui.UIState()
+        tui.reduce(st, "search_open", self.vm)
+        # "tools/" appears in both tools/list and tools/call rows
+        for ch in "tools/call":
+            tui.reduce(st, f"input:{ch}", self.vm)
+        tui.reduce(st, "search_accept", self.vm)
+        hits = tui.search_matches(self.vm, "tools/call", "timeline")
+        self.assertEqual(len(hits), 2)
+        self.assertEqual(st.selected, hits[0])
+        tui.reduce(st, "search_next", self.vm)
+        self.assertEqual(st.selected, hits[1])
+        tui.reduce(st, "search_next", self.vm)    # wraps
+        self.assertEqual(st.selected, hits[0])
+        tui.reduce(st, "search_prev", self.vm)    # wraps back
+        self.assertEqual(st.selected, hits[1])
+
+    def test_next_with_no_query_is_noop(self):
+        st = tui.UIState()
+        before = st.selected
+        tui.reduce(st, "search_next", self.vm)
+        self.assertEqual(st.selected, before)
+
+    def test_search_ignored_while_overlay_open(self):
+        st = tui.UIState(overlay_open=True)
+        tui.reduce(st, "search_open", self.vm)
+        self.assertFalse(st.search_input)
+
+    def test_keymap_binds_slash_n_and_shift_n(self):
+        self.assertEqual(tui.KEYMAP.get(ord("/")), "search_open")
+        self.assertEqual(tui.KEYMAP.get(ord("n")), "search_next")
+        self.assertEqual(tui.KEYMAP.get(ord("N")), "search_prev")
+
+
 class TestCLIWiring(unittest.TestCase):
     def test_main_rejects_missing_file(self):
         rc = tui.main(["/nonexistent/session.jsonl"])
