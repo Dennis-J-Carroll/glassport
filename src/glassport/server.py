@@ -244,6 +244,11 @@ def serve(in_stream, out_stream, log_dir: Path | None = None) -> int:
 
 def main(argv: list[str]) -> int:
     args = list(argv)
+    if "--http" in args:
+        # web console mode — lazy import keeps MCP serve import-light
+        from glassport import console
+        args.remove("--http")
+        return console.main(args)
     log_dir = DEFAULT_LOG_DIR
     if "--log-dir" in args:
         i = args.index("--log-dir")
