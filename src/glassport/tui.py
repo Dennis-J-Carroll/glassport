@@ -229,6 +229,7 @@ class Tab:
     trace: InteractionTrace | None = None
     vm: ViewModel | None = None
     drift_lines: list[tuple[int, str]] | None = None   # lazy, per ingest
+    audit_lines: list[tuple[int, str]] | None = None   # lazy, per ingest
 
 
 @dataclass
@@ -353,6 +354,10 @@ def reduce(state: UIState, action: str, vm: ViewModel) -> UIState:
         state.overlay_open = True
         state.overlay_mode = "drift"
         state.overlay_scroll = 0
+    elif action == "audit":
+        state.overlay_open = True
+        state.overlay_mode = "audit"
+        state.overlay_scroll = 0
     elif action == "enter":
         if state.focus == "timeline" and vm.rows:
             state.overlay_open = True
@@ -411,6 +416,45 @@ def build_drift_lines(path: Path, log_dir: Path) -> list[tuple[int, str]]:
     return [(0, f"session {path.name} not found in {log_dir}")]
 
 
+def build_audit_lines(report, annotations) -> list[tuple[int, str]]:
+    """Static audit verdict + runtime findings as (severity, text).
+
+    Static lines render rule + location only — Finding.detail embeds the
+    matched source, which is exactly what a poisoned server wants echoed,
+    so it never reaches the screen (same policy as advise._static_line).
+    Runtime explanations are glassport's own words with secrets already
+    replaced by detectors._redact, so they are safe to show."""
+    from glassport.advise import _severity_int
+
+    out: list[tuple[int, str]] = []
+    if report is not None:
+        out.append((0, f"static audit — score {report.score}/100 · "
+                       f"grade {report.grade} · rubric "
+                       f"v{report.rubric_version}"))
+        for f in sorted(report.findings,
+                        key=lambda f: -_severity_int(f.severity)):
+            mult = f" ×{f.count}" if f.count > 1 else ""
+            out.append((_severity_int(f.severity),
+                        f"[{f.severity}] {f.rule} — {f.path}:{f.line}"
+                        f"{mult}"))
+    else:
+        out.append((0, "static audit skipped — launch with --audit PATH "
+                       "to score the server's source"))
+    out.append((0, ""))
+    out.append((0, "runtime findings (this session)"))
+    runtime = [a for a in (annotations or [])
+               if _severity_int(a.severity) >= 1]
+    if runtime:
+        for a in sorted(runtime,
+                        key=lambda a: -_severity_int(a.severity)):
+            out.append((_severity_int(a.severity),
+                        f"[sev {a.severity}] {a.subcategory}: "
+                        f"{a.explanation}"))
+    else:
+        out.append((0, "none at/above severity 1"))
+    return out
+
+
 def list_sessions(log_dir: Path, now: float | None = None) -> list[SessionEntry]:
     """Sessions newest-first; LIVE = grew within LIVE_WINDOW_SECS."""
     if now is None:
@@ -451,6 +495,7 @@ KEYMAP = {
     ord("/"): "search_open",
     ord("n"): "search_next", ord("N"): "search_prev",
     ord("d"): "drift", ord("D"): "drift_full",
+    ord("a"): "audit",
 }
 
 C_BASE, C_HOT, C_WARN, C_DIM, C_BAR, C_INFO = 1, 2, 3, 4, 5, 6
@@ -643,6 +688,7 @@ def _refresh_tab(tab: Tab) -> bool:
             tab.vm = build_view_model(
                 tab.trace, live=(time.time() - mtime) < LIVE_WINDOW_SECS)
             tab.drift_lines = None      # history moved; recompute lazily
+            tab.audit_lines = None      # annotations changed too
             if tab.state.follow:
                 tab.state.selected = max(0, len(tab.vm.rows) - 1)
     else:
@@ -650,8 +696,11 @@ def _refresh_tab(tab: Tab) -> bool:
     return True
 
 
-def _dashboard_loop(curses, scr, tabs: Tabs) -> None:
+def _dashboard_loop(curses, scr, tabs: Tabs,
+                    audit_dir: Path | None = None) -> None:
     scr.timeout(250)          # input poll doubles as the re-ingest tick
+    audit_report = None
+    audit_ran = False         # audit the source once per TUI run
     while True:
         if not tabs.tabs:
             return            # every tab closed -> back to the picker
@@ -668,10 +717,25 @@ def _dashboard_loop(curses, scr, tabs: Tabs) -> None:
         if needs_drift and tab.drift_lines is None:
             tab.drift_lines = build_drift_lines(tab.path, tab.path.parent)
 
+        if state.overlay_open and state.overlay_mode == "audit" \
+                and tab.audit_lines is None:
+            if audit_dir is not None and not audit_ran:
+                audit_ran = True
+                try:
+                    from glassport.audit import audit_path
+                    audit_report = audit_path(audit_dir)
+                except Exception:            # noqa: BLE001 — render tick
+                    audit_report = None
+            tab.audit_lines = build_audit_lines(
+                audit_report, tab.trace.annotations)
+
         if state.overlay_open:
             if state.overlay_mode == "drift":
                 _draw_overlay(curses, scr, tab.drift_lines, state,
                               title=" drift vs baseline — esc to close ")
+            elif state.overlay_mode == "audit":
+                _draw_overlay(curses, scr, tab.audit_lines, state,
+                              title=" audit & advisory — esc to close ")
             else:
                 _draw_overlay(curses, scr,
                               format_overlay(tab.trace, state.selected),
@@ -748,20 +812,34 @@ def _picker_loop(curses, scr, log_dir: Path) -> Path | None:
             selected = min(max(0, len(entries) - 1), selected + 1)
 
 
-def main(argv: list[str]) -> int:
+def _parse_args(argv: list[str]) -> tuple[Path | None, Path,
+                                          Path | None, bool]:
+    """(session path, log dir, audit dir, wants help) from CLI args."""
     log_dir = Path.home() / ".glassport" / "sessions"
     path: Path | None = None
+    audit_dir: Path | None = None
     i = 0
     while i < len(argv):
         if argv[i] == "--log-dir" and i + 1 < len(argv):
             log_dir = Path(argv[i + 1])
             i += 2
+        elif argv[i] == "--audit" and i + 1 < len(argv):
+            audit_dir = Path(argv[i + 1])
+            i += 2
         elif argv[i] in ("-h", "--help"):
-            print("usage: glassport tui [session.jsonl] [--log-dir DIR]")
-            return 0
+            return path, log_dir, audit_dir, True
         else:
             path = Path(argv[i])
             i += 1
+    return path, log_dir, audit_dir, False
+
+
+def main(argv: list[str]) -> int:
+    path, log_dir, audit_dir, want_help = _parse_args(argv)
+    if want_help:
+        print("usage: glassport tui [session.jsonl] [--log-dir DIR] "
+              "[--audit PATH]")
+        return 0
 
     if path is not None and not path.is_file():
         print(f"[glassport] no such session log: {path}", file=sys.stderr)
@@ -784,14 +862,14 @@ def main(argv: list[str]) -> int:
         tabs = Tabs()                  # persists across picker round-trips
         if path is not None:
             open_tab(tabs, path)
-            _dashboard_loop(curses, scr, tabs)
+            _dashboard_loop(curses, scr, tabs, audit_dir)
             return
         while True:
             chosen = _picker_loop(curses, scr, log_dir)
             if chosen is None:
                 return
             open_tab(tabs, chosen)
-            _dashboard_loop(curses, scr, tabs)
+            _dashboard_loop(curses, scr, tabs, audit_dir)
 
     curses.wrapper(_run)
     return 0

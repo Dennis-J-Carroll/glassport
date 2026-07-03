@@ -550,6 +550,82 @@ class TestDriftPanel(unittest.TestCase):
         self.assertEqual(tui.KEYMAP.get(ord("D")), "drift_full")
 
 
+class TestAuditPanel(unittest.TestCase):
+    """build_audit_lines: static audit score + runtime findings as
+    (severity, text). Static finding lines carry rule + location only —
+    never f.detail, which embeds matched (attacker-controlled) source.
+    Runtime explanations are glassport-generated and already redacted
+    by detectors._redact, same trust level as the findings list."""
+
+    def _trace_with_findings(self):
+        # fabricated call -> sev-3 runtime annotation
+        return annotated_trace(
+            handshake() + [call(6, 3, "shadow_fetch", {"u": "http://x"}),
+                           result(7, 3)])
+
+    def test_no_report_says_skipped_but_shows_runtime(self):
+        trace = self._trace_with_findings()
+        lines = tui.build_audit_lines(None, trace.annotations)
+        text = "\n".join(t for _, t in lines)
+        self.assertIn("--audit", text)              # how to enable
+        self.assertIn("fabricated_tool_call", text)
+        self.assertTrue(any(sev == 3 for sev, _ in lines))
+
+    def test_report_shows_score_grade_and_rule_not_detail(self):
+        from glassport import audit
+        secret = "AKIA" + "A" * 16
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "server.py").write_text(
+                f'key = "{secret}"\n', encoding="utf-8")
+            report = audit.audit_path(tmp)
+        self.assertTrue(report.findings)
+        lines = tui.build_audit_lines(report, [])
+        text = "\n".join(t for _, t in lines)
+        self.assertIn(str(report.score), text)
+        self.assertIn(report.grade, text)
+        self.assertIn("server.py", text)
+        self.assertNotIn(secret, text)               # detail never rendered
+
+    def test_clean_trace_no_report_degrades_gracefully(self):
+        trace = annotated_trace(handshake() + [
+            call(6, 3, "web_search", {"query": "x"}), result(7, 3)])
+        lines = tui.build_audit_lines(None, trace.annotations)
+        self.assertTrue(lines)                       # still explains itself
+
+    def test_a_opens_audit_overlay_and_back_closes(self):
+        vm = tui.build_view_model(annotated_trace(handshake()), live=False)
+        st = tui.UIState()
+        tui.reduce(st, "audit", vm)
+        self.assertTrue(st.overlay_open)
+        self.assertEqual(st.overlay_mode, "audit")
+        tui.reduce(st, "back", vm)
+        self.assertFalse(st.overlay_open)
+
+    def test_keymap_binds_a(self):
+        self.assertEqual(tui.KEYMAP.get(ord("a")), "audit")
+
+
+class TestParseArgs(unittest.TestCase):
+    def test_defaults(self):
+        path, log_dir, audit_dir, want_help = tui._parse_args([])
+        self.assertIsNone(path)
+        self.assertIsNone(audit_dir)
+        self.assertFalse(want_help)
+        self.assertTrue(str(log_dir).endswith("sessions"))
+
+    def test_session_path_and_flags(self):
+        path, log_dir, audit_dir, want_help = tui._parse_args(
+            ["s.jsonl", "--log-dir", "/logs", "--audit", "/srv/src"])
+        self.assertEqual(path, Path("s.jsonl"))
+        self.assertEqual(log_dir, Path("/logs"))
+        self.assertEqual(audit_dir, Path("/srv/src"))
+        self.assertFalse(want_help)
+
+    def test_help_flag(self):
+        *_, want_help = tui._parse_args(["--help"])
+        self.assertTrue(want_help)
+
+
 class TestCLIWiring(unittest.TestCase):
     def test_main_rejects_missing_file(self):
         rc = tui.main(["/nonexistent/session.jsonl"])
