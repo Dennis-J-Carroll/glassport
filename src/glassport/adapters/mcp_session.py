@@ -64,46 +64,51 @@ def _iter_entries(source: Iterable[str]) -> Iterable[dict]:
                    "dir": None, "frame": None, "raw": line}
 
 
-def from_mcp_session(
-    log_lines: Iterable[str],
-    server_name: str = "mcp_server",
-    client_name: str = "mcp_client",
-    user_intent: Optional[str] = None,
-) -> InteractionTrace:
-    """
-    Build an InteractionTrace from glassport_tap JSONL lines.
+class _TraceBuilder:
+    """The from_mcp_session fold, with its accumulator state explicit so
+    it can be fed incrementally (adapters/streaming.py) or all at once
+    (from_mcp_session). feed() consumes one log entry; snapshot() makes
+    the current state visible as an InteractionTrace — the same trace
+    object every time, updated in place, so a live consumer can hold it."""
 
-    `log_lines` is any iterable of strings (open file, list, generator).
-    Order is taken from the log as written; `seq` is preserved in event
-    metadata so timeline ordering is reconstructable even if timestamps
-    collide.
-    """
-    client = Actor.agent(client_name)          # the caller == agent surface
-    # The server HOSTS tools; it is not itself a callable tool. Modeling it
-    # as TOOL would leak its name into declared_tools(). EXTERNAL is honest:
-    # the declared surface lives on the client's reconstructed AgentCard.
-    server = Actor(id=_new_id("ext"), kind=ActorKind.EXTERNAL, name=server_name,
-                   metadata={"role": "mcp_server"})
+    def __init__(self,
+                 server_name: str = "mcp_server",
+                 client_name: str = "mcp_client",
+                 user_intent: Optional[str] = None) -> None:
+        self.client = Actor.agent(client_name)  # the caller == agent surface
+        # The server HOSTS tools; it is not itself a callable tool. Modeling
+        # it as TOOL would leak its name into declared_tools(). EXTERNAL is
+        # honest: the declared surface lives on the client's AgentCard.
+        self.server = Actor(id=_new_id("ext"), kind=ActorKind.EXTERNAL,
+                            name=server_name,
+                            metadata={"role": "mcp_server"})
+        self.events: list[Event] = []
+        # JSON-RPC ids are per-sender: the client and the server each run
+        # their own id sequence over the same pipe, so id 1 from the client
+        # and id 1 from the server are different requests. Two pending maps,
+        # one per direction, keep them from cross-pairing.
+        # request id -> (event_id of the request event, tool/<method> name)
+        self.pending: dict[Any, tuple[str, str]] = {}      # client-initiated
+        self.pending_s2c: dict[Any, tuple[str, str]] = {}  # server-initiated
+        self.declared: list[dict] = []          # accumulates tools/list tools
+        self.error_seen = False
+        self.last_event_id: Optional[str] = None    # rough causal spine
+        self.gate_by_seq: dict[Any, dict] = {}      # gate actions, by seq
+        self._client_name = client_name
+        self._user_intent = user_intent
+        self._trace: Optional[InteractionTrace] = None
 
-    events: list[Event] = []
-    # JSON-RPC ids are per-sender: the client and the server each run
-    # their own id sequence over the same pipe, so id 1 from the client
-    # and id 1 from the server are different requests. Two pending maps,
-    # one per direction, keep them from cross-pairing.
-    # request id -> (event_id of the request event, tool/<method> name)
-    pending: dict[Any, tuple[str, str]] = {}        # client-initiated
-    pending_s2c: dict[Any, tuple[str, str]] = {}    # server-initiated
-    declared: list[dict] = []                   # accumulates tools/list tools
-    final_state: Optional[TaskState] = None
-    last_event_id: Optional[str] = None         # rough causal spine
-    gate_by_seq: dict[Any, dict] = {}           # gate actions, keyed by seq
-
-    for entry in _iter_entries(log_lines):
+    def feed(self, entry: dict) -> None:
+        client, server = self.client, self.server
+        events = self.events
+        pending, pending_s2c = self.pending, self.pending_s2c
+        declared = self.declared
+        last_event_id = self.last_event_id
         # gate markers (M5) ride on the entry, not the frame: "blocked"
         # frames never reached the server, "injected" ones never left it.
-        # Stamped onto the matching events after the loop, by seq.
+        # Stamped onto the matching events in snapshot(), by seq.
         if isinstance(entry.get("gate"), dict) and entry.get("seq") is not None:
-            gate_by_seq[entry["seq"]] = entry["gate"]
+            self.gate_by_seq[entry["seq"]] = entry["gate"]
 
         frame = entry.get("frame")
         if not isinstance(frame, dict):
@@ -111,7 +116,7 @@ def from_mcp_session(
             # data is lost on import (Open design Q #2: don't drop on ingest)
             raw = entry.get("raw")
             if raw is None:
-                continue
+                return
             ev = Event(
                 id=_new_id("evt"), timestamp=entry.get("ts", ""),
                 actor_id=(client.id if entry.get("dir") == "c2s" else server.id),
@@ -122,8 +127,8 @@ def from_mcp_session(
                           "dir": entry.get("dir")},
             )
             events.append(ev)
-            last_event_id = ev.id
-            continue
+            self.last_event_id = ev.id
+            return
 
         direction = entry.get("dir")
         ts = entry.get("ts", "")
@@ -153,7 +158,7 @@ def from_mcp_session(
                 )
                 ev.timestamp = ts
                 events.append(ev)
-                last_event_id = ev.id
+                self.last_event_id = ev.id
                 if rid is not None:
                     pending[rid] = (ev.id, name)
 
@@ -167,7 +172,7 @@ def from_mcp_session(
                               "notification": True},
                 )
                 events.append(ev)
-                last_event_id = ev.id
+                self.last_event_id = ev.id
 
             elif method is None and ("result" in frame or "error" in frame):
                 # client's reply to a server-initiated request
@@ -183,7 +188,7 @@ def from_mcp_session(
                               "orphaned": parent_eid is None and rid is not None},
                 )
                 events.append(ev)
-                last_event_id = ev.id
+                self.last_event_id = ev.id
 
             else:
                 # other request methods (initialize, tools/list, ping…)
@@ -195,7 +200,7 @@ def from_mcp_session(
                     metadata={"seq": seq, "method": method, "jsonrpc_id": rid},
                 )
                 events.append(ev)
-                last_event_id = ev.id
+                self.last_event_id = ev.id
                 if rid is not None and method:
                     # remember non-call requests so their results can pair too
                     pending[rid] = (ev.id, f"<{method}>")
@@ -217,10 +222,10 @@ def from_mcp_session(
                               "jsonrpc_id": rid},
                 )
                 events.append(ev)
-                last_event_id = ev.id
+                self.last_event_id = ev.id
                 if rid is not None:
                     pending_s2c[rid] = (ev.id, f"<{method}>")
-                continue
+                return
 
             result = frame.get("result")
             error = frame.get("error")
@@ -266,8 +271,8 @@ def from_mcp_session(
                     )
                 ev.timestamp = ts
                 events.append(ev)
-                last_event_id = ev.id
-                final_state = TaskState.FAILED
+                self.last_event_id = ev.id
+                self.error_seen = True
 
             elif parent_eid is not None and call_name and \
                     not call_name.startswith("<"):
@@ -282,7 +287,7 @@ def from_mcp_session(
                 )
                 ev.timestamp = ts
                 events.append(ev)
-                last_event_id = ev.id
+                self.last_event_id = ev.id
 
             else:
                 # result to a non-call request (initialize, tools/list, …)
@@ -297,35 +302,71 @@ def from_mcp_session(
                               "orphaned": parent_eid is None and rid is not None},
                 )
                 events.append(ev)
-                last_event_id = ev.id
+                self.last_event_id = ev.id
 
-    if gate_by_seq:
-        for ev in events:
-            g = gate_by_seq.get(ev.metadata.get("seq"))
-            if g is not None:
-                ev.metadata["gate"] = g
+    def snapshot(self) -> InteractionTrace:
+        """Materialize the current state. Re-runnable after more feed()
+        calls: finalization is idempotent, and the same trace object is
+        returned every time (events list shared, updated in place)."""
+        if self.gate_by_seq:
+            for ev in self.events:
+                g = self.gate_by_seq.get(ev.metadata.get("seq"))
+                if g is not None:
+                    ev.metadata["gate"] = g
 
-    # stamp the server's declared tool surface. declared_tools() reads the
-    # AGENT's agent_card.skills, so we expose the observed tools there. The
-    # server actor keeps the raw tool defs for reference/inspection.
-    server.metadata["tools"] = declared
-    client.metadata["agent_card"] = {
-        "name": client_name,
-        "skills": [{"name": t["name"]} for t in declared if "name" in t],
-    }
+        # stamp the server's declared tool surface. declared_tools() reads
+        # the AGENT's agent_card.skills, so we expose the observed tools
+        # there. The server actor keeps the raw tool defs for inspection.
+        self.server.metadata["tools"] = self.declared
+        self.client.metadata["agent_card"] = {
+            "name": self._client_name,
+            "skills": [{"name": t["name"]}
+                       for t in self.declared if "name" in t],
+        }
 
-    if final_state is None and events:
-        final_state = TaskState.COMPLETED
+        final_state: Optional[TaskState] = None
+        if self.error_seen:
+            final_state = TaskState.FAILED
+        elif self.events:
+            final_state = TaskState.COMPLETED
 
-    return InteractionTrace(
-        id=_new_id("trace"),
-        protocol=ProtocolKind.AGENT_TOOL,
-        actors=[client, server],
-        events=events,
-        intent=user_intent,
-        final_state=final_state,
-        metadata={"source": "glassport_tap", "declared_tool_count": len(declared)},
-    )
+        if self._trace is None:
+            self._trace = InteractionTrace(
+                id=_new_id("trace"),
+                protocol=ProtocolKind.AGENT_TOOL,
+                actors=[self.client, self.server],
+                events=self.events,
+                intent=self._user_intent,
+                final_state=final_state,
+                metadata={"source": "glassport_tap",
+                          "declared_tool_count": len(self.declared)},
+            )
+        else:
+            self._trace.final_state = final_state
+            self._trace.metadata["declared_tool_count"] = len(self.declared)
+        return self._trace
+
+
+def from_mcp_session(
+    log_lines: Iterable[str],
+    server_name: str = "mcp_server",
+    client_name: str = "mcp_client",
+    user_intent: Optional[str] = None,
+) -> InteractionTrace:
+    """
+    Build an InteractionTrace from glassport_tap JSONL lines.
+
+    `log_lines` is any iterable of strings (open file, list, generator).
+    Order is taken from the log as written; `seq` is preserved in event
+    metadata so timeline ordering is reconstructable even if timestamps
+    collide.
+    """
+    builder = _TraceBuilder(server_name=server_name,
+                            client_name=client_name,
+                            user_intent=user_intent)
+    for entry in _iter_entries(log_lines):
+        builder.feed(entry)
+    return builder.snapshot()
 
 
 def from_mcp_session_file(path: str | Path, **kw) -> InteractionTrace:
