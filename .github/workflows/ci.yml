@@ -26,6 +26,8 @@ jobs:
       # Zero dependencies is a design constraint: the suite must pass
       # with nothing but the stdlib, straight from a clone.
       - name: Run tests (stdlib only, no install)
+        env:
+          PYTHONIOENCODING: utf-8
         run: python -m unittest discover -s tests -t . -v
 
       - name: Install package

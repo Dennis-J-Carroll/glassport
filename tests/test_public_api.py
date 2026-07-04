@@ -40,12 +40,19 @@ class TestPublicAPI(unittest.TestCase):
     def test_import_glassport_stays_light(self):
         # the tap's startup path imports glassport for __version__ only;
         # detectors/audit must not load until an API symbol is touched
-        import subprocess, sys
+        import os
+        import subprocess
+        import sys
         code = ("import sys, glassport; "
                 "sys.exit(1 if 'glassport.detectors' in sys.modules "
                 "or 'glassport.audit' in sys.modules else 0)")
+        # inherit the environment: a bare env breaks python startup on
+        # Windows (SystemRoot) and can break venv resolution anywhere
+        env = {**os.environ,
+               "PYTHONPATH": "src" + os.pathsep
+               + os.environ.get("PYTHONPATH", "")}
         rc = subprocess.run([sys.executable, "-c", code],
-                            env={"PYTHONPATH": "src"}).returncode
+                            env=env).returncode
         self.assertEqual(rc, 0)
 
 

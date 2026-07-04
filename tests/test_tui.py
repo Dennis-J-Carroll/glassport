@@ -688,6 +688,8 @@ class TestGateOverrideControl(unittest.TestCase):
             mode = stat.S_IMODE((Path(tmp) / "s.jsonl.gate").stat().st_mode)
             self.assertEqual(mode & 0o077, 0)         # no group/world bits
 
+    @unittest.skipUnless(os.name == "posix",
+                         "gate override requires POSIX uid/st_mode semantics")
     def test_gate_honors_tui_written_override(self):
         # end-to-end lock: what the TUI writes, the tap's fail-closed
         # reader accepts — a drifting file format would break silently

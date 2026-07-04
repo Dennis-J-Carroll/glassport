@@ -228,6 +228,8 @@ class TestGateControl(unittest.TestCase):
             action, _, _ = self._gate(tmp).check_c2s(UNDECLARED_CALL)
             self.assertEqual(action, "block")
 
+    @unittest.skipUnless(os.name == "posix",
+                         "gate override requires POSIX uid/st_mode semantics")
     def test_disable_forwards_with_visible_marker(self):
         with tempfile.TemporaryDirectory() as tmp:
             g = self._gate(tmp)
@@ -238,6 +240,8 @@ class TestGateControl(unittest.TestCase):
             self.assertEqual(info["action"], "gate_disabled")
             self.assertEqual(info["tool"], "shadow_fetch")
 
+    @unittest.skipUnless(os.name == "posix",
+                         "gate override requires POSIX uid/st_mode semantics")
     def test_reenable_blocks_again(self):
         with tempfile.TemporaryDirectory() as tmp:
             g = self._gate(tmp)
@@ -246,6 +250,8 @@ class TestGateControl(unittest.TestCase):
             self._write_override(g, enforce=True)
             self.assertEqual(g.check_c2s(UNDECLARED_CALL)[0], "block")
 
+    @unittest.skipUnless(os.name == "posix",
+                         "gate override requires POSIX uid/st_mode semantics")
     def test_garbage_file_fails_closed(self):
         with tempfile.TemporaryDirectory() as tmp:
             g = self._gate(tmp)

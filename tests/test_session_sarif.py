@@ -98,7 +98,7 @@ class TestRenderSessionSarif(unittest.TestCase):
         res = [r for r in doc["runs"][0]["results"]
                if r["ruleId"] == "glassport/fabricated_tool_call"][0]
         loc = res["locations"][0]["physicalLocation"]
-        self.assertEqual(loc["artifactLocation"]["uri"], path)
+        self.assertEqual(loc["artifactLocation"]["uri"], path.replace("\\", "/"))
         # the shadow_tool call is the 6th line written
         self.assertEqual(loc["region"]["startLine"], 6)
 

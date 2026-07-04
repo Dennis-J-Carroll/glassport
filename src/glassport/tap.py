@@ -191,6 +191,12 @@ class Gate:
         p = self.control_path
         if p is None:
             return True
+        if os.name != "posix":
+            # Windows has no uid and st_mode is decorative — the
+            # owner/permission proof this reader requires cannot be
+            # expressed. Fail closed: enforcement stays ON and the
+            # override file is inert (documented in SECURITY.md).
+            return True
         try:
             st = p.stat()
             if st.st_uid != os.getuid() or (st.st_mode & 0o022):
@@ -626,18 +632,27 @@ def _cmd_advise(audit: str | None, session: str | None,
                               min_severity=min_severity, base=audit or "")
 
     if not write:
-        print(wrap_block(content))
+        # never let a cp1252 console kill the render — degrade the
+        # emoji, keep the findings (Windows default stdout is strict)
+        block = wrap_block(content)
+        try:
+            print(block)
+        except UnicodeEncodeError:
+            enc = getattr(sys.stdout, "encoding", None) or "utf-8"
+            print(block.encode(enc, "replace").decode(enc))
         return 0
 
     target = Path(write)
-    existing = target.read_text() if target.exists() else ""
+    # explicit utf-8 both ways: the block contains non-ASCII and the
+    # platform default encoding (cp1252 on Windows) must never matter
+    existing = target.read_text(encoding="utf-8") if target.exists() else ""
     try:
         new_text = splice_block(existing, content)
     except ValueError as exc:
         print(f"advise: {exc}; fix or remove the glassport block in {write}",
               file=sys.stderr)
         return 1
-    target.write_text(new_text)
+    target.write_text(new_text, encoding="utf-8")
     print(f"advise: wrote observations to {write}")
     return 0
 
