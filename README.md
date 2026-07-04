@@ -118,6 +118,11 @@ Zero dependencies. Pure Python stdlib. Runs on Python 3.10+, including Termux.
 pip install glassport     # installs the `glassport` command
 ```
 
+**Windows:** stdlib `curses` doesn't ship on Windows, so `glassport tui`
+needs one optional shim — `pip install glassport[tui]` (installs
+[windows-curses](https://pypi.org/project/windows-curses/) on Windows only;
+a no-op everywhere else). Every other command works with the plain install.
+
 or, equivalently — a bare clone is fully runnable, no install step:
 
 ```bash

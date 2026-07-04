@@ -772,5 +772,58 @@ class TestCLIWiring(unittest.TestCase):
         self.assertIn("tui", USAGE)
 
 
+class TestHelpOverlay(unittest.TestCase):
+    """F-UX-1: `?` surfaces all bindings — 11 of 18 were footer-invisible."""
+
+    def setUp(self):
+        self.vm = tui.build_view_model(
+            annotated_trace(handshake()), live=True)
+        self.st = tui.UIState()
+
+    def test_question_mark_in_keymap(self):
+        self.assertEqual(tui.KEYMAP.get(ord("?")), "help")
+
+    def test_help_opens_overlay(self):
+        tui.reduce(self.st, "help", self.vm)
+        self.assertTrue(self.st.overlay_open)
+        self.assertEqual(self.st.overlay_mode, "help")
+        self.assertEqual(self.st.overlay_scroll, 0)
+
+    def test_back_closes_help(self):
+        tui.reduce(self.st, "help", self.vm)
+        tui.reduce(self.st, "back", self.vm)
+        self.assertFalse(self.st.overlay_open)
+
+    def test_help_scrolls_like_any_overlay(self):
+        tui.reduce(self.st, "help", self.vm)
+        tui.reduce(self.st, "down", self.vm)
+        self.assertEqual(self.st.overlay_scroll, 1)
+        tui.reduce(self.st, "up", self.vm)
+        self.assertEqual(self.st.overlay_scroll, 0)
+
+    def test_all_keymap_actions_documented(self):
+        text = " ".join(t[1] if isinstance(t, tuple) else t
+                        for t in tui.build_help_lines())
+        # every semantic key the reducer understands must appear
+        for token in ("j/k", "arrows", "g/G", "enter", "tab", "f",
+                      "esc", "q", "/", "n/N", "d", "D", "a", "!",
+                      "^T", "^W", "mouse", "?"):
+            self.assertIn(token, text, f"help missing binding: {token}")
+
+    def test_help_grouped_by_category(self):
+        headers = [t[1] for t in tui.build_help_lines()
+                   if isinstance(t, tuple)]
+        for cat in ("movement", "selection", "search", "overlays",
+                    "gate", "quit"):
+            self.assertTrue(any(cat in h.lower() for h in headers),
+                            f"missing category header: {cat}")
+
+    def test_footer_mentions_help_key(self):
+        # the footer literal lives in the render shell; lock the string
+        import inspect
+        src = inspect.getsource(tui._draw_dashboard)
+        self.assertIn("? help", src)
+
+
 if __name__ == "__main__":
     unittest.main()

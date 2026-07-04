@@ -452,6 +452,14 @@ def summarize(log_path: Path, as_json: bool = False, as_sarif: bool = False) -> 
 
     trace = from_mcp_session_file(log_path)
 
+    # doctrine: assert only what the wire proves — a summary of a
+    # tail-only ingest must say the head was never analyzed
+    partial = bool(trace.metadata.get("tail_only"))
+    if partial:
+        print("WARN: log ingested tail-only — file exceeded the tail cap; "
+              "the head was NOT analyzed and these counts are partial",
+              file=sys.stderr)
+
     if as_sarif:
         from glassport.detectors import annotate
         from glassport.sarif import render_session_sarif
@@ -494,6 +502,7 @@ def summarize(log_path: Path, as_json: bool = False, as_sarif: bool = False) -> 
     if as_json:
         print(json.dumps({
             "session": log_path.name,
+            "completeness": "partial_tail_only" if partial else "complete",
             "frames_parsed": frames,
             "declared_tools": sorted(declared),
             "called_tools": [n for _, n in called],
@@ -512,6 +521,8 @@ def summarize(log_path: Path, as_json: bool = False, as_sarif: bool = False) -> 
         return 0
 
     print(f"session: {log_path.name}")
+    if partial:
+        print("completeness:     PARTIAL (tail-only — head not analyzed)")
     print(f"frames parsed:    {frames}")
     print(f"declared tools:   {sorted(declared) or '— (no tools/list seen)'}")
     print(f"called tools:     {[n for _, n in called] or '—'}")

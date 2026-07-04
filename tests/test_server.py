@@ -24,10 +24,11 @@ def rpc(rid, method, params=None):
     return req
 
 
-def run_server(requests: list[dict], log_dir) -> list[dict]:
+def run_server(requests: list[dict], log_dir, audit_roots=None) -> list[dict]:
     src = io.StringIO("".join(json.dumps(r) + "\n" for r in requests))
     out = io.StringIO()
-    rc = server_mod.serve(src, out, log_dir=Path(log_dir))
+    rc = server_mod.serve(src, out, log_dir=Path(log_dir),
+                          audit_roots=audit_roots)
     assert rc == 0
     return [json.loads(l) for l in out.getvalue().splitlines()]
 
@@ -131,8 +132,64 @@ class TestServeTools(unittest.TestCase):
             target.write_text("import os\nos.system('id')\n",
                               encoding="utf-8")
             resps = run_server(
-                [tool_call(1, "audit_server", {"path": str(target)})], tmp)
+                [tool_call(1, "audit_server", {"path": str(target)})], tmp,
+                audit_roots=[Path(tmp)])
         json.loads(text_of(resps[0]))   # must be machine-parseable
+
+    def test_audit_server_rejects_path_outside_roots(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            resps = run_server(
+                [tool_call(1, "audit_server", {"path": "/etc/passwd"})], tmp,
+                audit_roots=[Path(tmp)])
+        self.assertTrue(resps[0]["result"]["isError"])
+        self.assertNotIn("root:", text_of(resps[0]))
+
+    def test_audit_server_rejects_traversal_escape(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            sneaky = tmp + "/../" * 8 + "etc"
+            resps = run_server(
+                [tool_call(1, "audit_server", {"path": sneaky})], tmp,
+                audit_roots=[Path(tmp)])
+        self.assertTrue(resps[0]["result"]["isError"])
+
+    def test_audit_server_tilde_not_expanded(self):
+        # expanding a client-supplied ~ server-side would itself be the
+        # disclosure vector; the literal path must simply fail confinement
+        with tempfile.TemporaryDirectory() as tmp:
+            resps = run_server(
+                [tool_call(1, "audit_server", {"path": "~/.ssh"})], tmp,
+                audit_roots=[Path(tmp)])
+        self.assertTrue(resps[0]["result"]["isError"])
+
+    def test_audit_server_symlink_escape_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp, \
+                tempfile.TemporaryDirectory() as outside:
+            (Path(outside) / "secret.py").write_text("KEY='x'\n",
+                                                     encoding="utf-8")
+            link = Path(tmp) / "inside"
+            link.symlink_to(outside)
+            resps = run_server(
+                [tool_call(1, "audit_server", {"path": str(link)})], tmp,
+                audit_roots=[Path(tmp)])
+        self.assertTrue(resps[0]["result"]["isError"])
+
+    def test_audit_server_default_root_is_cwd(self):
+        # no audit_roots passed -> cwd is the only allowed root
+        with tempfile.TemporaryDirectory() as tmp:
+            resps = run_server(
+                [tool_call(1, "audit_server", {"path": "/etc/passwd"})], tmp)
+        self.assertTrue(resps[0]["result"]["isError"])
+
+    def test_resolve_audit_path_inside_root_ok(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "srv.py"
+            target.write_text("x = 1\n", encoding="utf-8")
+            got = server_mod._resolve_audit_path(str(target), [Path(tmp)])
+            self.assertEqual(got, target.resolve())
+
+    def test_resolve_audit_path_requires_value(self):
+        with self.assertRaises(ValueError):
+            server_mod._resolve_audit_path("", [Path.cwd()])
 
     def test_watch_drift_groups_sessions(self):
         with tempfile.TemporaryDirectory() as tmp:

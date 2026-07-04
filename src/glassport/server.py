@@ -129,7 +129,27 @@ def _resolve_session_path(raw, log_dir: Path) -> Path:
     return p
 
 
-def _call_tool(name: str, args: dict, log_dir: Path) -> dict:
+def _resolve_audit_path(raw, allowed_roots: list[Path]) -> Path:
+    """Resolve an audit `path` argument and confine it to the allowed roots.
+
+    audit_server walks directories and returns findings that name files and
+    line numbers — pointing it at /etc or ~/.ssh would turn the audit into a
+    local-file disclosure primitive for any MCP client on this wire. Same
+    posture as _resolve_session_path: resolve (which also follows symlinks)
+    and require the result to live under an explicitly allowed root.
+    A client-supplied `~` is deliberately NOT expanded — expanding it
+    server-side would itself be the disclosure vector."""
+    if not raw:
+        raise ValueError("path is required")
+    p = Path(raw).resolve()
+    for root in allowed_roots:
+        if p.is_relative_to(Path(root).resolve()):
+            return p
+    raise ValueError(f"audit path outside allowed roots: {raw}")
+
+
+def _call_tool(name: str, args: dict, log_dir: Path,
+               audit_roots: list[Path]) -> dict:
     if name == "list_sessions":
         limit = args.get("limit", 10)
         paths = sorted(log_dir.glob("*.jsonl"), reverse=True)[:limit]
@@ -156,9 +176,10 @@ def _call_tool(name: str, args: dict, log_dir: Path) -> dict:
 
     if name == "audit_server":
         from glassport import audit as audit_mod
+        path = _resolve_audit_path(args.get("path"), audit_roots)
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
-            audit_mod.main([args["path"], "--json"])
+            audit_mod.main([str(path), "--json"])
         return {"content": [{"type": "text", "text": buf.getvalue()}]}
 
     if name == "get_gate_status":
@@ -187,7 +208,8 @@ def _call_tool(name: str, args: dict, log_dir: Path) -> dict:
             "isError": True}
 
 
-def _handle(method: str, params: dict, log_dir: Path) -> dict:
+def _handle(method: str, params: dict, log_dir: Path,
+            audit_roots: list[Path]) -> dict:
     if method == "initialize":
         return {
             "protocolVersion": params.get("protocolVersion",
@@ -201,7 +223,7 @@ def _handle(method: str, params: dict, log_dir: Path) -> dict:
         name = params.get("name", "?")
         args = params.get("arguments") or {}
         try:
-            return _call_tool(name, args, log_dir)
+            return _call_tool(name, args, log_dir, audit_roots)
         except Exception as exc:
             # tool failure is content, not a protocol error — the agent
             # should see and reason about it like any other tool output
@@ -211,9 +233,14 @@ def _handle(method: str, params: dict, log_dir: Path) -> dict:
     return {}   # ping and anything else id-bearing: empty result
 
 
-def serve(in_stream, out_stream, log_dir: Path | None = None) -> int:
-    """Speak MCP over the given line streams until EOF."""
+def serve(in_stream, out_stream, log_dir: Path | None = None,
+          audit_roots: list[Path] | None = None) -> int:
+    """Speak MCP over the given line streams until EOF.
+
+    audit_roots confines the audit_server tool (default: cwd only —
+    default-deny; widen with `--allow-audit-root`)."""
     log_dir = log_dir or DEFAULT_LOG_DIR
+    audit_roots = audit_roots if audit_roots is not None else [Path.cwd()]
 
     def send(obj: dict) -> None:
         out_stream.write(json.dumps(obj, ensure_ascii=False) + "\n")
@@ -234,7 +261,7 @@ def serve(in_stream, out_stream, log_dir: Path | None = None) -> int:
             continue   # notifications need no reply
         try:
             result = _handle(req.get("method", ""),
-                             req.get("params") or {}, log_dir)
+                             req.get("params") or {}, log_dir, audit_roots)
             send({"jsonrpc": "2.0", "id": rid, "result": result})
         except Exception as exc:
             send({"jsonrpc": "2.0", "id": rid,
@@ -249,21 +276,35 @@ def main(argv: list[str]) -> int:
         from glassport import console
         args.remove("--http")
         return console.main(args)
+    usage = ("usage: glassport serve [--log-dir DIR] "
+             "[--allow-audit-root DIR ...]")
     log_dir = DEFAULT_LOG_DIR
     if "--log-dir" in args:
         i = args.index("--log-dir")
         try:
             log_dir = Path(args[i + 1])
         except IndexError:
-            print("usage: glassport serve [--log-dir DIR]", file=sys.stderr)
+            print(usage, file=sys.stderr)
+            return 2
+        del args[i:i + 2]
+    audit_roots: list[Path] = []
+    while "--allow-audit-root" in args:
+        i = args.index("--allow-audit-root")
+        try:
+            audit_roots.append(Path(args[i + 1]))
+        except IndexError:
+            print(usage, file=sys.stderr)
             return 2
         del args[i:i + 2]
     if args:
-        print("usage: glassport serve [--log-dir DIR]", file=sys.stderr)
+        print(usage, file=sys.stderr)
         return 2
+    audit_roots = audit_roots or [Path.cwd()]
     print(f"[glassport] serve: MCP audit server on stdio; "
-          f"log dir: {log_dir}", file=sys.stderr)
-    return serve(sys.stdin, sys.stdout, log_dir=log_dir)
+          f"log dir: {log_dir}; audit roots: "
+          f"{', '.join(str(r) for r in audit_roots)}", file=sys.stderr)
+    return serve(sys.stdin, sys.stdout, log_dir=log_dir,
+                 audit_roots=audit_roots)
 
 
 if __name__ == "__main__":
