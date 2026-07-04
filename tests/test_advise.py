@@ -281,10 +281,10 @@ class TestAdviseCLI(unittest.TestCase):
             target = os.path.join(tmp, "AGENTS.md")
             s = self._session(tmp)
             self.assertEqual(main(["advise", "--session", s, "--write", target]), 0)
-            first = Path(target).read_text()
+            first = Path(target).read_text(encoding="utf-8")
             self.assertIn(advise.BEGIN, first)
             self.assertEqual(main(["advise", "--session", s, "--write", target]), 0)
-            self.assertEqual(Path(target).read_text(), first)  # idempotent
+            self.assertEqual(Path(target).read_text(encoding="utf-8"), first)  # idempotent
 
     def test_malformed_target_refuses(self):
         with tempfile.TemporaryDirectory() as tmp:

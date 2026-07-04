@@ -170,7 +170,7 @@ class TestGateHold(unittest.TestCase):
             log.close()
             self.assertIn(b"anything", dst.getvalue())   # still forwarded
             entries = [json.loads(l) for l in
-                       (Path(tmp) / "s.jsonl").read_text().splitlines()]
+                       (Path(tmp) / "s.jsonl").read_text(encoding="utf-8").splitlines()]
             self.assertEqual(entries[0]["gate"]["action"], "gate_skipped")
 
 

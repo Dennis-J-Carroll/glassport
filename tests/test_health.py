@@ -44,7 +44,7 @@ class TestMetricsLine(unittest.TestCase):
             log.record("c2s", b'{"jsonrpc":"2.0","id":1,"method":"x"}\n')
             log.write_metrics(frames_blocked=2, session_duration_s=1.5)
             log.close()
-            last = json.loads(p.read_text().splitlines()[-1])
+            last = json.loads(p.read_text(encoding="utf-8").splitlines()[-1])
         self.assertEqual(last["type"], "glassport.metrics")
         self.assertEqual(last["frames_seen"], 1)
         self.assertEqual(last["frames_blocked"], 2)

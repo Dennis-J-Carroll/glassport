@@ -4,6 +4,7 @@ import os
 import sys
 import tempfile
 import unittest
+from pathlib import Path
 
 sys.path.insert(0, "src")
 from dogfood import oracle, redteam_fixtures as rf
@@ -31,7 +32,7 @@ class TestHostileFixtures(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             p = rf.write_hostile_session(os.path.join(tmp, "s.jsonl"))
             self.assertTrue(os.path.exists(p))
-            self.assertGreater(len(open(p).read().splitlines()), 5)
+            self.assertGreater(len(Path(p).read_text(encoding="utf-8").splitlines()), 5)
 
     def test_audit_fixture_plants_snippet(self):
         with tempfile.TemporaryDirectory() as tmp:
