@@ -557,14 +557,18 @@ def _cmd_advise(audit: str | None, session: str | None,
         return 0
 
     target = Path(write)
-    existing = target.read_text() if target.exists() else ""
+    existing = ""
+    if target.exists():
+        with open(target, "r", encoding="utf-8") as fh:
+            existing = fh.read()
     try:
         new_text = splice_block(existing, content)
     except ValueError as exc:
         print(f"advise: {exc}; fix or remove the glassport block in {write}",
               file=sys.stderr)
         return 1
-    target.write_text(new_text)
+    with open(target, "w", encoding="utf-8") as fh:
+        fh.write(new_text)
     print(f"advise: wrote observations to {write}")
     return 0
 
