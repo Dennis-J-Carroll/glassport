@@ -31,10 +31,13 @@ from __future__ import annotations
 from pathlib import Path
 
 from glassport import detectors
-from glassport.adapters.mcp_session import _iter_entries, _TraceBuilder
+from glassport.adapters.mcp_session import (TAIL_CAP_BYTES, _iter_entries,
+                                            _TraceBuilder)
 from glassport.interaction_trace import InteractionTrace
 
-TAIL_CAP_BYTES = 50_000_000        # plan 3.3: beyond this, tail-only
+# TAIL_CAP_BYTES lives in mcp_session so batch and streaming share one
+# definition of "too big to replay in full" (plan 3.3); re-exported here
+# for existing importers.
 
 
 class StreamingSession:

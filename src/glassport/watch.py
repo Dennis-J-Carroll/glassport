@@ -120,6 +120,9 @@ def fingerprint(trace: InteractionTrace, source_name: str = "") -> dict:
         "server_requests": sorted(server_requests),
         "hosts": sorted(hosts),
         "event_count": len(trace.events),
+        # a tail-only ingest dropped the head of the log; drift derived
+        # from it is low-confidence and drift() prints a notice saying so
+        "tail_only": bool(trace.metadata.get("tail_only")),
     }
 
 
@@ -174,6 +177,14 @@ def drift(baseline: dict, fp: dict) -> list[Drift]:
     def d(kind, severity, explanation, **detail):
         out.append(Drift(session=src, kind=kind, severity=severity,
                          explanation=explanation, detail=detail))
+
+    # surfaced first, never suppressing: the findings below still stand
+    # (a partial log can only under-report novelty, not invent it), but
+    # the reader must know the comparison ran against a headless log
+    if fp.get("tail_only"):
+        d("tail_only_partial", 1,
+          "session was ingested tail-only (head dropped at the ingest "
+          "cap) — drift comparison is low-confidence")
 
     for name in sorted(set(fp["declared_tools"])
                        - baseline["declared_ever"]):

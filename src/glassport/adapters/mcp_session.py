@@ -369,7 +369,35 @@ def from_mcp_session(
     return builder.snapshot()
 
 
-def from_mcp_session_file(path: str | Path, **kw) -> InteractionTrace:
-    """Convenience: read a .jsonl session file from disk."""
-    with open(path, encoding="utf-8") as fh:
+# Beyond this, only the trailing tail_cap_bytes are parsed and the trace
+# carries metadata["tail_only"] = True so every consumer can say so.
+# Shared with adapters/streaming.py — batch and streaming must agree on
+# what a large file means, or their test-locked equality breaks at 50MB.
+TAIL_CAP_BYTES = 50_000_000
+
+_USE_DEFAULT = -1
+
+
+def from_mcp_session_file(path: str | Path,
+                          tail_cap_bytes: int | None = _USE_DEFAULT,
+                          **kw) -> InteractionTrace:
+    """Read a .jsonl session file from disk.
+
+    Files larger than tail_cap_bytes (default TAIL_CAP_BYTES; None
+    disables) are ingested tail-only from a line boundary, mirroring
+    StreamingSession: metadata["tail_only"] = True marks the trace as
+    partial — doctrine says a dropped head must never look complete."""
+    cap = TAIL_CAP_BYTES if tail_cap_bytes == _USE_DEFAULT else tail_cap_bytes
+    p = Path(path)
+    if cap is not None and p.stat().st_size > cap:
+        with open(p, "rb") as fh:
+            fh.seek(p.stat().st_size - cap)
+            fh.readline()                    # drop the cut-off line
+            data = fh.read()
+        lines = (raw.decode("utf-8", errors="replace")
+                 for raw in data.split(b"\n"))
+        trace = from_mcp_session(lines, **kw)
+        trace.metadata["tail_only"] = True
+        return trace
+    with open(p, encoding="utf-8") as fh:
         return from_mcp_session(fh, **kw)

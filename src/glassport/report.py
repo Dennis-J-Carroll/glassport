@@ -221,6 +221,11 @@ def render_html(trace: InteractionTrace, source_name: str = "") -> str:
     w(f"<style>{_CSS}</style></head><body>")
 
     w("<h1>glassport session report</h1>")
+    if trace.metadata.get("tail_only"):
+        # static text only — nothing attacker-controlled in the banner.
+        # doctrine: a report over a tail-only ingest must never look complete
+        w('<div class="verdict v2">PARTIAL — tail-only mode; the head of '
+          "the log exceeded the ingest cap and was NOT analyzed</div>")
     w(f'<div class="dim">{_esc(source_name or trace.id)}</div>')
     w(f'<div class="verdict v{max_sev}">{verdict}</div>')
     w(f'<div class="dim">{_esc(verdict_text)}'
