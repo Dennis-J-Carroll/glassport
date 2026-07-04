@@ -25,6 +25,13 @@ FULLWIDTH_EMAIL = "\uff41\uff4c\uff49\uff43\uff45@example.com"  # ａｌｉｃ�
 CREDIT_CARD_VALID = "4111111111111111"   # Luhn-valid Visa test number
 CREDIT_CARD_INVALID = "1234567890123456"  # wrong prefix + Luhn-fail
 DB_URL = "postgres://dbuser:dbpass@prod.db.example.com:5432/ledger"
+# Stripe secret key shape (sk_live_/sk_test_ + 24 alphanum/underscore) — not
+# covered by the built-in PII patterns, so it tests the "novel credential" gap.
+# NOTE: an early underscore + obvious-placeholder body keeps this matching
+# glassport's stripe_key regex ([A-Za-z0-9_]{24,}) while staying below GitHub
+# secret-scanning's contiguous-alnum threshold, so the fixture doesn't trip
+# push protection. Never use a real-looking key here.
+STRIPE_KEY = "sk_test__EXAMPLE_not_a_real_key_00000000"
 
 # Hyphen-free PEM body so the rsa_private_key regex matches and ReDoS attempts
 # on unterminated BEGIN markers fail fast (body class [^-] cannot cross hyphens).

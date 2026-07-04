@@ -54,6 +54,9 @@ def run() -> int:
         ("S3 static-no-raw-secret", oracle.no_raw_secret(static_doc, rf.SECRETS)),
         ("S4 runtime-no-raw-secret", oracle.no_raw_secret(runtime_doc, rf.SECRETS)),
         ("S5 dos-output-bounded", oracle.bounded_output(dos_doc, 2_000_000)),
+        ("S6 sarif-no-bidi-control", oracle.sarif_no_bidi_control(runtime_doc)),
+        ("S7 sarif-no-zwj", oracle.sarif_no_zwj(runtime_doc)),
+        ("S8 sarif-no-novel-secret", oracle.no_raw_secret(runtime_doc, rf.SECRETS)),
     ]
 
     lines = ["# sarif red-team — findings", "",
@@ -77,7 +80,19 @@ def run() -> int:
               "quotes in a finding is NOT redacted — that is the tool faithfully "
               "reporting the attack it found, not a leak. S5 bounds output "
               "against a hostile multi-megabyte tool name that rides into "
-              "a.explanation — the message is clamped per field.", ""]
+              "a.explanation — the message is clamped per field.",
+              "",
+              "S6/S7 close Unicode deception in SARIF `message.text`: bidi "
+              "overrides and zero-width joiners from hostile tool names rode "
+              "into annotation explanations and would be rendered literally by "
+              "`ensure_ascii=False` JSON. Both renderers now apply the same "
+              "`neutralize_text` scrubber used by the HTML report.",
+              "",
+              "S8 locks the novel Stripe key shape in the runtime SARIF path: a "
+              "credential-named tool reaches `message.text` via annotation "
+              "explanations and is redacted by the same new pattern that closes "
+              "R14.",
+              ""]
 
     os.makedirs(os.path.dirname(FINDINGS), exist_ok=True)
     with open(FINDINGS, "w") as fh:

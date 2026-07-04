@@ -67,6 +67,45 @@ def no_modifier_grave(text: str) -> tuple[bool, str]:
     return (True, "no modifier grave present")
 
 
+def no_fullwidth_homoglyph(text: str) -> tuple[bool, str]:
+    """Fullwidth Latin letters (U+FF00 block) NFKC-fold to ASCII but are not
+    in the renderer's curated _HOMOGLYPHS set, so they can impersonate a
+    declared tool name unless the neutralizer applies NFKC."""
+    for ch in text:
+        o = ord(ch)
+        if 0xFF00 <= o <= 0xFFEF:
+            return (False, f"fullwidth char U+{o:04X} present")
+    return (True, "no fullwidth homoglyph present")
+
+
+def no_math_homoglyph(text: str) -> tuple[bool, str]:
+    """Mathematical alphanumeric symbols (U+1D400–U+1D7FF) NFKC-fold to ASCII
+    letters/digits and can impersonate a benign identifier."""
+    for ch in text:
+        o = ord(ch)
+        if 0x1D400 <= o <= 0x1D7FF:
+            return (False, f"mathematical alphanumeric U+{o:04X} present")
+    return (True, "no mathematical-alphanumeric homoglyph present")
+
+
+def no_exotic_whitespace(text: str) -> tuple[bool, str]:
+    """NBSP, ideographic space, line/paragraph separators are not _SAFE_WS and
+    can misalign rows or hide breaks in the rendered report."""
+    for ch in text:
+        if ch in "\u00a0\u3000\u2028\u2029":
+            return (False, f"exotic whitespace U+{ord(ch):04X} present")
+    return (True, "no exotic whitespace present")
+
+
+def no_excessive_combining_marks(text: str, limit: int) -> tuple[bool, str]:
+    """A Zalgo stack interleaved with zero-width joiners defeats a naive
+    consecutive-run counter: the total number of combining marks that survive
+    (not just the longest consecutive run) must be bounded."""
+    import unicodedata
+    total = sum(1 for ch in text if unicodedata.category(ch) in ("Mn", "Mc", "Me"))
+    return (total <= limit, f"{total} combining marks survived (limit {limit})")
+
+
 # ---------------------------------------------------------------------------
 # report.py (session.html) HTML-renderer invariants. Defined independently of
 # the renderer's own neutralizer so the check can never be circular: these sets
@@ -154,6 +193,40 @@ def json_well_formed(text: str) -> tuple[bool, str]:
     if not runs:
         return (False, "SARIF has no runs")
     return (True, f"valid JSON, {len(runs[0].get('results', []))} results")
+
+
+def _sarif_messages(text: str) -> list[str]:
+    """Extract every message.text from a SARIF document."""
+    try:
+        doc = _json.loads(text)
+    except ValueError:
+        return []
+    messages: list[str] = []
+    for run in doc.get("runs", []):
+        for result in run.get("results", []):
+            msg = result.get("message", {})
+            if isinstance(msg, dict) and "text" in msg:
+                messages.append(msg["text"])
+    return messages
+
+
+def sarif_no_bidi_control(text: str) -> tuple[bool, str]:
+    """Bidi overrides in SARIF message.text can reorder a finding's display
+    in a Security UI that does not neutralize Unicode itself."""
+    for msg in _sarif_messages(text):
+        hit = _present(msg, _BIDI_CONTROLS)
+        if hit:
+            return (False, f"bidi controls in message.text: {hit}")
+    return (True, "no bidi control in SARIF message.text")
+
+
+def sarif_no_zwj(text: str) -> tuple[bool, str]:
+    """Zero-width joiners in message.text are invisible and can splice a
+    hostile tool name so it reads as a benign one."""
+    for msg in _sarif_messages(text):
+        if "\u200d" in msg:
+            return (False, "zero-width joiner U+200D in message.text")
+    return (True, "no zero-width joiner in SARIF message.text")
 
 
 def no_normalized_directive(text: str, payload: str) -> tuple[bool, str]:

@@ -644,15 +644,21 @@ def _cmd_advise(audit: str | None, session: str | None,
 
     target = Path(write)
     # explicit utf-8 both ways: the block contains non-ASCII and the
-    # platform default encoding (cp1252 on Windows) must never matter
-    existing = target.read_text(encoding="utf-8") if target.exists() else ""
+    # platform default encoding (cp1252 on Windows) must never matter.
+    # Context managers ensure handles are released before the idempotent
+    # rewrite path re-opens the file (avoiding CI file-lock races).
+    existing = ""
+    if target.exists():
+        with open(target, "r", encoding="utf-8") as fh:
+            existing = fh.read()
     try:
         new_text = splice_block(existing, content)
     except ValueError as exc:
         print(f"advise: {exc}; fix or remove the glassport block in {write}",
               file=sys.stderr)
         return 1
-    target.write_text(new_text, encoding="utf-8")
+    with open(target, "w", encoding="utf-8") as fh:
+        fh.write(new_text)
     print(f"advise: wrote observations to {write}")
     return 0
 

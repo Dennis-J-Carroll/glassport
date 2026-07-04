@@ -24,7 +24,6 @@ from __future__ import annotations
 import html
 import json
 import sys
-import unicodedata
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
@@ -91,55 +90,6 @@ footer { color: var(--dim); border-top: 1px solid var(--line);
 """
 
 
-# Look-alike / hidden characters html.escape leaves untouched. A hostile
-# server can name a tool with a right-to-left override, a zero-width joiner, or
-# a Cyrillic/Armenian homoglyph; escaping renders the markup inert but the
-# *deception* survives into the report a human reads to make a trust decision.
-# We REVEAL each such character as a visible codepoint sentinel (‹U+XXXX›)
-# rather than silently dropping it — the analyst must see the server used one.
-_HOMOGLYPHS = frozenset(chr(k) for k in detectors._CONFUSABLES) | {
-    "ˋ",   # MODIFIER LETTER GRAVE ACCENT — backtick look-alike
-    "Ѕ",   # CYRILLIC CAPITAL LETTER DZE — 'S' look-alike
-}
-_SAFE_WS = frozenset("\t\n\r ")
-# A base glyph may legitimately carry a few combining marks (Vietnamese, IPA);
-# a Zalgo stack piles on dozens to overflow and obscure the row. Keep a handful,
-# then collapse the rest into a count so the deception is visible but bounded.
-_MAX_COMBINING_RUN = 4
-
-
-def _is_deceptive(ch: str) -> bool:
-    if ch in _SAFE_WS:                       # ordinary layout whitespace stays
-        return False
-    if ch in _HOMOGLYPHS:
-        return True
-    if detectors._INVISIBLE_RE.match(ch):    # bidi + zero-width + Hangul filler
-        return True
-    return unicodedata.category(ch) in ("Cc", "Cf", "Cn", "Co", "Cs")
-
-
-def _neutralize(text: str) -> str:
-    """Reveal deceptive Unicode as visible ‹U+XXXX› sentinels and collapse
-    Zalgo combining-mark runs; legitimate text (letters, whitespace, CJK, emoji,
-    a few diacritics) passes through untouched."""
-    if text.isascii() and text.isprintable():          # common fast path
-        return text
-    out: list[str] = []
-    run = 0                                            # consecutive combining marks
-    for ch in text:
-        if unicodedata.category(ch) in ("Mn", "Mc", "Me"):
-            run += 1
-            if run > _MAX_COMBINING_RUN:
-                if run == _MAX_COMBINING_RUN + 1:
-                    out.append("‹combining…›")         # once per overflowing run
-                continue
-            out.append(ch)
-            continue
-        run = 0
-        out.append(f"‹U+{ord(ch):04X}›" if _is_deceptive(ch) else ch)
-    return "".join(out)
-
-
 def _esc(value) -> str:
     """Render an attacker-controlled value inert. Order matters: redact secrets
     on the raw bytes first (the detector scans internally), THEN clamp the length
@@ -148,7 +98,8 @@ def _esc(value) -> str:
     clamp bound is well within the scanned window, so a secret can't survive by
     straddling the truncation point."""
     return html.escape(
-        _neutralize(detectors.clamp_text(detectors.redact_secrets(str(value)))),
+        detectors.neutralize_text(
+            detectors.clamp_text(detectors.redact_secrets(str(value)))),
         quote=True)
 
 

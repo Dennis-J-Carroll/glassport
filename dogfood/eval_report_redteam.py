@@ -37,6 +37,12 @@ MAX_REPORT_BYTES = 2_000_000
 MAX_COMBINING_RUN = 4
 
 
+def _combine(a: tuple[bool, str], b: tuple[bool, str]) -> tuple[bool, str]:
+    ok = a[0] and b[0]
+    detail = "; ".join(x[1] for x in (a, b) if not x[0]) or f"{a[1]}; {b[1]}"
+    return (ok, detail)
+
+
 def _render(lines) -> str:
     trace = from_mcp_session(lines)
     detectors.annotate(trace)
@@ -78,6 +84,14 @@ def run() -> int:
          oracle.bounded_output(_render(rf.dos_report_lines()), MAX_REPORT_BYTES)),
         ("R10 no-zalgo-run",
          oracle.no_zalgo_run(_render(rf.zalgo_report_lines()), MAX_COMBINING_RUN)),
+        ("R11 no-nfkc-homoglyph", _combine(
+            oracle.no_fullwidth_homoglyph(html),
+            oracle.no_math_homoglyph(html))),
+        ("R12 no-exotic-whitespace", oracle.no_exotic_whitespace(html)),
+        ("R13 no-zalgo-interleave",
+         oracle.no_excessive_combining_marks(
+             _render(rf.zalgo_interleave_report_lines()), 25)),
+        ("R14 no-novel-secret", oracle.no_raw_secret(html, rf.SECRETS)),
     ]
 
     lines = ["# report red-team — findings", "",
@@ -98,7 +112,32 @@ def run() -> int:
               "that already held. R9 bounds output against a multi-megabyte "
               "field (a resource/DoS shape — the renderer amplified a 5 MB name "
               "4× before the per-field clamp); R10 collapses Zalgo combining-mark "
-              "runs that an escape-only renderer let overflow the row.", ""]
+              "runs that an escape-only renderer let overflow the row.",
+              "",
+              "R11 extends the homoglyph hunt to NFKC compatibility variants: "
+              "fullwidth Latin (U+FF00 block) and mathematical alphanumerics "
+              "(U+1D400–U+1D7FF) fold to ASCII under NFKC but were outside the "
+              "curated _HOMOGLYPHS set, so a hostile tool name could visually "
+              "impersonate a declared one. The neutralizer now reveals any "
+              "character whose NFKC form is ASCII alphanumeric.",
+              "",
+              "R12 closes exotic whitespace: NBSP (U+00A0), ideographic space "
+              "(U+3000), line separator (U+2028) and paragraph separator "
+              "(U+2029) are not _SAFE_WS and can misalign rows or hide breaks; "
+              "they are now revealed as sentinels.",
+              "",
+              "R13 defeats the Zalgo run-counter reset: interleaving each "
+              "combining mark with a zero-width joiner made the old counter "
+              "reset to 0 after every mark, so 60 marks survived individually. "
+              "The neutralizer now collapses combining-mark runs across "
+              "transparent interleaves, bounding both the longest consecutive "
+              "run (R10) and the total number of marks that escape collapse.",
+              "",
+              "R14 adds a novel credential shape — Stripe API keys "
+              "(`sk_live_`, `pk_test_`, etc.) — to the redaction catalog. "
+              "Before the pattern the key reached session.html verbatim; after, "
+              "it is replaced with `[stripe_key redacted · N chars]`.",
+              ""]
 
     os.makedirs(os.path.dirname(FINDINGS), exist_ok=True)
     with open(FINDINGS, "w") as fh:
