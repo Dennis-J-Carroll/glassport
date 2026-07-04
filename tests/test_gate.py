@@ -16,6 +16,7 @@ import sys
 import tempfile
 import threading
 import time
+import os
 import unittest
 from pathlib import Path
 
@@ -252,6 +253,8 @@ class TestGateControl(unittest.TestCase):
             g.control_path.chmod(0o600)
             self.assertEqual(g.check_c2s(UNDECLARED_CALL)[0], "block")
 
+    @unittest.skipUnless(os.name == "posix",
+                         "chmod cannot loosen st_mode on Windows")
     def test_loose_permissions_fail_closed(self):
         with tempfile.TemporaryDirectory() as tmp:
             g = self._gate(tmp)
@@ -368,7 +371,10 @@ class TestGateEndToEnd(unittest.TestCase):
                 child.wait(timeout=10)
 
             log = next(Path(tmp).glob("*.jsonl")).read_text(encoding="utf-8")
-            entries = [json.loads(l) for l in log.splitlines()]
+            # wire entries only — the tap also writes a glassport.metrics
+            # self-observation line at session end (H1.09)
+            entries = [e for e in map(json.loads, log.splitlines())
+                       if not str(e.get("type", "")).startswith("glassport.")]
             actions = [e["gate"]["action"] for e in entries if "gate" in e]
             self.assertEqual(actions, ["blocked", "injected"])
             # the blocked frame is logged but was never sent to the server:
