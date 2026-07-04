@@ -37,6 +37,13 @@ classifiers = [
     "Topic :: System :: Monitoring",
 ]
 
+[project.optional-dependencies]
+# Runtime stays zero-dependency; this extra exists only because Windows
+# does not ship stdlib curses. `pip install glassport[tui]` gives Windows
+# users the TUI; everyone else needs nothing (the marker makes the extra
+# a no-op off Windows).
+tui = ["windows-curses; platform_system == 'Windows'"]
+
 [project.urls]
 Homepage = "https://github.com/Dennis-J-Carroll/glassport"
 Repository = "https://github.com/Dennis-J-Carroll/glassport"
