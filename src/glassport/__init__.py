@@ -8,4 +8,4 @@ audit for Model Context Protocol servers. Zero dependencies, pure
 stdlib, runs anywhere Python 3.10+ runs — including Termux.
 """
 
-__version__ = "0.5.0"
+__version__ = "0.6.2"
