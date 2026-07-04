@@ -108,6 +108,18 @@ The tap and the analysis are **separate by design**. The tap is dumb and fast �
 
 If it's not marked Built, it doesn't run yet.
 
+**Performance** (measured by `scripts/bench.py`, gated in CI): a 10k-frame
+(2.5 MB) session ingests at ~48k frames/s, runs the full detector pass at
+~30k frames/s, and renders its HTML report in ~2 s — on a laptop, stdlib
+only, no cache.
+
+### Used by
+
+- [glassport itself](https://github.com/Dennis-J-Carroll/glassport) — every
+  CI run taps, gates, audits, and red-teams its own wire (dogfooding is the
+  first deployment). Using glassport in production? Open a PR and add
+  yourself here.
+
 ---
 
 ## Quick start
