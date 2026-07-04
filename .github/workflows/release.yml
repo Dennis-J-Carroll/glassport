@@ -31,6 +31,8 @@ jobs:
           PYTHONPATH=src python dogfood/eval_advise_redteam.py
           PYTHONPATH=src python dogfood/eval_report_redteam.py
           PYTHONPATH=src python dogfood/eval_sarif_redteam.py
+          PYTHONPATH=src python dogfood/eval_server_redteam.py
+          PYTHONPATH=src python dogfood/eval_streaming_redteam.py
 
   build:
     needs: test
@@ -80,5 +82,29 @@ jobs:
           name: dist
           path: dist/
 
-      - name: Publish to PyPI (trusted publishing)
+      - name: Publish to PyPI (trusted publishing + PEP 740 attestations)
         uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          attestations: true
+
+  github-release:
+    # signed-release trail beside PyPI: auto-generated notes from PR
+    # titles, dist artifacts attached for the air-gapped install path
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Create GitHub release with generated notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes

@@ -678,6 +678,8 @@ class TestGateOverrideControl(unittest.TestCase):
             self.assertTrue(tui.toggle_gate_override(s))
             self.assertIs(tui.read_gate_override(s), True)
 
+    @unittest.skipUnless(os.name == "posix",
+                         "st_mode owner-bits are POSIX semantics")
     def test_written_file_is_owner_only(self):
         import stat
         with tempfile.TemporaryDirectory() as tmp:

@@ -8,6 +8,7 @@ needed because the transport is just lines in, lines out.
 Pure stdlib, run with:  python3 -m unittest tests.test_server
 """
 import io
+import os
 import json
 import tempfile
 import unittest
@@ -161,6 +162,8 @@ class TestServeTools(unittest.TestCase):
                 audit_roots=[Path(tmp)])
         self.assertTrue(resps[0]["result"]["isError"])
 
+    @unittest.skipUnless(os.name == "posix",
+                         "symlink creation needs privilege on Windows")
     def test_audit_server_symlink_escape_rejected(self):
         with tempfile.TemporaryDirectory() as tmp, \
                 tempfile.TemporaryDirectory() as outside:
