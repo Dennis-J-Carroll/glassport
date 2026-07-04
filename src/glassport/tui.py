@@ -363,6 +363,10 @@ def reduce(state: UIState, action: str, vm: ViewModel) -> UIState:
         state.overlay_open = True
         state.overlay_mode = "audit"
         state.overlay_scroll = 0
+    elif action == "help":
+        state.overlay_open = True
+        state.overlay_mode = "help"
+        state.overlay_scroll = 0
     elif action == "enter":
         if state.focus == "timeline" and vm.rows:
             state.overlay_open = True
@@ -373,6 +377,40 @@ def reduce(state: UIState, action: str, vm: ViewModel) -> UIState:
             state.selected = vm.findings[state.selected].row_index
             state.follow = False
     return state
+
+
+def build_help_lines() -> list:
+    """Every binding the reducer understands, grouped by category —
+    the footer permanently shows only seven of the eighteen (F-UX-1).
+    Category headers are (0, text) tuples so the overlay dims them;
+    entries are plain strings rendered in the base color. Pure data:
+    nothing here is attacker-controlled."""
+    return [
+        (0, "movement"),
+        "  j/k / arrows   move down / up",
+        "  g/G            jump top / bottom",
+        "  f              toggle follow mode",
+        (0, "selection"),
+        "  enter          expand timeline row / jump from finding",
+        "  tab            switch focus timeline <-> findings",
+        "  mouse          click selects · wheel scrolls · click closes overlay",
+        (0, "search"),
+        "  /              open incremental search",
+        "  n/N            next / previous match",
+        "  esc            cancel search (or close overlay)",
+        (0, "overlays"),
+        "  d              drift side panel",
+        "  D              drift full-screen",
+        "  a              audit & advisory overlay",
+        "  ?              this help",
+        (0, "tabs"),
+        "  ^T             cycle tabs",
+        "  ^W             close tab",
+        (0, "gate"),
+        "  !              toggle gate override (requires --gate-control)",
+        (0, "quit"),
+        "  q              quit (overlay/search close first)",
+    ]
 
 
 def build_drift_lines(path: Path, log_dir: Path) -> list[tuple[int, str]]:
@@ -590,6 +628,7 @@ KEYMAP = {
     ord("d"): "drift", ord("D"): "drift_full",
     ord("a"): "audit",
     ord("!"): "gate_toggle",
+    ord("?"): "help",
 }
 
 C_BASE, C_HOT, C_WARN, C_DIM, C_BAR, C_INFO = 1, 2, 3, 4, 5, 6
@@ -732,7 +771,7 @@ def _draw_dashboard(curses, scr, vm, state, tabs=None, drift_lines=None,
     else:
         _put(scr, h - 1, 0,
              " j/k move · enter expand · / search · tab focus · "
-             "f follow · ^T/^W tabs · q quit ",
+             "f follow · ^T/^W tabs · ? help · q quit ",
              _attr(curses, C_DIM, dim=True))
     scr.refresh()
 
@@ -829,6 +868,9 @@ def _dashboard_loop(curses, scr, tabs: Tabs,
             elif state.overlay_mode == "audit":
                 _draw_overlay(curses, scr, tab.audit_lines, state,
                               title=" audit & advisory — esc to close ")
+            elif state.overlay_mode == "help":
+                _draw_overlay(curses, scr, build_help_lines(), state,
+                              title=" help — esc to close ")
             else:
                 _draw_overlay(curses, scr,
                               format_overlay(tab.trace, state.selected),
@@ -838,7 +880,13 @@ def _dashboard_loop(curses, scr, tabs: Tabs,
                             read_gate_override(tab.path))
 
         key = scr.getch()
-        if key in (-1, curses.KEY_RESIZE):
+        if key == curses.KEY_RESIZE:
+            # the loop top repaints with the new size right away; a
+            # drag-resize delivers a storm of KEY_RESIZE events, so
+            # drain pending input to repaint once per storm (F-UX-3)
+            curses.flushinp()
+            continue
+        if key == -1:
             continue
         if key == getattr(curses, "KEY_MOUSE", None):
             try:
