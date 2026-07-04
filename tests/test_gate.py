@@ -16,6 +16,7 @@ import sys
 import tempfile
 import threading
 import time
+import os
 import unittest
 from pathlib import Path
 
@@ -169,7 +170,7 @@ class TestGateHold(unittest.TestCase):
             log.close()
             self.assertIn(b"anything", dst.getvalue())   # still forwarded
             entries = [json.loads(l) for l in
-                       (Path(tmp) / "s.jsonl").read_text().splitlines()]
+                       (Path(tmp) / "s.jsonl").read_text(encoding="utf-8").splitlines()]
             self.assertEqual(entries[0]["gate"]["action"], "gate_skipped")
 
 
@@ -227,6 +228,8 @@ class TestGateControl(unittest.TestCase):
             action, _, _ = self._gate(tmp).check_c2s(UNDECLARED_CALL)
             self.assertEqual(action, "block")
 
+    @unittest.skipUnless(os.name == "posix",
+                         "gate override requires POSIX uid/st_mode semantics")
     def test_disable_forwards_with_visible_marker(self):
         with tempfile.TemporaryDirectory() as tmp:
             g = self._gate(tmp)
@@ -237,6 +240,8 @@ class TestGateControl(unittest.TestCase):
             self.assertEqual(info["action"], "gate_disabled")
             self.assertEqual(info["tool"], "shadow_fetch")
 
+    @unittest.skipUnless(os.name == "posix",
+                         "gate override requires POSIX uid/st_mode semantics")
     def test_reenable_blocks_again(self):
         with tempfile.TemporaryDirectory() as tmp:
             g = self._gate(tmp)
@@ -245,6 +250,8 @@ class TestGateControl(unittest.TestCase):
             self._write_override(g, enforce=True)
             self.assertEqual(g.check_c2s(UNDECLARED_CALL)[0], "block")
 
+    @unittest.skipUnless(os.name == "posix",
+                         "gate override requires POSIX uid/st_mode semantics")
     def test_garbage_file_fails_closed(self):
         with tempfile.TemporaryDirectory() as tmp:
             g = self._gate(tmp)
@@ -252,6 +259,8 @@ class TestGateControl(unittest.TestCase):
             g.control_path.chmod(0o600)
             self.assertEqual(g.check_c2s(UNDECLARED_CALL)[0], "block")
 
+    @unittest.skipUnless(os.name == "posix",
+                         "chmod cannot loosen st_mode on Windows")
     def test_loose_permissions_fail_closed(self):
         with tempfile.TemporaryDirectory() as tmp:
             g = self._gate(tmp)
@@ -368,7 +377,10 @@ class TestGateEndToEnd(unittest.TestCase):
                 child.wait(timeout=10)
 
             log = next(Path(tmp).glob("*.jsonl")).read_text(encoding="utf-8")
-            entries = [json.loads(l) for l in log.splitlines()]
+            # wire entries only — the tap also writes a glassport.metrics
+            # self-observation line at session end (H1.09)
+            entries = [e for e in map(json.loads, log.splitlines())
+                       if not str(e.get("type", "")).startswith("glassport.")]
             actions = [e["gate"]["action"] for e in entries if "gate" in e]
             self.assertEqual(actions, ["blocked", "injected"])
             # the blocked frame is logged but was never sent to the server:

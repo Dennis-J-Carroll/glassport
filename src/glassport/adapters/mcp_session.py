@@ -57,11 +57,18 @@ def _iter_entries(source: Iterable[str]) -> Iterable[dict]:
         if not line:
             continue
         try:
-            yield json.loads(line)
+            entry = json.loads(line)
         except json.JSONDecodeError:
             # bare wire line — wrap it so the main loop can emit an event
             yield {"schema_version": "0.1", "seq": None, "ts": "",
                    "dir": None, "frame": None, "raw": line}
+            continue
+        if isinstance(entry, dict) and \
+                str(entry.get("type", "")).startswith("glassport."):
+            # tap self-observation (e.g. glassport.metrics) — not wire
+            # traffic; it must never appear in any analysis view
+            continue
+        yield entry
 
 
 class _TraceBuilder:

@@ -20,6 +20,7 @@ upload cleanly:
 from __future__ import annotations
 
 import json
+import os.path
 import posixpath
 from pathlib import Path
 from typing import Union
@@ -91,7 +92,9 @@ def _repo_uri(path: str, base: str) -> str:
     (the audited root, itself relative to the repo root) so GitHub code
     scanning annotates the right file. Absolute paths pass through."""
     p = (path or "").replace("\\", "/")
-    if not base or posixpath.isabs(p):
+    # os.path.isabs catches the platform's own absolute form (drive
+    # letters on Windows) that posixpath cannot see
+    if not base or posixpath.isabs(p) or os.path.isabs(path or ""):
         return p
     return posixpath.normpath(posixpath.join(base.replace("\\", "/"), p))
 

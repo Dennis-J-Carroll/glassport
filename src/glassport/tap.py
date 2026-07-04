@@ -115,6 +115,21 @@ class SessionLog:
         except Exception:
             pass  # logging is best-effort; the relay is sacred
 
+    def write_metrics(self, **fields) -> None:
+        """One self-observation line at session end (H1.09): what the tap
+        itself witnessed — frames seen, blocks, duration, bytes. Tagged
+        with "type": "glassport.metrics" so the adapter filters it out of
+        every analysis view; detector-side facts are computed offline by
+        `glassport health`, never asserted here. Never raises."""
+        try:
+            with self._lock:
+                entry = {"type": "glassport.metrics", "ts": _now_iso(),
+                         "frames_seen": self._seq, **fields}
+                entry.setdefault("log_bytes", self._fh.tell())
+                self._fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        except Exception:
+            pass  # metrics are best-effort; the relay is sacred
+
     def close(self) -> None:
         try:
             self._fh.close()
@@ -175,6 +190,12 @@ class Gate:
         this uid with no group/world write bits."""
         p = self.control_path
         if p is None:
+            return True
+        if os.name != "posix":
+            # Windows has no uid and st_mode is decorative — the
+            # owner/permission proof this reader requires cannot be
+            # expressed. Fail closed: enforcement stays ON and the
+            # override file is inert (documented in SECURITY.md).
             return True
         try:
             st = p.stat()
@@ -330,6 +351,7 @@ def pump_stderr(src, dst) -> None:
 def run_tap(server_cmd: list[str], log_dir: Path,
             gate: Gate | None = None,
             gate_controllable: bool = False) -> int:
+    session_start = time.time()
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     safe_name = "".join(c if c.isalnum() else "_" for c in server_cmd[0])[:32]
     log_path = log_dir / f"{stamp}_{safe_name}_{os.getpid()}.jsonl"
@@ -405,6 +427,9 @@ def run_tap(server_cmd: list[str], log_dir: Path,
     rc = child.wait()
     time.sleep(0.1)  # let pumps drain their last lines
     if log is not None:
+        log.write_metrics(
+            frames_blocked=gate.blocked_count if gate is not None else 0,
+            session_duration_s=round(time.time() - session_start, 3))
         log.close()
     log_note = str(log_path) if log is not None else "(logging disabled)"
     suffix = f"; blocked {gate.blocked_count} call(s)" \
@@ -607,10 +632,21 @@ def _cmd_advise(audit: str | None, session: str | None,
                               min_severity=min_severity, base=audit or "")
 
     if not write:
-        print(wrap_block(content))
+        # never let a cp1252 console kill the render — degrade the
+        # emoji, keep the findings (Windows default stdout is strict)
+        block = wrap_block(content)
+        try:
+            print(block)
+        except UnicodeEncodeError:
+            enc = getattr(sys.stdout, "encoding", None) or "utf-8"
+            print(block.encode(enc, "replace").decode(enc))
         return 0
 
     target = Path(write)
+    # explicit utf-8 both ways: the block contains non-ASCII and the
+    # platform default encoding (cp1252 on Windows) must never matter.
+    # Context managers ensure handles are released before the idempotent
+    # rewrite path re-opens the file (avoiding CI file-lock races).
     existing = ""
     if target.exists():
         with open(target, "r", encoding="utf-8") as fh:
@@ -657,6 +693,13 @@ glassport — passive MCP stdio proxy
                    (live curses inspector; no argument = session picker.
                     --audit adds the static scorecard to the `a` panel;
                     --gate-control lets `!` toggle a controllable gate)
+  prune:           glassport prune --older-than 30d [--log-dir DIR]
+                        [--apply] [--force] [--threshold N]
+                   (retention: dry-run by default; keeps logs carrying
+                    detector_error evidence unless --force)
+  health:          glassport health [--log-dir DIR] [--last N] [--json]
+                   (aggregate tap self-metrics: frames, blocks,
+                    detector errors across recent sessions)
 
 (`python3 glassport_tap.py ...` from a clone works identically.)
 """
@@ -740,6 +783,16 @@ def main(argv: list[str]) -> int:
         # live/replay curses inspector. Same lazy-import contract.
         from glassport import tui as tui_mod
         return tui_mod.main(argv[1:])
+
+    if argv[0] == "prune":
+        # retention for the log dir; dry-run by default. Lazy import.
+        from glassport import prune as prune_mod
+        return prune_mod.main(argv[1:])
+
+    if argv[0] == "health":
+        # tap self-metrics over recent sessions. Lazy import.
+        from glassport import health as health_mod
+        return health_mod.main(argv[1:])
 
     log_dir = DEFAULT_LOG_DIR
     if argv[0] == "--log-dir":

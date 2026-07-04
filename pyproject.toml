@@ -59,3 +59,6 @@ where = ["src"]
 # src-layout: tell the analyzer where the package lives so it resolves
 # `glassport.*` without depending on an editable install's .pth file.
 extraPaths = ["src"]
+
+[tool.setuptools.package-data]
+glassport = ["py.typed"]

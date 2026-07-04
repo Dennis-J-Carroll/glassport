@@ -202,6 +202,8 @@ class TestGateEdgeCases(unittest.TestCase):
 class TestAuditContainment(unittest.TestCase):
     """The audit must not escape the directory it was asked to read."""
 
+    @unittest.skipUnless(os.name == "posix",
+                         "symlink creation needs privilege on Windows")
     def test_audit_does_not_follow_file_symlinks_outside_root(self):
         # If an audited tree contains a symlink to a file outside the root,
         # the scanner must skip it. Reading through it would leak arbitrary
@@ -220,6 +222,8 @@ class TestAuditContainment(unittest.TestCase):
             # real.py should still be scanned
             self.assertEqual(report.profile["files_scanned"], 1)
 
+    @unittest.skipUnless(os.name == "posix",
+                         "symlink creation needs privilege on Windows")
     def test_audit_does_not_follow_directory_symlinks_outside_root(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "audit_root"
@@ -234,6 +238,8 @@ class TestAuditContainment(unittest.TestCase):
             self.assertNotIn("evil.py", {f.path for f in report.findings})
             self.assertEqual(report.profile["files_scanned"], 1)
 
+    @unittest.skipUnless(os.name == "posix",
+                         "chmod 0o000 does not deny reads on Windows")
     def test_audit_survives_permission_denied_file(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
