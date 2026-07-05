@@ -584,6 +584,15 @@ def render_text(report: Report) -> str:
                 out.append(f"      fix: {f.fix}")
     else:
         out.append("findings: none")
+    # H2.03: opt-in network-enriched findings, appended only when present so
+    # the default (offline) audit stays byte-identical. These never affect the
+    # score — they live in a separate channel below the scored findings.
+    if report.provenance:
+        out.append("provenance (network-enriched):")
+        for pf in report.provenance:
+            where = f" [{pf.ecosystem}:{pf.package}]" if pf.package else ""
+            out.append(f"  [{pf.severity}] {pf.rule}{where}")
+            out.append(f"      {pf.detail}")
     out.append(f"rubric:   v{report.rubric_version} · score = 100 − Σ "
                f"weight(rule), each rule deducted once · --rubric for "
                f"the full table")
@@ -591,14 +600,19 @@ def render_text(report: Report) -> str:
 
 
 def render_json(report: Report) -> str:
-    return json.dumps({
+    obj = {
         "rubric_version": report.rubric_version,
         "profile": report.profile,
         "score": report.score,
         "grade": report.grade,
         "deductions": report.deductions,
         "findings": [vars(f) for f in report.findings],
-    }, indent=2, ensure_ascii=False)
+    }
+    # H2.03: add the key only when non-empty so the default audit's JSON is
+    # byte-identical with and without --provenance.
+    if report.provenance:
+        obj["provenance"] = [vars(pf) for pf in report.provenance]
+    return json.dumps(obj, indent=2, ensure_ascii=False)
 
 
 def render_rubric() -> str:
@@ -627,6 +641,26 @@ def main(argv: list[str]) -> int:
     as_sarif = "--sarif" in args
     if as_sarif:
         args.remove("--sarif")
+    # H2.03 opt-in network enrichment. Off by default; the core audit below is
+    # unchanged and offline. --provenance-refresh / --provenance-cache imply it.
+    provenance = "--provenance" in args
+    if provenance:
+        args.remove("--provenance")
+    refresh = "--provenance-refresh" in args
+    if refresh:
+        args.remove("--provenance-refresh")
+        provenance = True
+    cache_dir = None
+    if "--provenance-cache" in args:
+        i = args.index("--provenance-cache")
+        try:
+            cache_dir = args[i + 1]
+            del args[i:i + 2]
+            provenance = True
+        except IndexError:
+            print("usage: audit.py <path> --provenance-cache <dir>",
+                  file=sys.stderr)
+            return 2
     if len(args) != 1 or args[0] in ("-h", "--help"):
         print("usage: audit.py <path> [--json|--sarif] | audit.py --rubric",
               file=sys.stderr)
@@ -637,6 +671,10 @@ def main(argv: list[str]) -> int:
         return 2
 
     report = audit_path(target)
+    if provenance:
+        from glassport.provenance import enrich
+        report.provenance = enrich(target, cache_dir=cache_dir,
+                                   refresh=refresh)
     if as_sarif:
         from glassport.sarif import render_sarif
         # base = the path as given, so result URIs resolve from repo root
