@@ -43,6 +43,11 @@ classifiers = [
 # users the TUI; everyone else needs nothing (the marker makes the extra
 # a no-op off Windows).
 tui = ["windows-curses; platform_system == 'Windows'"]
+# Development-only tooling. Never pulled by `pip install glassport` — the
+# runtime stays zero-dependency. `coverage` powers the opt-in ci-coverage.yml
+# gate; `hypothesis` is provisioned here for the H2.06 property-based validator
+# tests (the dev-dep group is introduced in H1.08; those tests come later).
+dev = ["coverage", "hypothesis"]
 
 [project.urls]
 Homepage = "https://github.com/Dennis-J-Carroll/glassport"

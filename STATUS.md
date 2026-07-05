@@ -23,6 +23,7 @@ Source is the truth; this is the index.
 | Custom-PII plugin registry | `detectors.py` | consumer-extensible patterns separate from built-ins: `register_pii_pattern()`, `load_pii_patterns_from_json()`, `GLASSPORT_PII_PATTERNS` env autoload |
 | Named validators | `detectors.py` | precision menu: `luhn`/`ssn`/`entropy`/`entropy_high`/`entropy_auto` (per-charset) + checksum `iban`/`aba` + crypto `base58`/`jwt`/`uuid4` |
 | Agent advisory (`advise`) | `advise.py` / `tap.py` | folds audit Report + runtime annotations into a fenced agent-md block; stdout or `--write` |
+| Coverage gate + e2e (H1.08) | `.github/workflows/ci-coverage.yml` / `tests/test_e2e_filesystem.py` | opt-in `coverage` job (core pipeline `--fail-under=85`, whole-repo informational) + wire-reality test driving real `@modelcontextprotocol/server-filesystem` through `glassport wrap`; skips cleanly without node ≥18 |
 
 ## Tier 2 — Built but NOT shipped to PyPI
 
@@ -92,6 +93,14 @@ Roughly in dependency order — earlier unlocks later.
 
 ## Next action
 
-Repo and PyPI in sync at **0.6.3**. Tier-3 #1 (plugin registry) and Tier-3 #2
-(`advise`) shipped. Pick a Tier-3 item — recommended next: **#1 Network-enriched
-audit** (independent, medium) before the large streaming rearchitecture (#3).
+**Horizon 1 is complete.** H1.08 (coverage.py opt-in dev-dep + e2e integration
+test) landed on `feat/h1-08-coverage-e2e` — the last open H1 item; H1.01–H1.07
+and H1.09–H1.10 were already shipped. Suite: 527 tests (e2e skips without
+node ≥18); core-pipeline coverage 94% (gate ≥85%).
+
+Cut **v0.6.4** to release the H1 close-out (tag push → trusted publishing
+regenerates the CHANGELOG from tag annotations), then move to **Horizon 2**.
+Recommended H2 entry point: **H2.03 Network-enriched audit** (opt-in
+`--provenance`, independent, ~3 weeks) before the larger streamable-HTTP
+rearchitecture (H2.01). The `hypothesis` dev-dep is already provisioned for
+**H2.06** property-based validator tests whenever that is picked up.
