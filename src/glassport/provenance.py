@@ -153,8 +153,15 @@ def _pyproject_names_fallback(text: str) -> list[str]:
         if opens:
             in_array = True
         if in_array:
-            names.extend(re.findall(r"""["']([A-Za-z0-9][A-Za-z0-9._-]*)""",
-                                    line))
+            # Match each FULL quoted element and take the requirement name from
+            # its start. Matching whole spans (not quote+name) means an inner
+            # environment-marker literal like `'Windows'` in
+            # "windows-curses; platform_system == 'Windows'" is consumed inside
+            # the element and never mistaken for a second dependency.
+            for m in re.finditer(r"""(["'])(.*?)\1""", line):
+                nm = _REQ_NAME.match(m.group(2))
+                if nm:
+                    names.append(nm.group(1))
         if in_array and "]" in line:
             in_array = False
     return names

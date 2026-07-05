@@ -24,6 +24,7 @@ Source is the truth; this is the index.
 | Named validators | `detectors.py` | precision menu: `luhn`/`ssn`/`entropy`/`entropy_high`/`entropy_auto` (per-charset) + checksum `iban`/`aba` + crypto `base58`/`jwt`/`uuid4` |
 | Agent advisory (`advise`) | `advise.py` / `tap.py` | folds audit Report + runtime annotations into a fenced agent-md block; stdout or `--write` |
 | Coverage gate + e2e (H1.08) | `.github/workflows/ci-coverage.yml` / `tests/test_e2e_filesystem.py` | opt-in `coverage` job (core pipeline `--fail-under=85`, whole-repo informational) + wire-reality test driving real `@modelcontextprotocol/server-filesystem` through `glassport wrap`; skips cleanly without node ≥18 |
+| Network-enriched audit (H2.03) | `provenance.py` / `audit.py` | opt-in `audit --provenance` (npm+PyPI direct deps): not-in-registry/deprecated/stale/single-maintainer/unsigned. Separate channel — default audit byte-identical and unscored; stdlib urllib; never-expire `--provenance-cache` |
 
 ## Tier 2 — Built but NOT shipped to PyPI
 
@@ -44,8 +45,13 @@ quote-or-redact hardening (PR #21) + the P1–P11 grill (PR #22).
 
 Roughly in dependency order — earlier unlocks later.
 
-1. **Network-enriched audit** *(medium)* — opt-in npm/PyPI/GitHub provenance
-   lookups; kept off the default path so the core audit stays offline/reproducible.
+1. ~~**Network-enriched audit** *(medium)* — opt-in npm/PyPI provenance
+   lookups; kept off the default path so the core audit stays offline/reproducible.~~
+   ✅ Shipped (H2.03) — `audit --provenance` (npm+PyPI direct deps);
+   `provenance.py` is the only network-touching module; separate
+   `Report.provenance` channel keeps the default audit byte-identical and
+   unscored; stdlib `urllib` (zero-dep); never-expire `--provenance-cache` for
+   air-gapped re-runs. GitHub provenance deferred to a later increment.
 2. ~~**Agent-advisory output (`advise`)** *(small)* — emit a `CLAUDE.md` /
    `AGENTS.md` / `GEMINI.md` "observations worth noting" section from a run's
    findings, so the next agent session inherits what the watchdog saw. A fourth
@@ -93,14 +99,14 @@ Roughly in dependency order — earlier unlocks later.
 
 ## Next action
 
-**Horizon 1 is complete.** H1.08 (coverage.py opt-in dev-dep + e2e integration
-test) landed on `feat/h1-08-coverage-e2e` — the last open H1 item; H1.01–H1.07
-and H1.09–H1.10 were already shipped. Suite: 527 tests (e2e skips without
-node ≥18); core-pipeline coverage 94% (gate ≥85%).
+**Horizon 1 complete; first H2 item shipped.** H1.08 (coverage gate + e2e,
+PR #48) is merged to `main`; **H2.03 network-enriched audit** (`audit
+--provenance`, npm+PyPI) is on `feat/h2-03-network-enriched-audit`. Tier-3 #1
+(plugin registry), #2 (`advise`), and network-enriched audit are all done.
 
-Cut **v0.6.4** to release the H1 close-out (tag push → trusted publishing
-regenerates the CHANGELOG from tag annotations), then move to **Horizon 2**.
-Recommended H2 entry point: **H2.03 Network-enriched audit** (opt-in
-`--provenance`, independent, ~3 weeks) before the larger streamable-HTTP
-rearchitecture (H2.01). The `hypothesis` dev-dep is already provisioned for
-**H2.06** property-based validator tests whenever that is picked up.
+Optionally cut **v0.6.4** to release the H1 close-out (tag push → trusted
+publishing regenerates the CHANGELOG from tag annotations). Next H2 candidates:
+**streamable-HTTP interception** (H2.01, large — the streaming-detector
+rearchitecture that also unblocks remote MCP), or the smaller **property-based
+validator tests** (H2.06, using the `hypothesis` dev-dep from H1.08). GitHub
+provenance is the natural follow-up increment to what just shipped.

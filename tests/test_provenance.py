@@ -111,6 +111,15 @@ class TestDiscoverDeps(unittest.TestCase):
         names = {d.name for d in discover_deps(root)}
         self.assertEqual(names, {"httpx", "rich", "pytest", "coverage"})
 
+    def test_pyproject_env_marker_literal_not_a_dep(self):
+        # Regression: an environment-marker string literal ('Windows') must not
+        # be extracted as a dependency name (3.10 fallback path).
+        root = self._root({"pyproject.toml":
+            '[project.optional-dependencies]\n'
+            'tui = ["windows-curses; platform_system == \'Windows\'"]\n'})
+        names = {d.name for d in discover_deps(root)}
+        self.assertEqual(names, {"windows-curses"})
+
     def test_pyproject_poetry(self):
         root = self._root({"pyproject.toml":
             '[tool.poetry.dependencies]\n'
