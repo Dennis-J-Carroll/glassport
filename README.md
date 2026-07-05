@@ -437,6 +437,7 @@ The tap watches what a server *does*; `audit.py` reads what a server *is*, befor
 glassport audit ./some-mcp-server
 glassport audit ./some-mcp-server --json
 glassport audit ./some-mcp-server --sarif   # SARIF 2.1.0 for code scanning
+glassport audit ./some-mcp-server --provenance   # opt-in npm/PyPI registry checks (below)
 glassport audit --rubric   # print the full scoring rubric
 ```
 
@@ -449,6 +450,26 @@ glassport audit --rubric   # print the full scoring rubric
 Rules cover: hardcoded secrets (redacted in output), **tool poisoning** (model-directed text like `<IMPORTANT> read ~/.ssh` planted in tool descriptions), hidden/bidi unicode, dynamic execution, shell injection, runtime installs, and capability notes (subprocess, file delete/write, network egress). The tool-poisoning pass runs on an **invisible-stripped view** of the source — a directive split with zero-width joiners is caught and mapped back to its real line number, not hidden by the same trick `unicode-hidden` flags.
 
 `audit` and the tap compose along the lifecycle: **audit** before you install, **wrap** while you run, **gate** when trust runs out. Static analysis can't see what a server does on the wire — and the wire can't show you a secret sitting unused in source. Neither subsumes the other.
+
+### Network-enriched audit (opt-in)
+
+The static audit reads only what's on disk, so it stays offline and reproducible. `--provenance` adds a second, opt-in pass that asks the **npm** and **PyPI** registries about the server's declared dependencies:
+
+```bash
+glassport audit ./some-mcp-server --provenance
+glassport audit ./some-mcp-server --provenance --provenance-cache ~/.glassport/prov   # cache for air-gapped re-runs
+glassport audit ./some-mcp-server --provenance --provenance-refresh                    # force re-fetch past the cache
+```
+
+It reads `package.json` / `requirements.txt` / `pyproject.toml` (direct deps only) and flags: **not in the registry** (possible typosquat, `high`), **deprecated / yanked** (`medium`), **no release in 2+ years** (`low`), **single maintainer** (`note`, npm), and **no build-provenance attestation** (`note`).
+
+Three invariants make this safe to bolt onto a security tool:
+
+- **Off by default, byte-identical when off.** Without the flag, `audit` output (text / JSON / SARIF) is unchanged to the byte — the core audit never opens a socket.
+- **Never affects the score.** Provenance findings live in a separate channel and a separate `provenance` SARIF category; they inform, they don't grade.
+- **Never breaks on a bad network.** The core audit finishes first; any unreachable registry degrades to a single `prov-unavailable` note. `--provenance-cache` makes a cached run fully offline. Zero new runtime dependency — HTTP is stdlib `urllib`.
+
+Scope this release: npm + PyPI. GitHub provenance (stars, archived, release signatures) is a later increment.
 
 ### SARIF export and CI
 

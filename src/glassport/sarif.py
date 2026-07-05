@@ -136,8 +136,50 @@ def render_sarif(report: Report, base: str = "") -> str:
             "properties": {"severity": f.severity, "count": f.count},
         })
 
+    # H2.03: opt-in network-enriched findings render as a separate `provenance`
+    # category, appended only when present so a no-`--provenance` audit is
+    # byte-identical. `pf.detail` is glassport-authored, but `pf.package` /
+    # `pf.manifest` come from the audited (possibly hostile) manifest, so both
+    # are scrubbed exactly like the static-rule path above.
+    for pf in getattr(report, "provenance", None) or []:
+        rule_id = f"provenance/{pf.rule}"
+        if rule_id not in rules:
+            rules[rule_id] = {
+                "id": rule_id,
+                "name": pf.rule,
+                "shortDescription": {
+                    "text": _PROV_RULE_TEXT.get(pf.rule, pf.rule)},
+                "defaultConfiguration": {"level": _sarif_level(pf.severity)},
+                "properties": {"category": "provenance"},
+            }
+        pkg = clamp_text(neutralize_text(pf.package)) if pf.package else ""
+        msg = f"{pf.ecosystem}:{pkg} — {pf.detail}" if pkg else pf.detail
+        locations = []
+        if pf.manifest:
+            locations = [{"physicalLocation": {"artifactLocation": {
+                "uri": redact_secrets(_repo_uri(pf.manifest, base))}}}]
+        results.append({
+            "ruleId": rule_id,
+            "level": _sarif_level(pf.severity),
+            "message": {"text": clamp_text(msg)},
+            "properties": {"category": "provenance",
+                           "ecosystem": pf.ecosystem, "package": pkg},
+            "locations": locations,
+        })
+
     return _sarif_document(list(rules.values()), results,
                            {"score": report.score, "grade": report.grade})
+
+
+# provenance rule id -> SARIF shortDescription (glassport's own words)
+_PROV_RULE_TEXT = {
+    "prov-not-in-registry": "Declared dependency not found in its registry",
+    "prov-deprecated": "Dependency's latest release is deprecated/yanked",
+    "prov-stale": "Dependency has no recent release",
+    "prov-single-maintainer": "Dependency has a single maintainer",
+    "prov-unsigned": "Dependency's latest release has no provenance attestation",
+    "prov-unavailable": "Some dependencies could not be checked",
+}
 
 
 # subcategory -> human short description; fallback humanizes the slug

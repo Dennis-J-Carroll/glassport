@@ -673,8 +673,12 @@ glassport — passive MCP stdio proxy
   gate:            glassport gate [--controllable] [--log-dir DIR] -- <server command...>
                    (active: blocks tools/call outside the declared surface;
                     --controllable lets `tui --gate-control` toggle it)
-  audit:           glassport audit <path> [--json] | audit --rubric
-                   (static, pre-deployment: reads source, never runs it)
+  audit:           glassport audit <path> [--json|--sarif]
+                        [--provenance [--provenance-cache DIR]
+                         [--provenance-refresh]] | audit --rubric
+                   (static, pre-deployment: reads source, never runs it.
+                    --provenance: opt-in npm/PyPI registry enrichment, off
+                    by default so the core audit stays offline/reproducible)
   summarize:       glassport summarize [--json|--sarif] <session.jsonl>
   detect:          glassport detect [--sarif] <session.jsonl>
                    (run all behavioral detectors; exit 1 if findings,
