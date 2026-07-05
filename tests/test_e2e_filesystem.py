@@ -50,6 +50,15 @@ _MIN_NODE_MAJOR = 18
 
 
 def _usable_npx() -> bool:
+    # POSIX only. On Windows `npx` is `npx.cmd`, a batch file: shutil.which
+    # resolves it (PATHEXT), but the tap spawns the child server with a
+    # non-shell subprocess (a shell spawn in the tap would be a security
+    # regression), and CreateProcess cannot run a .cmd without a shell. So
+    # "which finds npx" would be true while the actual spawn fails — the
+    # precondition must exclude Windows, like the suite's other POSIX-only
+    # tests. The e2e still runs for real on ubuntu in ci-coverage.yml.
+    if os.name == "nt":
+        return False
     if not shutil.which("npx") or not shutil.which("node"):
         return False
     try:
@@ -86,8 +95,10 @@ def _frames(sandbox: str) -> list[dict]:
     ]
 
 
-@unittest.skipUnless(_usable_npx(),
-                     f"node>={_MIN_NODE_MAJOR} + npx not available; e2e skipped")
+@unittest.skipUnless(
+    _usable_npx(),
+    f"POSIX + node>={_MIN_NODE_MAJOR} + npx required; e2e skipped "
+    "(Windows spawns npx via a shell the tap deliberately avoids)")
 class TestE2EFilesystemServer(unittest.TestCase):
     def test_wrap_captures_real_handshake_and_call(self):
         with tempfile.TemporaryDirectory() as workdir:
