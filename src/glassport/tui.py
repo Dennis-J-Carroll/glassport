@@ -631,7 +631,7 @@ KEYMAP = {
     ord("?"): "help",
 }
 
-C_BASE, C_HOT, C_WARN, C_DIM, C_BAR, C_INFO = 1, 2, 3, 4, 5, 6
+C_BASE, C_HOT, C_WARN, C_DIM, C_BAR, C_INFO, C_SEV2 = 1, 2, 3, 4, 5, 6, 7
 
 
 def _init_colors(curses):
@@ -644,6 +644,10 @@ def _init_colors(curses):
     curses.init_pair(C_DIM, curses.COLOR_WHITE, -1)
     curses.init_pair(C_BAR, curses.COLOR_BLACK, curses.COLOR_GREEN)
     curses.init_pair(C_INFO, curses.COLOR_GREEN, -1)
+    if curses.COLORS >= 256:
+        curses.init_pair(C_SEV2, 208, -1)
+    else:
+        curses.init_pair(C_SEV2, curses.COLOR_YELLOW, -1)
 
 
 def _attr(curses, pair, bold=False, dim=False):
@@ -658,6 +662,8 @@ def _attr(curses, pair, bold=False, dim=False):
 def _row_attr(curses, row):
     if row.severity >= 3:
         return _attr(curses, C_HOT, bold=True)
+    if row.severity == 2:
+        return _attr(curses, C_SEV2)
     if row.severity >= 1:
         return _attr(curses, C_WARN)
     if row.is_info:
@@ -678,6 +684,8 @@ def _put(scr, y, x, text, attr=0):
 def _drift_attr(curses, sev):
     if sev >= 3:
         return _attr(curses, C_HOT, bold=True)
+    if sev == 2:
+        return _attr(curses, C_SEV2)
     if sev >= 1:
         return _attr(curses, C_WARN)
     return _attr(curses, C_DIM, dim=True)
