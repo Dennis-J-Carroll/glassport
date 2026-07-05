@@ -34,7 +34,7 @@ import json
 import os
 import re
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 RUBRIC_VERSION = "0.3"          # v0.3: capability-note tier (0 weight)
@@ -157,6 +157,10 @@ class Report:
     score: int
     grade: str
     rubric_version: str = RUBRIC_VERSION
+    # H2.03: opt-in network-enriched findings. Holds provenance.ProvenanceFinding.
+    # Default audit_path() never populates it, so every existing render path
+    # stays byte-identical. Untyped list to avoid an import cycle.
+    provenance: list = field(default_factory=list)
 
 
 # ─────────────────────────────────────────────────────────────────
