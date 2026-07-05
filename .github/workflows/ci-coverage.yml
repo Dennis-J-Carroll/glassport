@@ -1,0 +1,67 @@
+name: Coverage (opt-in)
+
+# Deliberately SEPARATE from ci.yml. The main test matrix stays stdlib-only,
+# straight-from-a-clone (the zero-dependency doctrine). This workflow is the
+# one place coverage.py is allowed, and the one place node is set up so the
+# end-to-end test (roadmap H1.08) can drive a real MCP server. Nothing here
+# runs in the clone-and-run path.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  coverage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # Node is required only for the e2e test, which spawns the official
+      # @modelcontextprotocol/server-filesystem via npx. Without it the e2e
+      # skips (skipUnless), so setup-node is what makes it actually run here.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      # The dev extra provides coverage + hypothesis. tests/__init__.py puts
+      # src/ ahead of site-packages on sys.path, so `--source=src/glassport`
+      # matches the executed files with no editable-install juggling.
+      - name: Install dev extra
+        run: pip install .[dev]
+
+      # The e2e participates here (node present) and additionally drives real
+      # bytes through the mcp_session adapter and InteractionTrace.
+      - name: Run suite under coverage
+        env:
+          PYTHONIOENCODING: utf-8
+        run: |
+          python -m coverage run --source=src/glassport \
+            -m unittest discover -s tests -t .
+
+      # HARD GATE — the core detection/analysis pipeline. These modules decide
+      # whether the wire is honest; correctness there is load-bearing, so they
+      # must not regress below 85%. The thin CLI (tap.py) and the UI layer
+      # (tui/console/server) are intentionally excluded — gating them would
+      # penalize the doctrine's judgment/plumbing separation and force
+      # low-value UI tests.
+      - name: Core pipeline coverage gate (>=85%)
+        run: |
+          CORE="src/glassport/detectors.py,src/glassport/audit.py,src/glassport/sarif.py,src/glassport/interaction_trace.py,src/glassport/adapters/mcp_session.py,src/glassport/adapters/streaming.py,src/glassport/advise.py,src/glassport/health.py,src/glassport/prune.py"
+          python -m coverage report --fail-under=85 --include="$CORE"
+
+      # INFORMATIONAL — whole-package coverage, including the CLI/UI layer.
+      # Never fails the build; documents the gap so it stays visible without
+      # blocking merges on it.
+      - name: Whole-package coverage (informational)
+        if: always()
+        run: |
+          echo "## Coverage (whole package, informational)" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          python -m coverage report >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          python -m coverage report
