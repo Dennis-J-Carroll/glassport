@@ -236,5 +236,44 @@ class TestEnvAutoload(PluginRegistryBase):
         self.assertIn("acme_token", self.categories(anns))
 
 
+AZURE_EXAMPLE = Path(__file__).resolve().parent.parent / "examples" / "pii-azure.json"
+
+
+class TestAzurePiiPattern(PluginRegistryBase):
+    """Load the opt-in Azure PII pattern and verify it detects real-shaped
+    secrets while culling low-entropy lookalikes."""
+
+    @classmethod
+    def setUpClass(cls):
+        assert AZURE_EXAMPLE.is_file(), f"missing {AZURE_EXAMPLE}"
+
+    def setUp(self):
+        super().setUp()
+        self.n = detectors.load_pii_patterns_from_json(str(AZURE_EXAMPLE))
+        self.assertEqual(self.n, 1)
+
+    def test_detects_real_shaped_secret(self):
+        # A typical Azure service principal secret: 34 chars, mixed case,
+        # digits, special chars — high entropy.
+        secret = "aB3dE6fG8hJ0kL2mN4pR7tV9wX1zY4cA7vC"
+        anns = self.exfil({"client_secret": secret})
+        self.assertIn("azure_client_secret", self.categories(anns))
+
+    def test_culls_low_entropy_lookalike(self):
+        # 34 chars of the same character: low entropy, must be culled.
+        low = "a" * 34
+        anns = self.exfil({"client_secret": low})
+        self.assertNotIn("azure_client_secret", self.categories(anns))
+
+    def test_redaction_is_non_reversible(self):
+        secret = "xK9mN4vR7tB6nW3cP0yH5jG8fA2sD1qE5rT"
+        anns = self.exfil({"client_secret": secret})
+        f = next(a for a in anns
+                 if a.metadata.get("pii_category") == "azure_client_secret")
+        self.assertNotIn(secret, f.explanation)
+        self.assertIn("redact", f.explanation.lower())
+        self.assertNotIn(secret, json.dumps(f.metadata))
+
+
 if __name__ == "__main__":
     unittest.main()

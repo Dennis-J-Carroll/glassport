@@ -1,0 +1,9 @@
+[
+  {
+    "category": "azure_client_secret",
+    "severity": 3,
+    "pattern": "(?<![A-Za-z0-9/+=])([A-Za-z0-9_~.-]{30,40})(?![A-Za-z0-9/+=])",
+    "validator": "entropy_auto",
+    "description": "Azure service principal client secret (opt-in: broad format regex, entropy-gated; matches high-entropy 30-40 char strings typical of Azure AD client secrets)"
+  }
+]
