@@ -322,6 +322,36 @@ class TestServeToolSecurity(unittest.TestCase):
 class TestTapFaultIsolation(unittest.TestCase):
     """The relay is sacred: logging failures must not kill the session."""
 
+    def test_run_tap_unwritable_log_dir_message(self):
+        """The error message must name the directory and suggest the fix."""
+        with tempfile.TemporaryDirectory() as tmp:
+            bad_log = Path(tmp) / "not_a_dir"
+            bad_log.write_text("i am a file, not a directory\n")
+            script = Path(tmp) / "runner.py"
+            script.write_text(
+                '''from glassport.tap import run_tap
+import sys
+from pathlib import Path
+rc = run_tap([sys.executable, '-c',
+              'import sys; sys.stdout.write("hello\\\\n")'],
+             log_dir=Path(sys.argv[1]), gate=None)
+sys.exit(rc)
+''',
+                encoding="utf-8")
+            env = {**os.environ,
+                   "PYTHONPATH": str(Path(__file__).resolve().parent.parent
+                                    / "src")}
+            child = subprocess.run(
+                [sys.executable, str(script), str(bad_log)],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10,
+                env=env)
+            stderr = child.stderr.decode("utf-8", errors="replace")
+            self.assertIn("logging disabled", stderr)
+            self.assertIn(str(bad_log), stderr)
+            self.assertIn("GLASSPORT_LOG_DIR", stderr)
+            self.assertIn("relay continues", stderr)
+            self.assertEqual(child.returncode, 0)
+
     def test_run_tap_survives_unwritable_log_dir(self):
         # If the log directory cannot be created, the tap should still spawn
         # the child and relay traffic (even if it cannot log). We run run_tap
