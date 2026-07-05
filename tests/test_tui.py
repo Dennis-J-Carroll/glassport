@@ -829,5 +829,107 @@ class TestHelpOverlay(unittest.TestCase):
         self.assertIn("? help", src)
 
 
+class FakeCursesColor:
+    """Minimal curses mock for testing color-related functions."""
+    def __init__(self, colors=8):
+        self.COLORS = colors
+        self.COLOR_BLACK = 0
+        self.COLOR_RED = 1
+        self.COLOR_GREEN = 2
+        self.COLOR_YELLOW = 3
+        self.COLOR_WHITE = 7
+        self.A_BOLD = 1 << 8
+        self.A_DIM = 1 << 9
+        self.pairs = {}
+        self._has_colors = True
+
+    def has_colors(self):
+        return self._has_colors
+
+    def use_default_colors(self):
+        pass
+
+    def init_pair(self, pair, fg, bg):
+        self.pairs[pair] = (fg, bg)
+
+    def color_pair(self, pair):
+        return pair * 10
+
+
+class FakeTimelineRow:
+    def __init__(self, severity=0, is_info=False):
+        self.severity = severity
+        self.is_info = is_info
+
+
+class TestColorSystem(unittest.TestCase):
+    """_init_colors, _row_attr, and _drift_attr: color pair selection
+    and 256-color palette extension."""
+
+    def test_init_colors_256_registers_orange_for_sev2(self):
+        cc = FakeCursesColor(colors=256)
+        tui._init_colors(cc)
+        self.assertEqual(cc.pairs[tui.C_SEV2], (208, -1))
+
+    def test_init_colors_fallback_uses_yellow_for_sev2(self):
+        cc = FakeCursesColor(colors=8)
+        tui._init_colors(cc)
+        self.assertEqual(cc.pairs[tui.C_SEV2], (3, -1))
+
+    def test_init_colors_no_color_skips_init(self):
+        cc = FakeCursesColor(colors=8)
+        cc._has_colors = False
+        tui._init_colors(cc)
+        self.assertEqual(cc.pairs, {})
+
+    def test_row_attr_sev2_uses_sev2_pair(self):
+        cc = FakeCursesColor(colors=256)
+        tui._init_colors(cc)
+        row = FakeTimelineRow(severity=2)
+        attr = tui._row_attr(cc, row)
+        self.assertEqual(attr, tui.C_SEV2 * 10)
+
+    def test_row_attr_sev1_uses_warn_pair(self):
+        cc = FakeCursesColor(colors=256)
+        tui._init_colors(cc)
+        row = FakeTimelineRow(severity=1)
+        attr = tui._row_attr(cc, row)
+        self.assertEqual(attr, tui.C_WARN * 10)
+
+    def test_row_attr_sev0_uses_base_pair(self):
+        cc = FakeCursesColor(colors=256)
+        tui._init_colors(cc)
+        row = FakeTimelineRow(severity=0)
+        attr = tui._row_attr(cc, row)
+        self.assertEqual(attr, tui.C_BASE * 10)
+
+    def test_row_attr_info_is_bold(self):
+        cc = FakeCursesColor(colors=256)
+        tui._init_colors(cc)
+        row = FakeTimelineRow(severity=0, is_info=True)
+        attr = tui._row_attr(cc, row)
+        self.assertTrue(attr & cc.A_BOLD)
+        self.assertEqual(attr & 0xFF, tui.C_INFO * 10)
+
+    def test_drift_attr_sev2_uses_sev2_pair(self):
+        cc = FakeCursesColor(colors=256)
+        tui._init_colors(cc)
+        attr = tui._drift_attr(cc, 2)
+        self.assertEqual(attr, tui.C_SEV2 * 10)
+
+    def test_drift_attr_sev1_uses_warn_pair(self):
+        cc = FakeCursesColor(colors=256)
+        tui._init_colors(cc)
+        attr = tui._drift_attr(cc, 1)
+        self.assertEqual(attr, tui.C_WARN * 10)
+
+    def test_drift_attr_sev0_is_dim(self):
+        cc = FakeCursesColor(colors=256)
+        tui._init_colors(cc)
+        attr = tui._drift_attr(cc, 0)
+        self.assertTrue(attr & cc.A_DIM)
+        self.assertEqual(attr & 0xFF, tui.C_DIM * 10)
+
+
 if __name__ == "__main__":
     unittest.main()
