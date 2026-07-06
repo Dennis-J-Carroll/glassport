@@ -363,8 +363,9 @@ def run_tap(server_cmd: list[str], log_dir: Path,
     try:
         log = SessionLog(log_path)
     except OSError as exc:
-        print(f"[glassport] logging disabled ({exc}); relay continues",
-              file=sys.stderr)
+        print(f"[glassport] logging disabled: cannot write to {log_dir} "
+              f"({exc}) -- check permissions or set $GLASSPORT_LOG_DIR; "
+              f"relay continues", file=sys.stderr)
         log = None
 
     # Announce on stderr only — stdout belongs to the protocol.
