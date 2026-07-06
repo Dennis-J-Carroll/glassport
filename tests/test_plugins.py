@@ -236,5 +236,84 @@ class TestEnvAutoload(PluginRegistryBase):
         self.assertIn("acme_token", self.categories(anns))
 
 
+AZURE_EXAMPLE = Path(__file__).resolve().parent.parent / "examples" / "pii-azure.json"
+
+
+class TestAzurePiiPattern(PluginRegistryBase):
+    """Load the opt-in PII pattern and verify it detects high-entropy tokens
+    while culling low-entropy lookalikes and avoiding double-fire on
+    structured tokens."""
+
+    CATEGORY = "high_entropy_token_30_40"
+
+    @classmethod
+    def setUpClass(cls):
+        assert AZURE_EXAMPLE.is_file(), f"missing {AZURE_EXAMPLE}"
+
+    def setUp(self):
+        super().setUp()
+        self.n = detectors.load_pii_patterns_from_json(str(AZURE_EXAMPLE))
+        self.assertEqual(self.n, 1)
+
+    def test_detects_real_shaped_secret(self):
+        # A typical opaque client secret: 34 chars, mixed case,
+        # digits, special chars — high entropy.
+        secret = "aB3dE6fG8hJ0kL2mN4pR7tV9wX1zY4cA7vC"
+        anns = self.exfil({"client_secret": secret})
+        self.assertIn(self.CATEGORY, self.categories(anns))
+
+    def test_culls_low_entropy_lookalike(self):
+        # 34 chars of the same character: low entropy, must be culled.
+        low = "a" * 34
+        anns = self.exfil({"client_secret": low})
+        self.assertNotIn(self.CATEGORY, self.categories(anns))
+
+    def test_characterises_hex_digest(self):
+        # A SHA-1 hex digest (40 hex chars) matches the format regex and
+        # clears entropy_auto's hex tier. This is expected — the pattern is
+        # a broad net labelled honestly as high_entropy_token_30_40.
+        sha1 = "da39a3ee5e6b4b0d3255bfef95601890afd80709"
+        anns = self.exfil({"hash": sha1})
+        self.assertIn(self.CATEGORY, self.categories(anns))
+
+    def test_culls_outside_charset(self):
+        # A string with a character outside [A-Za-z0-9_~.-] embedded inside the
+        # 30-40 char window is rejected by the regex regardless of entropy.
+        anns = self.exfil({"weird": "aB3dE6fG8hJ0kL2mN4pR!tV9wX1zY4cA7vC"})
+        self.assertNotIn(self.CATEGORY, self.categories(anns))
+
+    def test_culls_short_string(self):
+        # A string shorter than 30 chars doesn't match the length constraint.
+        anns = self.exfil({"short": "aB3dE6fG8hJ0kL2mN"})
+        self.assertNotIn(self.CATEGORY, self.categories(anns))
+
+    def test_suppressed_inside_jwt(self):
+        # high_entropy_token_30_40 is in _GENERIC_SECRETS, so a hit that
+        # falls inside a JWT should be suppressed (no double-fire).
+        # The JWT payload contains our test secret as a claim value so the
+        # entropy match span is nested inside the JWT span.
+        import base64, json
+        secret = "aB3dE6fG8hJ0kL2mN4pR7tV9wX1zY4cA7vC"
+        payload = base64.urlsafe_b64encode(
+            json.dumps({"client_secret": secret}).encode()
+        ).rstrip(b"=").decode()
+        header = base64.urlsafe_b64encode(
+            json.dumps({"alg": "HS256"}).encode()
+        ).rstrip(b"=").decode()
+        sig = "x" * 20  # dummy signature, not validated by the span check
+        jwt = f"{header}.{payload}.{sig}"
+        anns = self.exfil({"token": jwt})
+        self.assertNotIn(self.CATEGORY, self.categories(anns))
+
+    def test_redaction_is_non_reversible(self):
+        secret = "xK9mN4vR7tB6nW3cP0yH5jG8fA2sD1qE5rT"
+        anns = self.exfil({"client_secret": secret})
+        f = next(a for a in anns
+                 if a.metadata.get("pii_category") == self.CATEGORY)
+        self.assertNotIn(secret, f.explanation)
+        self.assertIn("redact", f.explanation.lower())
+        self.assertNotIn(secret, json.dumps(f.metadata))
+
+
 if __name__ == "__main__":
     unittest.main()

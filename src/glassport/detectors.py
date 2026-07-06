@@ -880,7 +880,7 @@ def load_pii_patterns_from_json(path: Any) -> int:
 _STRUCTURAL_CONTAINERS = frozenset({"jwt_token"})
 # Broad, charset/entropy-only patterns that legitimately fire on a fragment of
 # a larger structured token. Suppressed when contained in a structural span.
-_GENERIC_SECRETS = frozenset({"aws_secret_key", "generic_api_key"})
+_GENERIC_SECRETS = frozenset({"aws_secret_key", "generic_api_key", "high_entropy_token_30_40"})
 
 
 def _scan_pii(text: str) -> list[tuple[PIIPattern, str]]:

@@ -1,0 +1,9 @@
+[
+  {
+    "category": "high_entropy_token_30_40",
+    "severity": 3,
+    "pattern": "(?<![A-Za-z0-9/+=])([A-Za-z0-9_~.-]{30,40})(?![A-Za-z0-9/+=])",
+    "validator": "entropy_auto",
+    "description": "High-entropy token (opt-in: broad charset regex, entropy-gated; matches 30-40 character random strings. Intended to catch opaque secrets such as Azure client credentials that lack a fixed prefix.)"
+  }
+]
