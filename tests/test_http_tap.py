@@ -78,6 +78,20 @@ class _SseRemote(BaseHTTPRequestHandler):
             self.wfile.write(b"data: " + msg + b"\n\n")
             self.wfile.flush()
 
+    def do_GET(self):
+        # server->client SSE stream (Streamable-HTTP GET)
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.end_headers()
+        msg = json.dumps({"jsonrpc": "2.0", "method": "notifications/x"}).encode()
+        self.wfile.write(b"data: " + msg + b"\n\n")
+        self.wfile.flush()
+
+    def do_DELETE(self):
+        self.send_response(200)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
 
 class TestHttpTapJson(unittest.TestCase):
     def setUp(self):
@@ -138,6 +152,54 @@ class TestHttpTapSse(unittest.TestCase):
         self.assertEqual(len(s2c), 2)
         self.assertIn('"n": 1', text)
         self.assertIn('"n": 2', text)
+
+
+class TestHttpTapCli(unittest.TestCase):
+    def test_transport_http_routes_to_run_http_tap(self):
+        from unittest import mock
+        from glassport import tap
+        with mock.patch("glassport.adapters.mcp_http.run_http_tap") as m:
+            rc = tap.main(["wrap", "--transport", "http", "--url",
+                           "http://remote.example/mcp"])
+        self.assertEqual(rc, 0)
+        self.assertEqual(m.call_args.args[0], "http://remote.example/mcp")
+
+    def test_transport_http_requires_url(self):
+        from glassport import tap
+        self.assertEqual(tap.main(["wrap", "--transport", "http"]), 2)
+
+    def test_gate_over_http_rejected(self):
+        from glassport import tap
+        self.assertEqual(
+            tap.main(["gate", "--transport", "http", "--url", "http://x"]), 2)
+
+
+class TestHttpTapGetDelete(unittest.TestCase):
+    def setUp(self):
+        self.logdir = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: shutil.rmtree(self.logdir))
+
+    def test_get_sse_stream_logged_and_delete_relayed(self):
+        remote = _serve(_SseRemote)
+        rh, rp = remote.server_address
+        proxy = _start_proxy(f"http://{rh}:{rp}/mcp", self.logdir)
+        ph, pp = proxy.server_address
+        try:
+            get = urllib.request.urlopen(
+                f"http://{ph}:{pp}/mcp", timeout=5).read()
+            self.assertIn(b"notifications/x", get)  # server->client SSE reached client
+            dreq = urllib.request.Request(f"http://{ph}:{pp}/mcp", method="DELETE")
+            code = urllib.request.urlopen(dreq, timeout=5).getcode()
+            self.assertEqual(code, 200)             # DELETE status relayed
+        finally:
+            proxy.shutdown()
+            proxy.server_close()
+            remote.shutdown()
+            remote.server_close()
+
+        text = "".join(p.read_text(encoding="utf-8")
+                       for p in self.logdir.glob("*.jsonl"))
+        self.assertIn("notifications/x", text)      # GET SSE event logged s2c
 
 
 if __name__ == "__main__":
