@@ -10,6 +10,7 @@ import shutil
 import tempfile
 import threading
 import unittest
+import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -152,6 +153,82 @@ class TestHttpTapSse(unittest.TestCase):
         self.assertEqual(len(s2c), 2)
         self.assertIn('"n": 1', text)
         self.assertIn('"n": 2', text)
+
+
+class _McpRemote(BaseHTTPRequestHandler):
+    """Minimal MCP server: answers initialize / tools/list / tools/call so a
+    full HTTP-captured session can be replayed through the trace adapter."""
+
+    def log_message(self, *args, **kwargs):
+        pass
+
+    def do_POST(self):
+        n = int(self.headers.get("Content-Length", 0) or 0)
+        body = json.loads(self.rfile.read(n) or b"{}")
+        method, rid = body.get("method"), body.get("id")
+        result = {
+            "initialize": {"protocolVersion": "2025-06-18", "capabilities": {},
+                           "serverInfo": {"name": "mock"}},
+            "tools/list": {"tools": [{"name": "search"}]},
+            "tools/call": {"content": [{"type": "text", "text": "ok"}]},
+        }.get(method, {})
+        out = json.dumps({"jsonrpc": "2.0", "id": rid,
+                          "result": result}).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(out)))
+        self.end_headers()
+        self.wfile.write(out)
+
+
+class TestHttpTapParity(unittest.TestCase):
+    def setUp(self):
+        self.logdir = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: shutil.rmtree(self.logdir))
+
+    def test_http_capture_yields_same_trace_shape_as_stdio(self):
+        remote = _serve(_McpRemote)
+        rh, rp = remote.server_address
+        proxy = _start_proxy(f"http://{rh}:{rp}/mcp", self.logdir)
+        ph, pp = proxy.server_address
+        url = f"http://{ph}:{pp}/mcp"
+        try:
+            _post(url, {"jsonrpc": "2.0", "id": 1, "method": "initialize"})
+            _post(url, {"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
+            _post(url, {"jsonrpc": "2.0", "id": 3, "method": "tools/call",
+                        "params": {"name": "search", "arguments": {}}})
+        finally:
+            proxy.shutdown(); proxy.server_close()
+            remote.shutdown(); remote.server_close()
+
+        logs = list(self.logdir.glob("*.jsonl"))
+        trace = from_mcp_session_file(str(logs[0]))
+        self.assertIn("search", trace.declared_tools())         # tools/list captured
+        self.assertIn("search", [n for _, n in trace.called_tools()])
+        self.assertEqual(trace.fabricated_tool_calls(), [])     # legit call, not fabricated
+        self.assertTrue(any(e.kind == EventKind.TOOL_RESULT for e in trace.events))
+
+
+class TestHttpTapFailOpen(unittest.TestCase):
+    def setUp(self):
+        self.logdir = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: shutil.rmtree(self.logdir))
+
+    def test_upstream_down_returns_502_and_tap_survives(self):
+        # point at a closed port; the proxy must surface an error, not crash,
+        # and must still serve the next request (the relay outlives failures).
+        proxy = _start_proxy("http://127.0.0.1:1/mcp", self.logdir)
+        ph, pp = proxy.server_address
+        try:
+            for _ in range(2):
+                code = None
+                try:
+                    _post(f"http://{ph}:{pp}/mcp", {"jsonrpc": "2.0", "id": 1})
+                except urllib.error.HTTPError as e:
+                    code = e.code
+                self.assertEqual(code, 502)   # clean upstream error, twice
+        finally:
+            proxy.shutdown(); proxy.server_close()
 
 
 class TestHttpTapCli(unittest.TestCase):

@@ -10,6 +10,7 @@ Source is the truth; this is the index.
 | Capability | Module | What it is |
 |---|---|---|
 | Passive tap (`wrap`) | `tap.py` | stdio man-in-the-middle; logs every JSON-RPC frame, never alters one |
+| HTTP tap (H2.01) | `adapters/mcp_http.py` | `wrap --transport http --url <remote>`: local MITM proxy over MCP Streamable-HTTP (POST/GET/SSE); streams SSE to the client while framing each event, reuses `SessionLog` so the trace is identical to stdio; fail-open |
 | Active gate (`gate`) | `tap.py` | blocks `tools/call` outside the declared surface; opt-in enforcement |
 | Session summary | `tap.py` (`summarize`) | declared vs. called vs. fabricated delta |
 | Detectors | `detectors.py` | annotations over a trace: fabricated calls, context/schema violations, **data exfiltration** (PII/credentials) |
@@ -99,14 +100,14 @@ Roughly in dependency order — earlier unlocks later.
 
 ## Next action
 
-**Horizon 1 complete; first H2 item shipped.** H1.08 (coverage gate + e2e,
-PR #48) is merged to `main`; **H2.03 network-enriched audit** (`audit
---provenance`, npm+PyPI) is on `feat/h2-03-network-enriched-audit`. Tier-3 #1
-(plugin registry), #2 (`advise`), and network-enriched audit are all done.
+**Released 0.6.4; two H2 items shipped.** `0.6.4` is live on PyPI (H1.08
+coverage/e2e + H2.03 `audit --provenance`, plus contributor PRs #46/#47).
+**H2.01 streamable-HTTP tap** (`wrap --transport http --url`) is on
+`feat/h2-01-streamable-http` — passive MITM over Streamable-HTTP (POST/GET/SSE),
+trace-identical to stdio, fail-open; 8 tests, mocked remote (no network).
 
-Optionally cut **v0.6.4** to release the H1 close-out (tag push → trusted
-publishing regenerates the CHANGELOG from tag annotations). Next H2 candidates:
-**streamable-HTTP interception** (H2.01, large — the streaming-detector
-rearchitecture that also unblocks remote MCP), or the smaller **property-based
-validator tests** (H2.06, using the `hypothesis` dev-dep from H1.08). GitHub
-provenance is the natural follow-up increment to what just shipped.
+Next: **gate over HTTP** (active c2s blocking on the HTTP path — H2.01 shipped
+passive only) and the **streaming-detector path** (frame-at-a-time analysis;
+detectors still consume the full JSONL post-session today). Smaller alternative:
+**H2.06 property-based validator tests** (`hypothesis` dev-dep already merged).
+GitHub provenance is the follow-up to H2.03.

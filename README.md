@@ -163,6 +163,15 @@ Edit your MCP client config to route the target server through the tap. Replace 
 
 Use the server normally. Every session is logged to `~/.glassport/sessions/<timestamp>_<server>.jsonl`.
 
+**Remote servers over HTTP.** For an MCP server on the network (Streamable-HTTP transport, not stdio), run glassport as a local MITM proxy and point your client at it:
+
+```bash
+glassport wrap --transport http --url https://some-mcp-server.example/mcp
+# [glassport] http tap on http://127.0.0.1:PORT -> https://some-mcp-server.example/mcp
+```
+
+Set your client's server URL to the printed `http://127.0.0.1:PORT`. glassport forwards every request/response — POST bodies, `application/json` replies, and `text/event-stream` (SSE) streams (server→client `GET` too) — logging each JSON-RPC message to the **same JSONL** as the stdio tap, so `summarize` / `detect` / `report` / `advise` all work identically. The HTTP tap is passive and fail-open: SSE bytes reach your client as they arrive, and a logging or upstream failure never alters or kills the session (an unreachable remote returns a plain `502`, never a fabricated reply). Active gating over HTTP is not yet supported — this is the passive tap only.
+
 ### 2. Read the delta
 
 ```bash
