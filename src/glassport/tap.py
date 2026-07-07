@@ -671,6 +671,9 @@ USAGE = """\
 glassport — passive MCP stdio proxy
 
   wrap (default):  glassport [wrap] [--log-dir DIR] -- <server command...>
+                   glassport wrap --transport http --url <remote-mcp-url>
+                        (passive MITM over MCP Streamable-HTTP; logs both
+                         directions to the same JSONL as the stdio tap)
   gate:            glassport gate [--controllable] [--log-dir DIR] -- <server command...>
                    (active: blocks tools/call outside the declared surface;
                     --controllable lets `tui --gate-control` toggle it)
@@ -803,6 +806,33 @@ def main(argv: list[str]) -> int:
     if argv[0] == "--log-dir":
         log_dir = Path(argv[1])
         argv = argv[2:]
+    # H2.01: passive tap over MCP's Streamable-HTTP transport. Default stays
+    # stdio (spawn + relay a child). `--transport http --url <remote>` runs a
+    # local MITM proxy instead. Gate (active enforcement) is stdio-only for now.
+    transport = "stdio"
+    remote_url = None
+    if argv and argv[0] == "--transport":
+        transport = argv[1] if len(argv) > 1 else ""
+        argv = argv[2:]
+    if argv and argv[0] == "--url":
+        remote_url = argv[1] if len(argv) > 1 else None
+        argv = argv[2:]
+    if transport == "http":
+        if gate is not None:
+            print("glassport: gate over HTTP is not supported yet; use the "
+                  "passive `wrap --transport http`", file=sys.stderr)
+            return 2
+        if not remote_url:
+            print("usage: glassport wrap --transport http --url "
+                  "<remote-mcp-url>", file=sys.stderr)
+            return 2
+        from glassport.adapters.mcp_http import run_http_tap
+        run_http_tap(remote_url, log_dir)
+        return 0
+    if transport != "stdio":
+        print(f"glassport: unknown transport {transport!r} "
+              "(expected 'stdio' or 'http')", file=sys.stderr)
+        return 2
     if argv and argv[0] == "--":
         argv = argv[1:]
     if not argv:
