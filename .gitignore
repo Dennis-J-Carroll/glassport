@@ -6,3 +6,5 @@ examples/*.html
 dist/
 build/
 .superpowers/
+# http-tap red-team grill writes fresh timestamped logs each run (no fixture)
+dogfood/logs/http-tap-redteam/

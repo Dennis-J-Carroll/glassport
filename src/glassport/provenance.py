@@ -17,7 +17,9 @@ import json
 import re
 import sys
 import time
+import unicodedata
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -209,14 +211,35 @@ _REGISTRY = {
 }
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Redirect handler that turns every 3xx into an HTTPError so the fetcher
+    never follows a registry response to an internal/non-registry host."""
+
+    def http_error_302(self, req, fp, code, msg, headers):
+        raise urllib.error.HTTPError(req.full_url, code, msg, headers, fp)
+
+    http_error_301 = http_error_303 = http_error_307 = http_error_302
+
+
+# One opener reused across calls: no redirect following, no external dependencies.
+_REGISTRY_OPENER = urllib.request.build_opener(
+    urllib.request.HTTPHandler(),
+    urllib.request.HTTPSHandler(),
+    _NoRedirect,
+)
+
+
 def fetch_registry(ecosystem: str, name: str, *, timeout: float = 5.0) -> Fetched:
-    url = _REGISTRY.get(ecosystem, "").format(name=name)
+    # Percent-encode the dependency name before it enters the URL so a malicious
+    # manifest cannot inject query strings, fragments, or path separators.
+    safe_name = urllib.parse.quote(name, safe="")
+    url = _REGISTRY.get(ecosystem, "").format(name=safe_name)
     if not url:
         return Fetched(status="error", payload={})
     req = urllib.request.Request(
         url, headers={"User-Agent": f"glassport/{_VER}"})
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with _REGISTRY_OPENER.open(req, timeout=timeout) as resp:
             data = resp.read()
         return Fetched(status="ok", payload=json.loads(data))
     except urllib.error.HTTPError as exc:
@@ -321,9 +344,31 @@ def _has_attestation(dep: Dep, payload: dict) -> bool:
     return False
 
 
+def _scrub_package(name: str) -> str:
+    """Neutralize attacker-controlled bytes in a manifest-supplied package name.
+
+    NFKC-fold, then replace C0/C1 control characters, line breaks, tabs, and
+    Unicode bidirectional formatting controls with a visible placeholder so the
+    value cannot break JSON/SARIF/markdown envelopes or visually spoof a benign
+    package name.
+    """
+    name = unicodedata.normalize("NFKC", name)
+    out: list[str] = []
+    for ch in name:
+        cat = unicodedata.category(ch)
+        if cat.startswith("C"):
+            out.append("\ufffd")  # replacement character (tabs/newlines/C0/C1)
+        elif ch in "\u202a\u202b\u202c\u202d\u202e\u202f\u2066\u2067\u2068\u2069\u061c\u200e\u200f":
+            out.append("\ufffd")
+        else:
+            out.append(ch)
+    return "".join(out).strip()
+
+
 def _pf(dep: Dep, rule: str, severity: str, detail: str) -> ProvenanceFinding:
     return ProvenanceFinding(rule=rule, severity=severity,
-                             ecosystem=dep.ecosystem, package=dep.name,
+                             ecosystem=dep.ecosystem,
+                             package=_scrub_package(dep.name),
                              manifest=dep.manifest, detail=detail)
 
 

@@ -33,6 +33,8 @@ jobs:
           PYTHONPATH=src python dogfood/eval_sarif_redteam.py
           PYTHONPATH=src python dogfood/eval_server_redteam.py
           PYTHONPATH=src python dogfood/eval_streaming_redteam.py
+          PYTHONPATH=src python dogfood/eval_provenance_redteam.py
+          PYTHONPATH=src python dogfood/eval_http_tap_redteam.py
 
   build:
     needs: test

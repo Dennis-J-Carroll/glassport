@@ -46,28 +46,87 @@ def _req_headers(headers, remote) -> dict:
     return out
 
 
+_MAX_SSE_BUF = 256 * 1024  # cap per-event buffering to avoid unbounded growth
+
+
+def _log_sse_event(event: bytes, log: SessionLog, *, partial: bool = False) -> None:
+    """Log one SSE event. data: lines are joined with \\n; if the event carries
+    event:/id:/retry: fields (or is an over-limit partial flush) the full event
+    text is logged as raw so transport metadata is not silently discarded."""
+    if not event or event.strip() == b"":
+        return
+    lines = event.split(b"\n")
+    data_lines: list[bytes] = []
+    has_meta = partial
+    for raw in lines:
+        if raw.endswith(b"\r"):
+            raw = raw[:-1]
+        if raw.startswith(b"data:"):
+            data_lines.append(raw[5:].lstrip(b" "))
+        elif raw.startswith((b"event:", b"id:", b"retry:")):
+            has_meta = True
+        # comment lines (": ...") and empty lines are ignored for framing
+    if not data_lines:
+        # no data payload: log the raw event text so comments/metadata survive
+        log.record("s2c", event)
+        return
+    payload = b"\n".join(data_lines)
+    if has_meta:
+        # Preserve metadata by logging the full reconstructed event text.
+        log.record("s2c", event)
+    else:
+        log.record("s2c", payload)
+
+
 def _stream_sse(resp, wfile, log: SessionLog) -> None:
     """Forward an SSE response byte-for-byte to the client as it arrives, and
     (separately) cut complete events to log each `data:` payload as one s2c
     frame. Forwarding never waits on framing — the relay is sacred."""
     buf = b""
+    first_chunk = True     # only the very first chunk of the stream can carry a BOM
+    dropped_oversize = False  # emitted the runaway-drop note for the current overflow
     while True:
-        chunk = resp.read(256)
+        chunk = resp.read(4096)
         if not chunk:
+            # A trailing partial is a stream that ended mid-event — keep it for
+            # forensics. But if we're mid-runaway (already dropped), the tail is
+            # part of the unframeable flood; don't log it.
+            if buf.strip() and not dropped_oversize:
+                _log_sse_event(buf, log, partial=True)
             break
         try:
             wfile.write(chunk)
             wfile.flush()
         except Exception:
             break  # client hung up; stop streaming
+        # Strip a leading UTF-8 BOM only at true stream start. `first_chunk`
+        # disarms after the first read regardless, so BOM bytes that arrive
+        # mid-stream stay verbatim in the log — matching what the client got.
+        if first_chunk:
+            if chunk.startswith(b"\xef\xbb\xbf"):
+                chunk = chunk[3:]
+            first_chunk = False
         buf += chunk
-        while b"\n\n" in buf:
-            event, buf = buf.split(b"\n\n", 1)
-            data = b"".join(
-                ln[5:].lstrip() for ln in event.split(b"\n")
-                if ln.startswith(b"data:"))
-            if data:
-                log.record("s2c", data)
+        # Drain all complete SSE events. Terminators: \\n\\n, \\r\\r, \\r\\n\\r\\n.
+        while True:
+            term: tuple[int, bytes] | None = None
+            for t in (b"\r\n\r\n", b"\n\n", b"\r\r"):
+                i = buf.find(t)
+                if i != -1 and (term is None or i < term[0]):
+                    term = (i, t)
+            if term is None:
+                break
+            event, buf = buf[:term[0]], buf[term[0] + len(term[1]):]
+            _log_sse_event(event, log)
+            dropped_oversize = False  # a real terminator re-syncs framing
+        # Bound both memory and disk: a hostile server that never sends a
+        # terminator cannot grow the buffer, and cannot make the tap write its
+        # runaway stream to the log either — one note per overflow, then drop.
+        if len(buf) > _MAX_SSE_BUF:
+            if not dropped_oversize:
+                log.record("s2c", b'{"glassport":"sse_frame_dropped_oversize"}')
+                dropped_oversize = True
+            buf = b""
 
 
 def _make_handler(remote, log: SessionLog):
@@ -89,8 +148,10 @@ def _make_handler(remote, log: SessionLog):
                 resp = conn.getresponse()
             except Exception as exc:
                 # glassport's own transport failure — surface it plainly, never
-                # fabricate a JSON-RPC reply.
-                msg = f"glassport: upstream error: {exc}".encode()
+                # fabricate a JSON-RPC reply, and never echo attacker-controlled
+                # exception text back to the client.
+                print(f"[glassport] upstream error: {exc}", file=sys.stderr)
+                msg = b"glassport: upstream unavailable"
                 self.send_response(502)
                 self.send_header("Content-Length", str(len(msg)))
                 self.end_headers()
