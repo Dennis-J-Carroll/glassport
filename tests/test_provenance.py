@@ -26,6 +26,7 @@ from glassport.provenance import (
     ProvenanceFinding,
     _cache_get,
     _cache_put,
+    _scrub_package,
     discover_deps,
     enrich,
     evaluate,
@@ -140,14 +141,14 @@ class TestFetchRegistry(unittest.TestCase):
     def test_404_is_not_found(self):
         import urllib.error
         err = urllib.error.HTTPError("u", 404, "nf", {}, None)  # type: ignore[arg-type]
-        with mock.patch("glassport.provenance.urllib.request.urlopen",
+        with mock.patch("glassport.provenance._REGISTRY_OPENER.open",
                         side_effect=err):
             got = fetch_registry("pypi", "definitely-not-real-xyz")
         self.assertEqual(got.status, "not_found")
 
     def test_network_error_is_error_not_raise(self):
         import urllib.error
-        with mock.patch("glassport.provenance.urllib.request.urlopen",
+        with mock.patch("glassport.provenance._REGISTRY_OPENER.open",
                         side_effect=urllib.error.URLError("boom")):
             got = fetch_registry("npm", "left-pad")
         self.assertEqual(got.status, "error")
@@ -158,7 +159,7 @@ class TestFetchRegistry(unittest.TestCase):
         resp = mock.MagicMock()
         resp.read.return_value = body
         resp.__enter__.return_value = resp
-        with mock.patch("glassport.provenance.urllib.request.urlopen",
+        with mock.patch("glassport.provenance._REGISTRY_OPENER.open",
                         return_value=resp):
             got = fetch_registry("npm", "left-pad")
         self.assertEqual(got.status, "ok")
@@ -168,7 +169,7 @@ class TestFetchRegistry(unittest.TestCase):
         resp = mock.MagicMock()
         resp.read.return_value = b"not json{"
         resp.__enter__.return_value = resp
-        with mock.patch("glassport.provenance.urllib.request.urlopen",
+        with mock.patch("glassport.provenance._REGISTRY_OPENER.open",
                         return_value=resp):
             got = fetch_registry("pypi", "foo")
         self.assertEqual(got.status, "error")
@@ -397,6 +398,28 @@ class TestCli(unittest.TestCase):
                 audit_mod.main([str(root), "--provenance", "--json"])
         self.assertEqual(json.loads(out.getvalue())["provenance"][0]["rule"],
                          "prov-not-in-registry")
+
+
+class TestScrubPackage(unittest.TestCase):
+    """P3 regression: a manifest-supplied package name is attacker-controlled
+    and must not carry control/format bytes into a finding envelope."""
+
+    def test_tab_is_replaced_not_passed_through(self):
+        # The docstring promises tabs are neutralized; a tab in a package name
+        # is anomalous and can misalign a rendered table or log line.
+        self.assertEqual(_scrub_package("evil\tpkg"), "evil�pkg")
+
+    def test_newline_and_carriage_return_replaced(self):
+        self.assertEqual(_scrub_package("evil\npkg"), "evil�pkg")
+        self.assertEqual(_scrub_package("evil\rpkg"), "evil�pkg")
+
+    def test_bidi_override_replaced(self):
+        # U+202E RIGHT-TO-LEFT OVERRIDE — classic filename/name spoof.
+        self.assertEqual(_scrub_package("a‮b"), "a�b")
+
+    def test_ordinary_name_survives_including_scoped_npm(self):
+        self.assertEqual(_scrub_package("@babel/core"), "@babel/core")
+        self.assertEqual(_scrub_package("left-pad"), "left-pad")
 
 
 if __name__ == "__main__":

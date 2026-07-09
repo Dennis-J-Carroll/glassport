@@ -55,13 +55,15 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: advise / report / sarif / serve red-team grills
+      - name: advise / report / sarif / serve / provenance / http red-team grills
         run: |
           PYTHONPATH=src python dogfood/eval_advise_redteam.py
           PYTHONPATH=src python dogfood/eval_report_redteam.py
           PYTHONPATH=src python dogfood/eval_sarif_redteam.py
           PYTHONPATH=src python dogfood/eval_server_redteam.py
           PYTHONPATH=src python dogfood/eval_streaming_redteam.py
+          PYTHONPATH=src python dogfood/eval_provenance_redteam.py
+          PYTHONPATH=src python dogfood/eval_http_tap_redteam.py
 
   # "The tap is dumb and fast" needs numbers: benchmark the three hot
   # analysis paths on a 10k-frame synthetic session. Ceilings carry ~20x
