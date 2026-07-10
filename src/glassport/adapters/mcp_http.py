@@ -244,8 +244,10 @@ def _make_handler(remote, log: SessionLog):
                 clen = resp.getheader("Content-Length")
                 te = resp.getheader("Transfer-Encoding")
                 all_cl = [v for k, v in resp.getheaders() if k.lower() == "content-length"]
+                declared: int | None = None
                 if (clen is not None and te is None
                         and len(all_cl) == 1 and clen.strip().isdigit()):
+                    declared = int(clen.strip())
                     self.send_header("Content-Length", clen.strip())
                 else:
                     self.send_header("Connection", "close")
@@ -263,6 +265,16 @@ def _make_handler(remote, log: SessionLog):
                         break  # client hung up; stop copying
                     if len(head) < _MAX_LOGGED_BODY:
                         head += chunk[: _MAX_LOGGED_BODY - len(head)]
+                # A hostile upstream can declare a Content-Length larger than the
+                # body it actually sends, then close. We can't verify the length
+                # before sending headers without buffering the whole body (that
+                # would reintroduce the R1 memory DoS), but once the stream ends
+                # we know the truth: if the bytes forwarded don't match what we
+                # promised, close the connection so the client gets a prompt EOF
+                # instead of hanging forever on a kept-alive socket waiting for a
+                # body that will never arrive.
+                if declared is not None and total != declared:
+                    self.close_connection = True
                 if head:
                     log.record("s2c", head)   # one response body = one frame (bounded)
                     if total > len(head):

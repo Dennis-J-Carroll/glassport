@@ -269,6 +269,110 @@ class TestResponseFraming(unittest.TestCase):
         self.assertIsNone(r.getheader("Content-Length"))
         self.assertEqual(r.getheader("Connection"), "close")
 
+    def test_lying_short_content_length_forces_close(self):
+        """A hostile upstream that declares Content-Length larger than the body
+        it sends, then closes, must not make the client hang forever on a
+        kept-alive socket. The proxy can't verify the length before sending
+        headers (that would need to buffer the whole body — the R1 DoS), but once
+        the stream ends short it closes the connection so the client gets a
+        prompt EOF. Regression: the proxy used to keep the socket open and the
+        client blocked until its own timeout."""
+        rp_box: list = []
+        ready = threading.Event()
+
+        def raw_upstream():
+            s = socket.socket()
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            s.bind(("127.0.0.1", 0))
+            s.listen(1)
+            rp_box.append(s.getsockname()[1])
+            ready.set()
+            try:
+                conn, _ = s.accept()
+                conn.recv(65536)
+                # Declares 100 bytes, sends 5, then closes.
+                conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+                             b"Content-Length: 100\r\n\r\nhello")
+                conn.shutdown(socket.SHUT_WR)
+                conn.settimeout(3)
+                try:
+                    while conn.recv(4096):
+                        pass
+                except OSError:
+                    pass
+                conn.close()
+            finally:
+                s.close()
+
+        t = threading.Thread(target=raw_upstream, daemon=True)
+        t.start()
+        ready.wait(5)
+        proxy = _start_proxy(f"http://127.0.0.1:{rp_box[0]}/", self.logdir)
+        ph, pp = proxy.server_address
+        try:
+            c = http.client.HTTPConnection(ph, pp, timeout=5)
+            c.request("POST", "/mcp", body=b'{}')
+            r = c.getresponse()
+            # The upstream lied: 100 promised, 5 delivered, then EOF. A prompt
+            # IncompleteRead (not a hang to the 5s timeout) proves the proxy
+            # closed. The relay stays sacred: the 5 real bytes still arrived.
+            with self.assertRaises(http.client.IncompleteRead) as cm:
+                r.read()
+            self.assertEqual(cm.exception.partial, b"hello")
+        finally:
+            c.close()
+            proxy.shutdown(); proxy.server_close()
+            t.join(2)
+
+    def test_chunked_upstream_reaches_client_dechunked(self):
+        """A chunked upstream response must reach the client as clean de-chunked
+        bytes with no Transfer-Encoding header and no leaked chunk-size markers.
+        http.client de-chunks on read; the proxy strips TE (a _HOP header)."""
+        rp_box: list = []
+        ready = threading.Event()
+
+        def raw_upstream():
+            s = socket.socket()
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            s.bind(("127.0.0.1", 0))
+            s.listen(1)
+            rp_box.append(s.getsockname()[1])
+            ready.set()
+            try:
+                conn, _ = s.accept()
+                conn.recv(65536)
+                conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+                             b"Transfer-Encoding: chunked\r\n\r\n"
+                             b"5\r\nhello\r\n5\r\nworld\r\n0\r\n\r\n")
+                conn.shutdown(socket.SHUT_WR)
+                conn.settimeout(3)
+                try:
+                    while conn.recv(4096):
+                        pass
+                except OSError:
+                    pass
+                conn.close()
+            finally:
+                s.close()
+
+        t = threading.Thread(target=raw_upstream, daemon=True)
+        t.start()
+        ready.wait(5)
+        proxy = _start_proxy(f"http://127.0.0.1:{rp_box[0]}/", self.logdir)
+        ph, pp = proxy.server_address
+        try:
+            c = http.client.HTTPConnection(ph, pp, timeout=5)
+            c.request("POST", "/mcp", body=b'{}')
+            r = c.getresponse()
+            data = r.read()
+            c.close()
+        finally:
+            proxy.shutdown(); proxy.server_close()
+            t.join(2)
+
+        self.assertEqual(data, b"helloworld")
+        self.assertIsNone(r.getheader("Transfer-Encoding"))
+
 
 # ── R3 · slowloris / thread survival ───────────────────────────────
 class TestHandlerTimeoutAndSurvival(unittest.TestCase):
