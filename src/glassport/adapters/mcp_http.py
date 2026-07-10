@@ -32,11 +32,46 @@ _HOP = {"connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
         "content-length"}
 
 
+class _Sk1xxResponse(http.client.HTTPResponse):
+    """HTTPResponse that swallows *all* 1xx informational responses, not just
+    100 Continue. A hostile or chatty upstream that emits 102 Processing (or
+    any other 1xx) before the final response must not make the proxy hand the
+    client the informational status as if it were the reply."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._cached_status = None
+
+    def _read_status(self):
+        if self._cached_status is not None:
+            s, self._cached_status = self._cached_status, None
+            return s
+        return super()._read_status()
+
+    def begin(self):
+        # Skip every 1xx status line and its headers; stop at the final response.
+        while True:
+            status_tuple = super()._read_status()
+            if not (100 <= status_tuple[1] < 200):
+                self._cached_status = status_tuple
+                break
+            http.client._read_headers(self.fp)
+        return super().begin()
+
+
+class _HTTPConnection(http.client.HTTPConnection):
+    response_class = _Sk1xxResponse
+
+
+class _HTTPSConnection(http.client.HTTPSConnection):
+    response_class = _Sk1xxResponse
+
+
 def _connect(remote) -> http.client.HTTPConnection:
     if remote.scheme == "https":
-        return http.client.HTTPSConnection(
+        return _HTTPSConnection(
             remote.hostname, remote.port or 443, timeout=30)
-    return http.client.HTTPConnection(
+    return _HTTPConnection(
         remote.hostname, remote.port or 80, timeout=30)
 
 
@@ -120,8 +155,18 @@ def _stream_sse(resp, wfile, log: SessionLog) -> None:
             if term is None:
                 break
             event, buf = buf[:term[0]], buf[term[0] + len(term[1]):]
-            _log_sse_event(event, log)
-            dropped_oversize = False  # a real terminator re-syncs framing
+            if dropped_oversize:
+                # This event is the tail of an unterminated overflow run that
+                # already emitted its drop-note. Discard it and leave overflow
+                # mode so subsequent normal events are logged again.
+                dropped_oversize = False
+            elif len(event) > _MAX_SSE_BUF:
+                # A single terminated event must not balloon the session log.
+                # Forwarding is already byte-exact; drop the log frame.
+                log.record("s2c", b'{"glassport":"sse_frame_dropped_oversize"}')
+            else:
+                _log_sse_event(event, log)
+                dropped_oversize = False
         # Bound both memory and disk: a hostile server that never sends a
         # terminator cannot grow the buffer, and cannot make the tap write its
         # runaway stream to the log either — one note per overflow, then drop.
@@ -167,8 +212,8 @@ def _make_handler(remote, log: SessionLog):
                 self._reject(400, "transfer-encoding not supported")
                 return None, False
             cls = self.headers.get_all("Content-Length") or []
-            if len(cls) > 1 and len(set(c.strip() for c in cls)) > 1:
-                self._reject(400, "conflicting content-length")
+            if len(cls) > 1:
+                self._reject(400, "duplicate content-length")
                 return None, False
             if cls and not cls[0].strip().isdigit():
                 self._reject(400, "invalid content-length")
@@ -219,13 +264,16 @@ def _make_handler(remote, log: SessionLog):
                 return
 
             ctype = resp.getheader("Content-Type", "")
+            all_ct = [v for k, v in resp.getheaders() if k.lower() == "content-type"]
             self.send_response(resp.status)
-            # Match the *media type*, not any substring: a hostile (or careless)
-            # upstream that puts the token in a parameter value
-            # ("application/json; x=text/event-stream") must not flip a normal
-            # body into the SSE path, which drops its Content-Length and reframes
-            # it as an event stream.
-            streaming = ctype.split(";", 1)[0].strip().lower() == "text/event-stream"
+            # Match the *media type*, not any substring; also require exactly one
+            # unambiguous Content-Type header. Duplicate or conflicting CT lines
+            # default to non-streaming so an upstream cannot inject a second
+            # Content-Type to flip a JSON body onto the SSE path.
+            streaming = (
+                len(all_ct) == 1
+                and ctype.split(";", 1)[0].strip().lower() == "text/event-stream"
+            )
             for k, v in resp.getheaders():
                 if k.lower() in _HOP:
                     continue
@@ -258,7 +306,8 @@ def _make_handler(remote, log: SessionLog):
                 te = resp.getheader("Transfer-Encoding")
                 all_cl = [v for k, v in resp.getheaders() if k.lower() == "content-length"]
                 declared: int | None = None
-                if (clen is not None and te is None
+                bodiless = resp.status in (204, 304)
+                if (clen is not None and te is None and not bodiless
                         and len(all_cl) == 1 and clen.strip().isdigit()):
                     declared = int(clen.strip())
                     self.send_header("Content-Length", clen.strip())
