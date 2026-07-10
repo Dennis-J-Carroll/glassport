@@ -170,6 +170,106 @@ class TestRequestSmuggling(unittest.TestCase):
                         "conflicting Content-Length was not rejected: %r" % status)
 
 
+# ── response framing abuse (Kimi surface #1) ────────────────────────
+class TestResponseFraming(unittest.TestCase):
+    def setUp(self):
+        self.logdir = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: shutil.rmtree(self.logdir, ignore_errors=True))
+
+    def test_conflicting_response_content_length_drops_cl_and_closes(self):
+        """A hostile upstream with two Content-Length values must not make the
+        proxy promise a body length that exceeds the bytes it actually reads."""
+        class _BadRemote(BaseHTTPRequestHandler):
+            def log_message(self, *a, **k):
+                pass
+
+            def do_POST(self):
+                n = int(self.headers.get("Content-Length", 0) or 0)
+                self.rfile.read(n)
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", "5")
+                self.send_header("Content-Length", "50")
+                self.end_headers()
+                self.wfile.write(b"hello")
+
+        remote = _serve(_BadRemote)
+        rh, rp = remote.server_address
+        proxy = _start_proxy(f"http://{rh}:{rp}/", self.logdir)
+        ph, pp = proxy.server_address
+        try:
+            c = http.client.HTTPConnection(ph, pp, timeout=5)
+            c.request("POST", "/mcp", body=b'{}')
+            r = c.getresponse()
+            data = r.read()
+            c.close()
+        finally:
+            proxy.shutdown(); proxy.server_close()
+            remote.shutdown(); remote.server_close()
+
+        self.assertEqual(data, b"hello")
+        # Ambiguous framing -> Content-Length must not be forwarded;
+        # close-delimit so the client reads exactly what the relay sent.
+        self.assertIsNone(r.getheader("Content-Length"))
+        self.assertEqual(r.getheader("Connection"), "close")
+
+    def test_comma_folded_response_content_length_drops_cl_and_closes(self):
+        """A single *comma-folded* Content-Length ("5, 50") is as ambiguous as
+        two header lines (RFC 7230 §3.3.2). BaseHTTPRequestHandler always emits
+        one line per send_header, so it can't reproduce this — a raw upstream
+        socket can. Regression: the round-2 fix counted CL header *lines* and
+        forwarded this verbatim, hanging the client."""
+        rp_box: list = []
+        ready = threading.Event()
+
+        def raw_upstream():
+            s = socket.socket()
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            s.bind(("127.0.0.1", 0))
+            s.listen(1)
+            rp_box.append(s.getsockname()[1])
+            ready.set()
+            try:
+                conn, _ = s.accept()
+                conn.recv(65536)
+                conn.sendall(
+                    b"HTTP/1.1 200 OK\r\n"
+                    b"Content-Type: application/json\r\n"
+                    b"Content-Length: 5, 50\r\n\r\nhello")
+                # Clean half-close: send FIN so the proxy reads "hello" then a
+                # graceful EOF, then drain until the proxy closes — closing with
+                # unread inbound data would RST and race the proxy's read.
+                conn.shutdown(socket.SHUT_WR)
+                conn.settimeout(3)
+                try:
+                    while conn.recv(4096):
+                        pass
+                except OSError:
+                    pass
+                conn.close()
+            finally:
+                s.close()
+
+        t = threading.Thread(target=raw_upstream, daemon=True)
+        t.start()
+        ready.wait(5)
+        proxy = _start_proxy(f"http://127.0.0.1:{rp_box[0]}/", self.logdir)
+        ph, pp = proxy.server_address
+        try:
+            c = http.client.HTTPConnection(ph, pp, timeout=5)
+            c.request("POST", "/mcp", body=b'{}')
+            r = c.getresponse()
+            data = r.read()
+            c.close()
+        finally:
+            proxy.shutdown(); proxy.server_close()
+            t.join(2)
+
+        self.assertEqual(data, b"hello")
+        self.assertIsNone(r.getheader("Content-Length"))
+        self.assertEqual(r.getheader("Connection"), "close")
+
+
 # ── R3 · slowloris / thread survival ───────────────────────────────
 class TestHandlerTimeoutAndSurvival(unittest.TestCase):
     def setUp(self):

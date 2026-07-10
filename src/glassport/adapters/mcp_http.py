@@ -234,11 +234,19 @@ def _make_handler(remote, log: SessionLog):
                 # Non-SSE response: stream to the client in bounded chunks so a
                 # hostile upstream cannot balloon memory, and log at most
                 # _MAX_LOGGED_BODY bytes (plus a note) so it cannot balloon the
-                # session log either. Preserve the upstream's own framing:
-                # forward its Content-Length if present, else close-delimit.
+                # session log either. Preserve the upstream's own framing only
+                # when it is unambiguous: a single, purely-numeric Content-Length
+                # with no Transfer-Encoding. Duplicate CL header *lines*, a single
+                # comma-folded CL value ("5, 50"), any non-digit token, or CL
+                # paired with TE all desync the client from the bytes we actually
+                # read, so we drop CL and close-delimit instead — the relay is
+                # still sacred (every byte reaches the client).
                 clen = resp.getheader("Content-Length")
-                if clen is not None:
-                    self.send_header("Content-Length", clen)
+                te = resp.getheader("Transfer-Encoding")
+                all_cl = [v for k, v in resp.getheaders() if k.lower() == "content-length"]
+                if (clen is not None and te is None
+                        and len(all_cl) == 1 and clen.strip().isdigit()):
+                    self.send_header("Content-Length", clen.strip())
                 else:
                     self.send_header("Connection", "close")
                     self.close_connection = True
