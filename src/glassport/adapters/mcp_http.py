@@ -220,7 +220,12 @@ def _make_handler(remote, log: SessionLog):
 
             ctype = resp.getheader("Content-Type", "")
             self.send_response(resp.status)
-            streaming = "text/event-stream" in ctype
+            # Match the *media type*, not any substring: a hostile (or careless)
+            # upstream that puts the token in a parameter value
+            # ("application/json; x=text/event-stream") must not flip a normal
+            # body into the SSE path, which drops its Content-Length and reframes
+            # it as an event stream.
+            streaming = ctype.split(";", 1)[0].strip().lower() == "text/event-stream"
             for k, v in resp.getheaders():
                 if k.lower() in _HOP:
                     continue
@@ -228,6 +233,14 @@ def _make_handler(remote, log: SessionLog):
                     continue
                 self.send_header(k, v)
             if streaming:
+                # An SSE response carries no Content-Length and the proxy strips
+                # the upstream's Transfer-Encoding (a _HOP header), so the only
+                # honest framing left is close-delimiting: mark the connection to
+                # close so that when the upstream ends the stream the client gets
+                # a prompt EOF instead of hanging on a kept-alive socket waiting
+                # for events that will never come.
+                self.send_header("Connection", "close")
+                self.close_connection = True
                 self.end_headers()
                 _stream_sse(resp, self.wfile, log)
             else:
