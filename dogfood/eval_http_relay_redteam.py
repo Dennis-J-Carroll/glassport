@@ -145,6 +145,79 @@ def r2_duplicate_content_length() -> tuple[bool, str]:
     return ok, f"status={status!r}"
 
 
+# ── response framing abuse (Kimi surface #1) ────────────────────────
+def rf_response_conflicting_content_length() -> tuple[bool, str]:
+    class Bad(BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def do_POST(self):
+            self.rfile.read(int(self.headers.get("Content-Length", 0) or 0))
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", "5")
+            self.send_header("Content-Length", "50")
+            self.end_headers()
+            self.wfile.write(b"hello")
+
+    remote = _serve(Bad)
+    rp = remote.server_address[1]
+    tap, tp, _ = _start_tap(f"http://127.0.0.1:{rp}/")
+    try:
+        c = http.client.HTTPConnection("127.0.0.1", tp, timeout=5)
+        c.request("POST", "/mcp", body=b'{}')
+        r = c.getresponse()
+        data = r.read()
+        c.close()
+    finally:
+        tap.shutdown(); tap.server_close(); remote.shutdown(); remote.server_close()
+    ok = data == b"hello" and r.getheader("Content-Length") is None and r.getheader("Connection") == "close"
+    return ok, f"client_recv={data!r}, cl={r.getheader('Content-Length')!r}, conn={r.getheader('Connection')!r}"
+
+
+def rf_comma_folded_content_length() -> tuple[bool, str]:
+    """A single comma-folded Content-Length ('5, 50') is as ambiguous as two
+    header lines. send_header can't emit it, so drive a raw upstream socket.
+    Round-2 fix counted CL *lines* and forwarded this verbatim → client hang."""
+    rp_box: list = []
+    ready = threading.Event()
+
+    def raw_upstream():
+        s = socket.socket()
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        s.bind(("127.0.0.1", 0)); s.listen(1)
+        rp_box.append(s.getsockname()[1]); ready.set()
+        try:
+            conn, _ = s.accept()
+            conn.recv(65536)
+            conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+                         b"Content-Length: 5, 50\r\n\r\nhello")
+            conn.shutdown(socket.SHUT_WR)
+            conn.settimeout(3)
+            try:
+                while conn.recv(4096):
+                    pass
+            except OSError:
+                pass
+            conn.close()
+        finally:
+            s.close()
+
+    t = threading.Thread(target=raw_upstream, daemon=True)
+    t.start(); ready.wait(5)
+    tap, tp, _ = _start_tap(f"http://127.0.0.1:{rp_box[0]}/")
+    try:
+        c = http.client.HTTPConnection("127.0.0.1", tp, timeout=5)
+        c.request("POST", "/mcp", body=b'{}')
+        r = c.getresponse()
+        data = r.read()
+        c.close()
+    finally:
+        tap.shutdown(); tap.server_close(); t.join(2)
+    ok = data == b"hello" and r.getheader("Content-Length") is None and r.getheader("Connection") == "close"
+    return ok, f"client_recv={data!r}, cl={r.getheader('Content-Length')!r}, conn={r.getheader('Connection')!r}"
+
+
 # ── R3 · slowloris / thread survival ───────────────────────────────
 def r3_handler_timeout() -> tuple[bool, str]:
     tmp = Path(LOG_DIR); tmp.mkdir(parents=True, exist_ok=True)
@@ -177,6 +250,8 @@ CASES = [
     ("R1 unbounded response → memory/disk DoS", r1_unbounded_response),
     ("R2 chunked request smuggling (TE, no CL)", r2_chunked_smuggling),
     ("R2 duplicate Content-Length rejected", r2_duplicate_content_length),
+    ("RF conflicting response Content-Length dropped", rf_response_conflicting_content_length),
+    ("RF comma-folded response Content-Length dropped", rf_comma_folded_content_length),
     ("R3 handler defines a socket timeout", r3_handler_timeout),
     ("R3 server survives a client aborting mid-request", r3_survives_abort),
 ]
