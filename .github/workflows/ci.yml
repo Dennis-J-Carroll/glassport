@@ -64,6 +64,7 @@ jobs:
           PYTHONPATH=src python dogfood/eval_streaming_redteam.py
           PYTHONPATH=src python dogfood/eval_provenance_redteam.py
           PYTHONPATH=src python dogfood/eval_http_tap_redteam.py
+          PYTHONPATH=src python dogfood/eval_http_relay_redteam.py
 
   # "The tap is dumb and fast" needs numbers: benchmark the three hot
   # analysis paths on a 10k-frame synthetic session. Ceilings carry ~20x

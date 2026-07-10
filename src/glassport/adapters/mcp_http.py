@@ -47,6 +47,9 @@ def _req_headers(headers, remote) -> dict:
 
 
 _MAX_SSE_BUF = 256 * 1024  # cap per-event buffering to avoid unbounded growth
+_MAX_LOGGED_BODY = 1_000_000  # cap what a single request/response frame logs
+_RELAY_CHUNK = 65536          # stream bodies in bounded chunks, never all at once
+_HANDLER_TIMEOUT = 30         # drop a stalled client so it can't pin a thread
 
 
 def _log_sse_event(event: bytes, log: SessionLog, *, partial: bool = False) -> None:
@@ -132,15 +135,69 @@ def _stream_sse(resp, wfile, log: SessionLog) -> None:
 def _make_handler(remote, log: SessionLog):
     class _ProxyHandler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
+        # A stalled client (slowloris) must not pin a ThreadingHTTPServer thread
+        # forever; the request socket is dropped after this many idle seconds.
+        timeout = _HANDLER_TIMEOUT
 
         def log_message(self, *args, **kwargs):  # keep the proxy quiet
             pass
 
+        def _reject(self, code: int, why: str) -> None:
+            """Refuse a request we cannot frame unambiguously, and close the
+            connection so any pipelined bytes are never reparsed as a request."""
+            self.close_connection = True
+            msg = ("glassport: " + why).encode()
+            self.send_response(code)
+            self.send_header("Content-Length", str(len(msg)))
+            self.send_header("Connection", "close")
+            self.end_headers()
+            try:
+                self.wfile.write(msg)
+            except Exception:
+                pass
+            note = why.replace(" ", "_")
+            log.record("c2s", ('{"glassport":"rejected_%s"}' % note).encode())
+
+        def _read_client_body(self):
+            """Return (body_for_upstream, framing_ok). Rejects ambiguous framing
+            (Transfer-Encoding, duplicate/invalid Content-Length) rather than
+            guess a length the upstream would read differently — the request
+            smuggling vector. Bounds what is logged; streams the rest upstream."""
+            if self.headers.get("Transfer-Encoding") is not None:
+                self._reject(400, "transfer-encoding not supported")
+                return None, False
+            cls = self.headers.get_all("Content-Length") or []
+            if len(cls) > 1 and len(set(c.strip() for c in cls)) > 1:
+                self._reject(400, "conflicting content-length")
+                return None, False
+            if cls and not cls[0].strip().isdigit():
+                self._reject(400, "invalid content-length")
+                return None, False
+            length = int(cls[0]) if cls else 0
+            head = self.rfile.read(min(length, _MAX_LOGGED_BODY)) if length else b""
+            rest = length - len(head)
+            if head:
+                log.record("c2s", head)   # one request body = one frame (bounded)
+                if rest > 0:
+                    log.record("c2s", b'{"glassport":"c2s_body_truncated_oversize"}')
+            if rest <= 0:
+                return (head or None), True
+
+            def _stream():
+                yield head
+                left = rest
+                while left > 0:
+                    chunk = self.rfile.read(min(_RELAY_CHUNK, left))
+                    if not chunk:
+                        break
+                    left -= len(chunk)
+                    yield chunk
+            return _stream(), True
+
         def _relay(self, method: str) -> None:
-            length = int(self.headers.get("Content-Length", 0) or 0)
-            body = self.rfile.read(length) if length else b""
-            if body:
-                log.record("c2s", body)   # dumb: one POST body = one frame
+            body, ok = self._read_client_body()
+            if not ok:
+                return
             try:
                 conn = _connect(remote)
                 conn.request(method, remote.path or "/", body=body or None,
@@ -174,15 +231,42 @@ def _make_handler(remote, log: SessionLog):
                 self.end_headers()
                 _stream_sse(resp, self.wfile, log)
             else:
-                data = resp.read()
-                self.send_header("Content-Length", str(len(data)))
+                # Non-SSE response: stream to the client in bounded chunks so a
+                # hostile upstream cannot balloon memory, and log at most
+                # _MAX_LOGGED_BODY bytes (plus a note) so it cannot balloon the
+                # session log either. Preserve the upstream's own framing only
+                # when it is unambiguous: a single, purely-numeric Content-Length
+                # with no Transfer-Encoding. Duplicate CL header *lines*, a single
+                # comma-folded CL value ("5, 50"), any non-digit token, or CL
+                # paired with TE all desync the client from the bytes we actually
+                # read, so we drop CL and close-delimit instead — the relay is
+                # still sacred (every byte reaches the client).
+                clen = resp.getheader("Content-Length")
+                te = resp.getheader("Transfer-Encoding")
+                all_cl = [v for k, v in resp.getheaders() if k.lower() == "content-length"]
+                if (clen is not None and te is None
+                        and len(all_cl) == 1 and clen.strip().isdigit()):
+                    self.send_header("Content-Length", clen.strip())
+                else:
+                    self.send_header("Connection", "close")
+                    self.close_connection = True
                 self.end_headers()
-                if data:
-                    log.record("s2c", data)
-                try:
-                    self.wfile.write(data)
-                except Exception:
-                    pass
+                head, total = b"", 0
+                while True:
+                    chunk = resp.read(_RELAY_CHUNK)
+                    if not chunk:
+                        break
+                    total += len(chunk)
+                    try:
+                        self.wfile.write(chunk)
+                    except Exception:
+                        break  # client hung up; stop copying
+                    if len(head) < _MAX_LOGGED_BODY:
+                        head += chunk[: _MAX_LOGGED_BODY - len(head)]
+                if head:
+                    log.record("s2c", head)   # one response body = one frame (bounded)
+                    if total > len(head):
+                        log.record("s2c", b'{"glassport":"s2c_body_truncated_oversize"}')
             conn.close()
 
         def do_POST(self):

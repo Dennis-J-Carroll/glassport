@@ -35,6 +35,7 @@ jobs:
           PYTHONPATH=src python dogfood/eval_streaming_redteam.py
           PYTHONPATH=src python dogfood/eval_provenance_redteam.py
           PYTHONPATH=src python dogfood/eval_http_tap_redteam.py
+          PYTHONPATH=src python dogfood/eval_http_relay_redteam.py
 
   build:
     needs: test

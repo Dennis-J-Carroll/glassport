@@ -73,6 +73,15 @@ Roughly in dependency order — earlier unlocks later.
 
 ## Recently shipped
 
+- **HTTP-relay hardening** (0.6.5, PR #53) — the Streamable-HTTP MITM relay
+  (`adapters/mcp_http.py`) bounded against a hostile upstream/client: R1 chunked
+  bounded request/response copy (memory + session-log DoS), R2 rejection of
+  ambiguous request framing (Transfer-Encoding / duplicate Content-Length), R3 a
+  30s handler socket timeout (slowloris). Response framing tightened so a duplicate
+  **or comma-folded / non-numeric** `Content-Length` can't desync the client — CL
+  is forwarded only when a single purely-numeric value with no Transfer-Encoding,
+  else dropped and close-delimited. Relay stays sacred (every byte reaches the
+  client). `dogfood/eval_http_relay_redteam.py` is a CI + release gate. 605 tests.
 - **Agent advisory (`advise`)** — `advise.py` + `tap.py` CLI verb.
   `glassport advise [--audit <path>] [--session <s.jsonl>] [--write FILE] [--all]`
   folds a static audit `Report` and runtime detector `Annotation`s into a single
@@ -100,14 +109,18 @@ Roughly in dependency order — earlier unlocks later.
 
 ## Next action
 
-**Released 0.6.4; two H2 items shipped.** `0.6.4` is live on PyPI (H1.08
+**Releasing 0.6.5 (relay hardening, PR #53).** `0.6.4` is live on PyPI (H1.08
 coverage/e2e + H2.03 `audit --provenance`, plus contributor PRs #46/#47).
-**H2.01 streamable-HTTP tap** (`wrap --transport http --url`) is on
-`feat/h2-01-streamable-http` — passive MITM over Streamable-HTTP (POST/GET/SSE),
-trace-identical to stdio, fail-open; 8 tests, mocked remote (no network).
+**H2.01 streamable-HTTP tap** (`wrap --transport http --url`) is **merged to
+main** (PR #51) — passive MITM over Streamable-HTTP (POST/GET/SSE),
+trace-identical to stdio, fail-open — and now hardened by the round-2/round-3
+relay work above.
 
-Next: **gate over HTTP** (active c2s blocking on the HTTP path — H2.01 shipped
-passive only) and the **streaming-detector path** (frame-at-a-time analysis;
-detectors still consume the full JSONL post-session today). Smaller alternative:
-**H2.06 property-based validator tests** (`hypothesis` dev-dep already merged).
-GitHub provenance is the follow-up to H2.03.
+Next (in flight): **relay red-team round 3** — hunt the remaining response-path
+framing/injection surfaces (CRLF header injection, lying single Content-Length,
+chunked upstream, SSE abuse) via `dogfood/eval_http_relay_redteam.py` +
+`dogfood/SPEC-http-relay-redteam.md`. Then on the roadmap: **gate over HTTP**
+(active c2s blocking on the HTTP path — H2.01 shipped passive only), the
+**streaming-detector path** (frame-at-a-time analysis), **H2.06 property-based
+validator tests** (`hypothesis` dev-dep already merged), and GitHub provenance
+(follow-up to H2.03).
