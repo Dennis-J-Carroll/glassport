@@ -99,7 +99,7 @@ def _esc(value) -> str:
     straddling the truncation point."""
     return html.escape(
         detectors.neutralize_text(
-            detectors.clamp_text(detectors.redact_secrets(str(value)))),
+            detectors.clamp_text(detectors.redact_secrets_strict(str(value)))),
         quote=True)
 
 

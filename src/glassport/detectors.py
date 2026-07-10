@@ -700,21 +700,42 @@ def clamp_text(text: str, limit: int = MAX_RENDER_CHARS) -> str:
     return text[:limit] + f"… [{len(text) - limit} chars truncated]"
 
 
-def redact_secrets(text: str) -> str:
-    """Replace every credential/PII the detectors recognize with a
-    non-reversible tag. The canonical scrubber for any renderer that emits
-    attacker-influenced text (report HTML, SARIF), so a live key sent as a
-    tool argument, embedded in a result, or hidden in a file path never
-    reaches a shareable artifact. Total: returns the input unchanged if the
-    scan raises."""
-    try:
-        hits = _scan_pii(text)
-    except Exception:
-        return text
+def _apply_redactions(text: str, hits) -> str:
     for pat, value in hits:
         if value and value in text:
             text = text.replace(value, _redact(value, pat.category))
     return text
+
+
+# Fixed literal — contains nothing attacker-influenced. Do NOT interpolate the
+# exception, the input, or a length here; that would re-open a side channel.
+_WITHHELD = "[glassport: redaction unavailable — content withheld]"
+
+
+def redact_secrets(text: str) -> str:
+    """Best-effort scrubber: replace every recognized credential/PII with a
+    non-reversible tag, and return the input UNCHANGED if the scan raises.
+    Use only on analytical/internal paths. For anything that emits a
+    shareable artifact (report HTML, SARIF), use redact_secrets_strict()."""
+    try:
+        hits = _scan_pii(text)
+    except Exception:
+        return text
+    return _apply_redactions(text, hits)
+
+
+def redact_secrets_strict(text: str) -> str:
+    """Fail-closed scrubber for shareable output (report HTML, SARIF). If the
+    scan raises we cannot prove the text is clean, so we WITHHOLD it rather
+    than risk leaking an unscanned secret into an artifact that leaves the
+    machine — a visible placeholder is strictly safer than a possibly-live
+    key. (`_scan_pii` caps input and its validators are total, so this fires
+    only on genuinely pathological input, never on large-but-benign text.)"""
+    try:
+        hits = _scan_pii(text)
+    except Exception:
+        return _WITHHELD
+    return _apply_redactions(text, hits)
 
 
 # --- Custom-pattern plugin registry -------------------------------------

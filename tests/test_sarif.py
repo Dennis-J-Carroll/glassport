@@ -9,14 +9,31 @@ severity (audit) or an int one (runtime detectors).
 """
 import json
 import unittest
+from unittest import mock
 
 from glassport.audit import Finding, Report
 from glassport import sarif
+from glassport import detectors
 
 
 def report(findings, score=50, grade="F"):
     return Report(profile={"name": "demo"}, findings=findings,
                   deductions=[], score=score, grade=grade)
+
+
+class TestRedactionFailsClosed(unittest.TestCase):
+    """S2 — if the PII scan raises, the SARIF artifact must withhold the field,
+    never emit the unscanned (possibly-live) secret."""
+
+    def test_scan_failure_withholds_the_secret_in_the_message(self):
+        secret = "sk_live_" + "Z" * 24
+        f = Finding("secret-hardcoded", "critical", "app.py", 9,
+                    "leaked " + secret)
+        with mock.patch.object(detectors, "_scan_pii",
+                               side_effect=RuntimeError("boom")):
+            out = sarif.render_sarif(report([f]))
+        self.assertNotIn(secret, out)
+        self.assertIn("content withheld", out)
 
 
 class TestSeverityVocab(unittest.TestCase):

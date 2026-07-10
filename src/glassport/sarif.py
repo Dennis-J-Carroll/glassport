@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Union
 
 from glassport.audit import Report, RULES_BY_ID
-from glassport.detectors import clamp_text, neutralize_text, redact_secrets
+from glassport.detectors import clamp_text, neutralize_text, redact_secrets_strict
 
 DRIVER_VERSION = "0.2.0"
 _INFO_URI = "https://github.com/Dennis-J-Carroll/glassport"
@@ -119,7 +119,7 @@ def render_sarif(report: Report, base: str = "") -> str:
         # SARIF file that gets committed and uploaded to the Security tab.
         # Unicode deception (bidi overrides, homoglyphs) is also neutralized so
         # the Security tab cannot be made to display a misleading finding.
-        message = clamp_text(neutralize_text(redact_secrets(f.detail))) \
+        message = clamp_text(neutralize_text(redact_secrets_strict(f.detail))) \
             if f.detail else (meta.title if meta else f.rule)
         results.append({
             "ruleId": rule_id,
@@ -127,12 +127,12 @@ def render_sarif(report: Report, base: str = "") -> str:
             "message": {"text": message},
             "locations": [{
                 "physicalLocation": {
-                    "artifactLocation": {"uri": redact_secrets(_repo_uri(f.path, base))},
+                    "artifactLocation": {"uri": redact_secrets_strict(_repo_uri(f.path, base))},
                     "region": {"startLine": max(1, int(f.line or 1))},
                 },
             }],
             "partialFingerprints": {
-                "glassportRulePath": redact_secrets(f"{f.rule}:{f.path}:{f.line}")},
+                "glassportRulePath": redact_secrets_strict(f"{f.rule}:{f.path}:{f.line}")},
             "properties": {"severity": f.severity, "count": f.count},
         })
 
@@ -157,7 +157,7 @@ def render_sarif(report: Report, base: str = "") -> str:
         locations = []
         if pf.manifest:
             locations = [{"physicalLocation": {"artifactLocation": {
-                "uri": redact_secrets(_repo_uri(pf.manifest, base))}}}]
+                "uri": redact_secrets_strict(_repo_uri(pf.manifest, base))}}}]
         results.append({
             "ruleId": rule_id,
             "level": _sarif_level(pf.severity),
@@ -268,7 +268,7 @@ def render_session_sarif(trace, session_path: str = "", base: str = "") -> str:
         results.append({
             "ruleId": rule_id,
             "level": _sarif_level(a.severity),
-            "message": {"text": clamp_text(neutralize_text(redact_secrets(
+            "message": {"text": clamp_text(neutralize_text(redact_secrets_strict(
                 a.explanation or a.subcategory or rule_id)))},
             "locations": [{
                 "physicalLocation": {
