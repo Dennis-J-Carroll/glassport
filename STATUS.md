@@ -73,7 +73,20 @@ Roughly in dependency order — earlier unlocks later.
 
 ## Recently shipped
 
-- **HTTP-relay round-4 SSE framing** (0.6.7, this PR) — a self-driven pre-probe
+- **HTTP-relay round-5 SSE residue + connection/header path** (0.6.8, this PR) —
+  the Kimi loop's round against the residue round-4 handed off. Five fixes:
+  a **terminated** oversized SSE event is now dropped from the log (round-4 only
+  bounded the *unterminated* flood) so the log can't grow with the attacker;
+  **all 1xx** informational responses (not just 100 Continue) are swallowed via a
+  custom `HTTPResponse` so a 102 can't masquerade as the final reply; a **duplicate
+  Content-Type** can no longer flip a JSON body onto the SSE path (streaming needs
+  exactly one CT with the SSE media type); **204/304** are treated as bodiless
+  (drop a hostile Content-Length, close-delimit); and **any duplicate
+  Content-Length** request line is rejected (RFC 7230, not just conflicting values).
+  Green locks: client-header CRLF can't desync framing, `Expect: 100-continue`
+  forwards safely, chunked trailers are consumed not forwarded. 617 tests, grill
+  23/23. (Bundles the unreleased 0.6.7 round-4 SSE work into this release.)
+- **HTTP-relay round-4 SSE framing** (0.6.7) — a self-driven pre-probe
   of the SSE/connection surfaces before handing them to the Kimi loop. Two fixes:
   an **SSE response is now close-delimited** (`Connection: close` + `close_connection`)
   so the client gets a prompt EOF when the upstream ends the stream instead of
