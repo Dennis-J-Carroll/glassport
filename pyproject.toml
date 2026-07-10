@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "glassport"
-version = "0.6.5"
+version = "0.6.6"
 description = "Wire-level observability and enforcement for MCP servers: passive stdio tap, behavioral detectors, drift watch, and static audit. Zero dependencies."
 readme = "README.md"
 license = "MIT"

@@ -218,6 +218,107 @@ def rf_comma_folded_content_length() -> tuple[bool, str]:
     return ok, f"client_recv={data!r}, cl={r.getheader('Content-Length')!r}, conn={r.getheader('Connection')!r}"
 
 
+def _serve_raw(raw_response: bytes) -> tuple[int, threading.Thread]:
+    """Serve one hostile raw HTTP response a BaseHTTPRequestHandler can't emit
+    (bare LF, comma-folded headers, lying Content-Length). Half-closes cleanly
+    so the proxy reads a graceful EOF rather than racing a RST."""
+    rp_box: list = []
+    ready = threading.Event()
+
+    def upstream():
+        s = socket.socket()
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        s.bind(("127.0.0.1", 0)); s.listen(1)
+        rp_box.append(s.getsockname()[1]); ready.set()
+        try:
+            conn, _ = s.accept()
+            conn.recv(65536)
+            conn.sendall(raw_response)
+            conn.shutdown(socket.SHUT_WR)
+            conn.settimeout(3)
+            try:
+                while conn.recv(4096):
+                    pass
+            except OSError:
+                pass
+            conn.close()
+        finally:
+            s.close()
+
+    t = threading.Thread(target=upstream, daemon=True)
+    t.start(); ready.wait(5)
+    return rp_box[0], t
+
+
+def rf_lying_short_content_length() -> tuple[bool, str]:
+    """A hostile upstream declares Content-Length 100, sends 5 bytes, closes.
+    The proxy can't verify the length before sending headers (buffering the whole
+    body would be the R1 DoS), but once the stream ends short it must close the
+    connection so the client gets a prompt EOF instead of hanging forever."""
+    rp, t = _serve_raw(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+                       b"Content-Length: 100\r\n\r\nhello")
+    tap, tp, _ = _start_tap(f"http://127.0.0.1:{rp}/")
+    hung = False
+    partial = b""
+    try:
+        c = http.client.HTTPConnection("127.0.0.1", tp, timeout=4)
+        c.request("POST", "/mcp", body=b'{}')
+        r = c.getresponse()
+        try:
+            r.read()
+        except http.client.IncompleteRead as exc:
+            partial = exc.partial          # prompt short-read: the fix worked
+        except (TimeoutError, socket.timeout):
+            hung = True                     # proxy held the socket open (the bug)
+        c.close()
+    finally:
+        tap.shutdown(); tap.server_close(); t.join(2)
+    ok = (not hung) and partial == b"hello"
+    return ok, f"hung={hung}, partial={partial!r}"
+
+
+def rf_bare_lf_header_smuggling() -> tuple[bool, str]:
+    """Bare-LF header smuggling: the upstream tries to inject a second
+    Content-Length via a bare LF ('X-Evil: a\\nContent-Length: 9999'). http.client
+    normalizes framing on read, so the proxy sees two CLs and the dedup guard
+    drops CL + close-delimits. Proves a bare LF can't smuggle a desyncing length
+    past the relay."""
+    rp, t = _serve_raw(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+                       b"Content-Length: 5\r\nX-Evil: a\nContent-Length: 9999\r\n\r\nhello")
+    tap, tp, _ = _start_tap(f"http://127.0.0.1:{rp}/")
+    try:
+        c = http.client.HTTPConnection("127.0.0.1", tp, timeout=5)
+        c.request("POST", "/mcp", body=b'{}')
+        r = c.getresponse()
+        data = r.read()
+        c.close()
+    finally:
+        tap.shutdown(); tap.server_close(); t.join(2)
+    ok = data == b"hello" and r.getheader("Content-Length") is None
+    return ok, f"client_recv={data!r}, cl={r.getheader('Content-Length')!r}"
+
+
+def rf_chunked_upstream_dechunked() -> tuple[bool, str]:
+    """A chunked upstream response must reach the client as clean de-chunked
+    bytes, never raw chunk-size markers. The proxy strips Transfer-Encoding (a
+    _HOP header) and http.client de-chunks on read; the client sees the payload
+    with no TE header and no leaked '5\\r\\n' framing."""
+    rp, t = _serve_raw(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+                       b"Transfer-Encoding: chunked\r\n\r\n"
+                       b"5\r\nhello\r\n5\r\nworld\r\n0\r\n\r\n")
+    tap, tp, _ = _start_tap(f"http://127.0.0.1:{rp}/")
+    try:
+        c = http.client.HTTPConnection("127.0.0.1", tp, timeout=5)
+        c.request("POST", "/mcp", body=b'{}')
+        r = c.getresponse()
+        data = r.read()
+        c.close()
+    finally:
+        tap.shutdown(); tap.server_close(); t.join(2)
+    ok = data == b"helloworld" and r.getheader("Transfer-Encoding") is None
+    return ok, f"client_recv={data!r}, te={r.getheader('Transfer-Encoding')!r}"
+
+
 # ── R3 · slowloris / thread survival ───────────────────────────────
 def r3_handler_timeout() -> tuple[bool, str]:
     tmp = Path(LOG_DIR); tmp.mkdir(parents=True, exist_ok=True)
@@ -252,6 +353,9 @@ CASES = [
     ("R2 duplicate Content-Length rejected", r2_duplicate_content_length),
     ("RF conflicting response Content-Length dropped", rf_response_conflicting_content_length),
     ("RF comma-folded response Content-Length dropped", rf_comma_folded_content_length),
+    ("RF lying-short Content-Length forces close (no hang)", rf_lying_short_content_length),
+    ("RF bare-LF header smuggling normalized (CL dropped)", rf_bare_lf_header_smuggling),
+    ("RF chunked upstream de-chunked (no marker leak)", rf_chunked_upstream_dechunked),
     ("R3 handler defines a socket timeout", r3_handler_timeout),
     ("R3 server survives a client aborting mid-request", r3_survives_abort),
 ]
