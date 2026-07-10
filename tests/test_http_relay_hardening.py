@@ -373,6 +373,116 @@ class TestResponseFraming(unittest.TestCase):
         self.assertEqual(data, b"helloworld")
         self.assertIsNone(r.getheader("Transfer-Encoding"))
 
+    def test_sse_response_is_close_delimited(self):
+        """An SSE response carries no Content-Length and the proxy strips the
+        upstream's Transfer-Encoding, so the only honest framing is close-delimit.
+        The proxy must mark the connection to close; when the upstream ends the
+        stream the client gets a prompt EOF, not a hang on a kept-alive socket.
+        Regression: the SSE branch set no framing and the client blocked to its
+        own timeout."""
+        class _SSERemote(BaseHTTPRequestHandler):
+            def log_message(self, *a, **k):
+                pass
+
+            def do_POST(self):
+                n = int(self.headers.get("Content-Length", 0) or 0)
+                self.rfile.read(n)
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.end_headers()
+                self.wfile.write(b"data: hello\n\ndata: world\n\n")
+
+        remote = _serve(_SSERemote)
+        rh, rp = remote.server_address
+        proxy = _start_proxy(f"http://{rh}:{rp}/", self.logdir)
+        ph, pp = proxy.server_address
+        try:
+            c = http.client.HTTPConnection(ph, pp, timeout=5)
+            c.request("POST", "/mcp", body=b'{}')
+            r = c.getresponse()
+            body = r.read()          # Connection: close → reads to EOF, no hang
+            c.close()
+        finally:
+            proxy.shutdown(); proxy.server_close()
+            remote.shutdown(); remote.server_close()
+
+        self.assertEqual(r.getheader("Connection"), "close")
+        self.assertEqual(body, b"data: hello\n\ndata: world\n\n")
+
+    def test_content_type_substring_does_not_flip_to_sse(self):
+        """A non-SSE body whose Content-Type merely *contains* the SSE token in a
+        parameter ('application/json; note=text/event-stream') must stay on the
+        non-SSE path: its Content-Length is preserved and the body is delivered
+        intact. Regression: a substring match reframed it as SSE and dropped CL."""
+        class _FlipRemote(BaseHTTPRequestHandler):
+            def log_message(self, *a, **k):
+                pass
+
+            def do_POST(self):
+                n = int(self.headers.get("Content-Length", 0) or 0)
+                self.rfile.read(n)
+                body = b'{"ok":"data"}'
+                self.send_response(200)
+                self.send_header("Content-Type",
+                                 "application/json; note=text/event-stream")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+        remote = _serve(_FlipRemote)
+        rh, rp = remote.server_address
+        proxy = _start_proxy(f"http://{rh}:{rp}/", self.logdir)
+        ph, pp = proxy.server_address
+        try:
+            c = http.client.HTTPConnection(ph, pp, timeout=5)
+            c.request("POST", "/mcp", body=b'{}')
+            r = c.getresponse()
+            body = r.read()
+            c.close()
+        finally:
+            proxy.shutdown(); proxy.server_close()
+            remote.shutdown(); remote.server_close()
+
+        self.assertEqual(body, b'{"ok":"data"}')
+        self.assertEqual(r.getheader("Content-Length"), "13")
+
+    def test_oversized_sse_event_is_memory_bounded(self):
+        """A hostile SSE stream that never sends an event terminator must reach
+        the client in full (relay is sacred) while the session log stays bounded:
+        _MAX_SSE_BUF caps buffering and a single drop-note replaces the runaway."""
+        payload = b"A" * (512 * 1024)   # over _MAX_SSE_BUF (256 KB), no terminator
+
+        class _FloodRemote(BaseHTTPRequestHandler):
+            def log_message(self, *a, **k):
+                pass
+
+            def do_POST(self):
+                n = int(self.headers.get("Content-Length", 0) or 0)
+                self.rfile.read(n)
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.end_headers()
+                self.wfile.write(b"data: " + payload)
+                self.wfile.flush()
+
+        remote = _serve(_FloodRemote)
+        rh, rp = remote.server_address
+        proxy = _start_proxy(f"http://{rh}:{rp}/", self.logdir)
+        ph, pp = proxy.server_address
+        try:
+            c = http.client.HTTPConnection(ph, pp, timeout=8)
+            c.request("POST", "/mcp", body=b'{}')
+            r = c.getresponse()
+            body = r.read()
+            c.close()
+        finally:
+            proxy.shutdown(); proxy.server_close()
+            remote.shutdown(); remote.server_close()
+
+        self.assertEqual(len(body), len(payload) + len(b"data: "))   # relay sacred
+        log_size = sum(f.stat().st_size for f in self.logdir.rglob("*_http_*.jsonl"))
+        self.assertLess(log_size, 1_000_000, "runaway SSE was not memory-bounded")
+
 
 # ── R3 · slowloris / thread survival ───────────────────────────────
 class TestHandlerTimeoutAndSurvival(unittest.TestCase):

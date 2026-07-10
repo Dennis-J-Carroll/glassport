@@ -73,7 +73,18 @@ Roughly in dependency order — earlier unlocks later.
 
 ## Recently shipped
 
-- **HTTP-relay round-3 framing** (0.6.6, this PR) — the least-grilled response
+- **HTTP-relay round-4 SSE framing** (0.6.7, this PR) — a self-driven pre-probe
+  of the SSE/connection surfaces before handing them to the Kimi loop. Two fixes:
+  an **SSE response is now close-delimited** (`Connection: close` + `close_connection`)
+  so the client gets a prompt EOF when the upstream ends the stream instead of
+  hanging on a kept-alive socket (SSE has no Content-Length and the proxy strips
+  the upstream's chunked TE); and the SSE trigger matches the **media type**, not
+  any substring, so `application/json; note=text/event-stream` can't flip a normal
+  body onto the SSE path and drop its Content-Length. Plus green safety-locks: a
+  2 MB no-terminator SSE flood stays memory-bounded (relay sacred), and a pipelined
+  request after an ambiguous body can't desync. 610 tests. Remaining SSE-event and
+  header-path residue handed to Kimi in `dogfood/SPEC-http-relay-redteam.md`.
+- **HTTP-relay round-3 framing** (0.6.6) — the least-grilled response
   path, continued. Fix: a **lying-short `Content-Length`** (declares more than it
   sends, then closes) used to hold the client on a kept-alive socket until its own
   timeout; the proxy now forces a connection close on the shortfall so the client
