@@ -457,6 +457,244 @@ def rf_pipeline_closes_after_ambiguous_body() -> tuple[bool, str]:
     return ok, f"responses={buf.count(b'HTTP/1.1 200')}, close_present={b'Connection: close' in buf}"
 
 
+# ── SSE surface #4 residue ─────────────────────────────────────────
+def sse_terminated_oversized_event_dropped() -> tuple[bool, str]:
+    """A terminated SSE event larger than _MAX_SSE_BUF must reach the client in
+    full, but the session log must not hold the whole event — one drop-note
+    replaces it."""
+    payload = b"A" * (512 * 1024)  # over _MAX_SSE_BUF
+
+    class Flood(BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def do_POST(self):
+            self.rfile.read(int(self.headers.get("Content-Length", 0) or 0))
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.end_headers()
+            self.wfile.write(b"data: " + payload + b"\n\n")
+
+    remote = _serve(Flood)
+    rp = remote.server_address[1]
+    tap, tp, logdir = _start_tap(f"http://127.0.0.1:{rp}/")
+    try:
+        c = http.client.HTTPConnection("127.0.0.1", tp, timeout=8)
+        c.request("POST", "/mcp", body=b'{}')
+        r = c.getresponse()
+        body = r.read()
+        c.close()
+    finally:
+        tap.shutdown(); tap.server_close(); remote.shutdown(); remote.server_close()
+    log_size = sum(f.stat().st_size for f in Path(logdir).rglob("*_http_*.jsonl"))
+    ok = len(body) == len(payload) + len(b"data: ") + 2 and log_size < 1_000_000
+    return ok, f"client_recv={len(body)}, log_size={log_size} (bounded={log_size < 1_000_000})"
+
+
+def sse_oversized_event_with_metadata_dropped() -> tuple[bool, str]:
+    """Metadata lines do not exempt a terminated oversized event from the log
+    cap; the raw event is dropped instead of being logged whole."""
+    payload = b"A" * (512 * 1024)
+
+    class Flood(BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def do_POST(self):
+            self.rfile.read(int(self.headers.get("Content-Length", 0) or 0))
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.end_headers()
+            self.wfile.write(b"event: big\ndata: " + payload + b"\n\n")
+
+    remote = _serve(Flood)
+    rp = remote.server_address[1]
+    tap, tp, logdir = _start_tap(f"http://127.0.0.1:{rp}/")
+    try:
+        c = http.client.HTTPConnection("127.0.0.1", tp, timeout=8)
+        c.request("POST", "/mcp", body=b'{}')
+        r = c.getresponse()
+        body = r.read()
+        c.close()
+    finally:
+        tap.shutdown(); tap.server_close(); remote.shutdown(); remote.server_close()
+    log_size = sum(f.stat().st_size for f in Path(logdir).rglob("*_http_*.jsonl"))
+    ok = len(body) == len(payload) + len(b"event: big\ndata: ") + 2 and log_size < 1_000_000
+    return ok, f"client_recv={len(body)}, log_size={log_size} (bounded={log_size < 1_000_000})"
+
+
+# ── surface #5 — connection / hop-by-hop / header path ─────────────
+def rf_1xx_processing_skipped() -> tuple[bool, str]:
+    """A 1xx informational response (e.g., 102 Processing) before the final
+    response must be swallowed by the proxy, not forwarded to the client."""
+    rp, t = _serve_raw(
+        b"HTTP/1.1 102 Processing\r\n\r\n"
+        b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+        b"Content-Length: 15\r\n\r\n{\"result\":true}")
+    tap, tp, _ = _start_tap(f"http://127.0.0.1:{rp}/")
+    try:
+        c = http.client.HTTPConnection("127.0.0.1", tp, timeout=5)
+        c.request("POST", "/mcp", body=b'{}')
+        r = c.getresponse()
+        data = r.read()
+        c.close()
+    finally:
+        tap.shutdown(); tap.server_close(); t.join(2)
+    ok = r.status == 200 and data == b'{"result":true}'
+    return ok, f"status={r.status}, data={data!r}"
+
+
+def rf_duplicate_content_type_safe() -> tuple[bool, str]:
+    """Duplicate Content-Type headers cannot flip a JSON body onto the SSE
+    path. Ambiguous CT defaults to non-streaming so Content-Length is preserved."""
+    class DupCT(BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def do_POST(self):
+            self.rfile.read(int(self.headers.get("Content-Length", 0) or 0))
+            body = b'{"ok":"data"}'
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    remote = _serve(DupCT)
+    rp = remote.server_address[1]
+    tap, tp, _ = _start_tap(f"http://127.0.0.1:{rp}/")
+    try:
+        c = http.client.HTTPConnection("127.0.0.1", tp, timeout=5)
+        c.request("POST", "/mcp", body=b'{}')
+        r = c.getresponse()
+        data = r.read()
+        c.close()
+    finally:
+        tap.shutdown(); tap.server_close(); remote.shutdown(); remote.server_close()
+    ok = data == b'{"ok":"data"}' and r.getheader("Content-Length") == "13"
+    return ok, f"client_recv={data!r}, cl={r.getheader('Content-Length')!r}"
+
+
+def rf_204_no_content_drops_cl() -> tuple[bool, str]:
+    """A 204/304 response is bodiless. A hostile upstream Content-Length must
+    not be forwarded; the proxy close-delimits cleanly instead."""
+    rp, t = _serve_raw(
+        b"HTTP/1.1 204 No Content\r\n"
+        b"Content-Type: application/json\r\n"
+        b"Content-Length: 5\r\n\r\n")
+    tap, tp, _ = _start_tap(f"http://127.0.0.1:{rp}/")
+    try:
+        c = http.client.HTTPConnection("127.0.0.1", tp, timeout=5)
+        c.request("POST", "/mcp", body=b'{}')
+        r = c.getresponse()
+        data = r.read()
+        c.close()
+    finally:
+        tap.shutdown(); tap.server_close(); t.join(2)
+    ok = r.status == 204 and data == b"" and r.getheader("Content-Length") is None
+    return ok, f"status={r.status}, cl={r.getheader('Content-Length')!r}, conn={r.getheader('Connection')!r}"
+
+
+def rf_chunked_trailers_not_forwarded() -> tuple[bool, str]:
+    """Trailers on a chunked response are consumed by http.client during
+    de-chunking and are not forwarded (TE is a _HOP header). This is a green
+    lock: the client has no trailer channel because TE is stripped."""
+    rp, t = _serve_raw(
+        b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+        b"Transfer-Encoding: chunked\r\nTrailer: X-Trailer\r\n\r\n"
+        b"5\r\nhello\r\n5\r\nworld\r\n0\r\n"
+        b"X-Trailer: smuggled\r\n\r\n")
+    tap, tp, _ = _start_tap(f"http://127.0.0.1:{rp}/")
+    try:
+        c = http.client.HTTPConnection("127.0.0.1", tp, timeout=5)
+        c.request("POST", "/mcp", body=b'{}')
+        r = c.getresponse()
+        data = r.read()
+        c.close()
+    finally:
+        tap.shutdown(); tap.server_close(); t.join(2)
+    ok = data == b"helloworld" and r.getheader("X-Trailer") is None
+    return ok, f"client_recv={data!r}, trailer={r.getheader('X-Trailer')!r}"
+
+
+def r2_duplicate_identical_content_length_rejected() -> tuple[bool, str]:
+    """Any duplicate Content-Length header line is malformed per RFC 7230,
+    even if the two values are identical."""
+    resp, _ = _raw(
+        b"POST /mcp HTTP/1.1\r\nHost: x\r\n"
+        b"Content-Length: 5\r\nContent-Length: 5\r\n\r\nhello")
+    status = resp.split(b"\r\n", 1)[0] if resp else b""
+    ok = status.startswith(b"HTTP/1.1 4")
+    return ok, f"status={status!r}"
+
+
+def req_header_crlf_inject_no_desync() -> tuple[bool, str]:
+    """Client header CRLF injection cannot desync framing: the injected header
+    is parsed as a separate header, hop/framing headers are stripped before the
+    upstream, and the proxy's request-target is fixed to remote.path. The two
+    pipelined requests are forwarded separately — green lock."""
+    _Counting.paths = []
+    remote = _serve(_Counting)
+    rp = remote.server_address[1]
+    tap, tp, _ = _start_tap(f"http://127.0.0.1:{rp}/")
+    try:
+        s = socket.create_connection(("127.0.0.1", tp), timeout=5)
+        s.sendall(
+            b"POST /mcp HTTP/1.1\r\nHost: x\r\n"
+            b"X-Evil: a\r\nContent-Length: 0\r\n\r\n"
+            b"POST /smuggled HTTP/1.1\r\nHost: x\r\nContent-Length: 0\r\n\r\n")
+        s.settimeout(5)
+        buf = b""
+        try:
+            while True:
+                d = s.recv(4096)
+                if not d:
+                    break
+                buf += d
+        except socket.timeout:
+            pass
+        s.close()
+    finally:
+        tap.shutdown(); tap.server_close(); remote.shutdown(); remote.server_close()
+    # Both requests reach the upstream as separate requests, but always to the
+    # configured remote.path ("/") — no path injection.
+    ok = len(_Counting.paths) == 2 and all(p == "/" for p in _Counting.paths) and buf.count(b"HTTP/1.1 200") == 2
+    return ok, f"upstream_paths={_Counting.paths}, responses={buf.count(b'HTTP/1.1 200')}"
+
+
+def req_expect_100_continue_safe() -> tuple[bool, str]:
+    """A client Expect: 100-continue request is forwarded header+body; the
+    upstream's final response reaches the client. Green lock."""
+    class Echo(BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def do_POST(self):
+            n = int(self.headers.get("Content-Length", 0) or 0)
+            body = self.rfile.read(n)
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    remote = _serve(Echo)
+    rp = remote.server_address[1]
+    tap, tp, _ = _start_tap(f"http://127.0.0.1:{rp}/")
+    try:
+        c = http.client.HTTPConnection("127.0.0.1", tp, timeout=5)
+        c.request("POST", "/mcp", body=b'{"x":1}',
+                  headers={"Expect": "100-continue"})
+        r = c.getresponse()
+        data = r.read()
+        c.close()
+    finally:
+        tap.shutdown(); tap.server_close(); remote.shutdown(); remote.server_close()
+    ok = r.status == 200 and data == b'{"x":1}'
+    return ok, f"status={r.status}, data={data!r}"
+
+
 # ── R3 · slowloris / thread survival ───────────────────────────────
 def r3_handler_timeout() -> tuple[bool, str]:
     tmp = Path(LOG_DIR); tmp.mkdir(parents=True, exist_ok=True)
@@ -489,6 +727,7 @@ CASES = [
     ("R1 unbounded response → memory/disk DoS", r1_unbounded_response),
     ("R2 chunked request smuggling (TE, no CL)", r2_chunked_smuggling),
     ("R2 duplicate Content-Length rejected", r2_duplicate_content_length),
+    ("R2 duplicate identical Content-Length rejected", r2_duplicate_identical_content_length_rejected),
     ("RF conflicting response Content-Length dropped", rf_response_conflicting_content_length),
     ("RF comma-folded response Content-Length dropped", rf_comma_folded_content_length),
     ("RF lying-short Content-Length forces close (no hang)", rf_lying_short_content_length),
@@ -496,8 +735,16 @@ CASES = [
     ("RF chunked upstream de-chunked (no marker leak)", rf_chunked_upstream_dechunked),
     ("RF SSE response close-delimited (no client hang)", rf_sse_close_delimited),
     ("RF Content-Type substring can't flip to SSE (CL kept)", rf_content_type_no_sse_flip),
+    ("RF duplicate Content-Type can't flip to SSE (CL kept)", rf_duplicate_content_type_safe),
     ("RF oversized SSE event memory-bounded (relay sacred)", rf_sse_oversized_event_bounded),
+    ("SSE terminated oversized event dropped (log bounded)", sse_terminated_oversized_event_dropped),
+    ("SSE oversized metadata event dropped (log bounded)", sse_oversized_event_with_metadata_dropped),
+    ("RF 1xx Processing skipped (final response reaches client)", rf_1xx_processing_skipped),
+    ("RF 204 No Content drops hostile Content-Length", rf_204_no_content_drops_cl),
+    ("RF chunked trailers not forwarded (TE stripped)", rf_chunked_trailers_not_forwarded),
     ("RF pipeline closes after ambiguous body (no desync)", rf_pipeline_closes_after_ambiguous_body),
+    ("REQ header CRLF inject cannot desync framing", req_header_crlf_inject_no_desync),
+    ("REQ Expect: 100-continue forwarded safely", req_expect_100_continue_safe),
     ("R3 handler defines a socket timeout", r3_handler_timeout),
     ("R3 server survives a client aborting mid-request", r3_survives_abort),
 ]

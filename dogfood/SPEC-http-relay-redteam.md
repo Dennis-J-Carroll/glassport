@@ -1,6 +1,6 @@
 # Dogfood Spec — HTTP-Relay Red-Team Grill (adapters/mcp_http.py framing resistance)
 
-**Status:** grill implemented and running all-green — R1–R3 + RF (response-framing) + round-3 surfaces PASS, exit 0. A hard CI + release gate (`ci.yml` `redteam-grills`, `release.yml`). 607 tests.
+**Status:** grill implemented and running all-green — R1–R3 + RF (response-framing) + round-4 SSE + round-5 connection/header surfaces PASS, exit 0. A hard CI + release gate (`ci.yml` `redteam-grills`, `release.yml`).
 **Author handoff:** Kimi.
 **Motivation:** the same through-line as the renderer grills — *glassport sits in the middle of a byte stream it does not trust*. For `advise`/`report`/`sarif` the untrusted bytes are rendered into a downstream-parsed surface. Here they are **relayed** between an MCP client and a remote server over Streamable-HTTP, and glassport is a man-in-the-middle proxy. Two properties are in tension and both must hold:
 
@@ -58,21 +58,18 @@ A self-driven pre-probe of surfaces #4/#5 before handing them to Kimi, so the lo
 - **Oversized SSE event (safe, green lock).** A 2 MB `data:` with no terminator reaches the client in full (relay sacred) while the session log stays ~277 bytes — `_MAX_SSE_BUF` (256 KB) bounds buffering and one drop-note replaces the runaway.
 - **Pipeline after ambiguous body (safe, green lock).** After a close-delimited response the proxy closes, so a second pipelined request on the same socket is not reparsed against leftover bytes — one response comes back, the second request dies with the connection.
 
-## Kimi's charge — what's still open
+### Round-5 — SSE residue + connection/header path (this session)
 
-Round 4 closed the SSE framing headline. Narrower surfaces remain in `_stream_sse` and on the connection/header path. Make the table quaint.
+Kimi's charge: probe the narrower residue in `_stream_sse` and the connection/hop-by-hop/header path.
 
-### Surface #4 residue — SSE event framing (`_stream_sse`, `mcp_http.py:84`)
-
-- **Terminator smuggling.** Events split across `\r\r`, `\n\n`, `\r\n\r\n`, and a `data:` payload that itself contains a bare terminator or a mid-stream BOM. Does the **logged** frame match what the client received, byte-for-byte? (Forwarding is byte-exact; the logging cut is the suspect.)
-- **`event:`/`id:`/`retry:` metadata + comment lines** — `_log_sse_event` reconstructs full event text when metadata is present; fuzz malformed field mixes and confirm no payload is dropped from the log or mis-joined.
-- **Drop-note reset on interleave.** `dropped_oversize` resets on any real terminator (`mcp_http.py:124`). Can a flood interleaved with tiny valid events dodge the single-note contract or re-grow memory between resets?
-
-### Surface #5 — connection / hop-by-hop / header path
-
-- **Header pass-through as an exfil/deception surface.** `Set-Cookie` and arbitrary upstream headers are forwarded verbatim (only `_HOP` is stripped). Not a framing bug — but is there a header the proxy should refuse to relay, or one whose value can carry a deception the analyst never sees?
-- **Trailers / unusual status / `100 Continue`.** Chunked responses with trailer headers; 1xx/204/304 bodiless responses (does the CL/close logic do the right thing when there is no body?); `Expect: 100-continue` on the request path.
-- **Request-path headers.** The request forwards client headers via `_req_headers`; probe hostile client headers (not just upstream) for a framing or injection angle the response-path work didn't cover.
+- **Terminated oversized SSE event (fixed).** A huge event *with* a terminator was buffered and partially logged (up to the buffer cap), so the session log grew with the attacker and the logged frame did not match the client's event. Fix: cap logged events at `_MAX_SSE_BUF`; an oversized terminated event is replaced by one `sse_frame_dropped_oversize` note, just like an unterminated flood. Metadata lines do not exempt the event.
+- **1xx responses other than 100 Continue (fixed).** `http.client` skips only 100; a 102 Processing (or any other 1xx) was forwarded to the client as the final answer, hiding the real response. Fix: a custom `HTTPResponse` swallows every 1xx status line + headers before the final response is processed.
+- **Duplicate Content-Type flips JSON to SSE (fixed).** An upstream that emits two `Content-Type` headers could make `resp.getheader("Content-Type")` return `text/event-stream`, forcing the SSE path and dropping `Content-Length`. Fix: streaming requires exactly one `Content-Type` header line and a media-type match; ambiguous CT defaults to non-streaming.
+- **204/304 with a hostile Content-Length (fixed).** A bodiless status that carried a `Content-Length` would forward the lying length. Fix: treat 204/304 as bodiless — drop `Content-Length` and close-delimit.
+- **Duplicate identical Content-Length (hardened).** The proxy used to accept two identical `Content-Length` values; RFC 7230 forbids any duplicate. Fix: reject all duplicate `Content-Length` header lines.
+- **Chunked trailers (safe, green lock).** Trailer headers on a chunked response are consumed during de-chunking and never forwarded; because `Transfer-Encoding` is stripped, the client has no trailer channel.
+- **Client header CRLF injection (safe, green lock).** An embedded CRLF in a header value is parsed by `http.server` as a separate header. Because framing/hop headers are stripped before the upstream and the proxy's request-target is fixed to `remote.path`, this cannot desync client vs. upstream framing; it merely produces two pipelined requests, both forwarded to the configured path.
+- **Expect: 100-continue (safe, green lock).** A client `Expect: 100-continue` request is forwarded with headers and body; the upstream's final response reaches the client.
 
 ### Method
 
