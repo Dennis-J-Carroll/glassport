@@ -544,6 +544,30 @@ def rf_1xx_processing_skipped() -> tuple[bool, str]:
     return ok, f"status={r.status}, data={data!r}"
 
 
+def rf_101_upgrade_refused() -> tuple[bool, str]:
+    """A hostile 101 Switching Protocols re-tasks the connection; the bytes
+    after it are not HTTP. The proxy must refuse with a 502, never echo the
+    upgraded bytes and never hang parsing them as a status line."""
+    rp, t = _serve_raw(
+        b"HTTP/1.1 101 Switching Protocols\r\n\r\n"
+        b"\x00\x01not-http-garbage\xff")
+    tap, tp, _ = _start_tap(f"http://127.0.0.1:{rp}/")
+    hung = False
+    try:
+        c = http.client.HTTPConnection("127.0.0.1", tp, timeout=4)
+        c.request("POST", "/mcp", body=b'{}')
+        r = c.getresponse()
+        data = r.read()
+        status = r.status
+        c.close()
+    except (TimeoutError, socket.timeout):
+        hung, status, data = True, 0, b""
+    finally:
+        tap.shutdown(); tap.server_close(); t.join(2)
+    ok = (not hung) and status == 502 and b"not-http-garbage" not in data
+    return ok, f"hung={hung}, status={status}, garbage_leaked={b'not-http-garbage' in data}"
+
+
 def rf_duplicate_content_type_safe() -> tuple[bool, str]:
     """Duplicate Content-Type headers cannot flip a JSON body onto the SSE
     path. Ambiguous CT defaults to non-streaming so Content-Length is preserved."""
@@ -740,6 +764,7 @@ CASES = [
     ("SSE terminated oversized event dropped (log bounded)", sse_terminated_oversized_event_dropped),
     ("SSE oversized metadata event dropped (log bounded)", sse_oversized_event_with_metadata_dropped),
     ("RF 1xx Processing skipped (final response reaches client)", rf_1xx_processing_skipped),
+    ("RF 101 upgrade refused (502, no garbage, no hang)", rf_101_upgrade_refused),
     ("RF 204 No Content drops hostile Content-Length", rf_204_no_content_drops_cl),
     ("RF chunked trailers not forwarded (TE stripped)", rf_chunked_trailers_not_forwarded),
     ("RF pipeline closes after ambiguous body (no desync)", rf_pipeline_closes_after_ambiguous_body),
