@@ -7,5 +7,8 @@
 | R2 duplicate Content-Length rejected | PASS | status=b'HTTP/1.1 400 Bad Request' |
 | RF conflicting response Content-Length dropped | PASS | client_recv=b'hello', cl=None, conn='close' |
 | RF comma-folded response Content-Length dropped | PASS | client_recv=b'hello', cl=None, conn='close' |
+| RF lying-short Content-Length forces close (no hang) | PASS | hung=False, partial=b'hello' |
+| RF bare-LF header smuggling normalized (CL dropped) | PASS | client_recv=b'hello', cl=None |
+| RF chunked upstream de-chunked (no marker leak) | PASS | client_recv=b'helloworld', te=None |
 | R3 handler defines a socket timeout | PASS | handler.timeout=30 |
 | R3 server survives a client aborting mid-request | PASS | post_abort_request_status=200 |
