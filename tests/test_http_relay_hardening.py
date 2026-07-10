@@ -546,6 +546,76 @@ class TestResponseFraming(unittest.TestCase):
         self.assertEqual(r.status, 200)
         self.assertEqual(data, b'{"result":true}')
 
+    def _raw_upstream_then_client(self, raw_response: bytes):
+        """Serve one raw HTTP response, drive one client POST, return the
+        client HTTPResponse status and body (with a timeout so a hang fails
+        the test rather than blocking forever)."""
+        rp_box: list = []
+        ready = threading.Event()
+
+        def raw_upstream():
+            s = socket.socket()
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            s.bind(("127.0.0.1", 0)); s.listen(1)
+            rp_box.append(s.getsockname()[1]); ready.set()
+            try:
+                conn, _ = s.accept()
+                conn.recv(65536)
+                conn.sendall(raw_response)
+                conn.shutdown(socket.SHUT_WR)
+                conn.settimeout(3)
+                try:
+                    while conn.recv(4096):
+                        pass
+                except OSError:
+                    pass
+                conn.close()
+            finally:
+                s.close()
+
+        t = threading.Thread(target=raw_upstream, daemon=True)
+        t.start(); ready.wait(5)
+        proxy = _start_proxy(f"http://127.0.0.1:{rp_box[0]}/", self.logdir)
+        ph, pp = proxy.server_address
+        try:
+            c = http.client.HTTPConnection(ph, pp, timeout=5)
+            c.request("POST", "/mcp", body=b'{}')
+            r = c.getresponse()
+            body = r.read()
+            status = r.status
+            c.close()
+        finally:
+            proxy.shutdown(); proxy.server_close()
+            t.join(2)
+        return status, body
+
+    def test_101_switching_protocols_becomes_502_not_a_hang(self):
+        """A hostile 101 re-tasks the connection; the bytes after it are not
+        HTTP. The proxy must refuse (502), never echo the upgraded bytes and
+        never hang trying to parse them as a status line."""
+        status, body = self._raw_upstream_then_client(
+            b"HTTP/1.1 101 Switching Protocols\r\n\r\n"
+            b"\x00\x01\x02not-http-garbage\xff\xfe")
+        self.assertEqual(status, 502)
+        self.assertNotIn(b"not-http-garbage", body)
+
+    def test_stacked_103_early_hints_then_final(self):
+        """Multiple 103 Early Hints before the final 200 are all skipped."""
+        status, body = self._raw_upstream_then_client(
+            b"HTTP/1.1 103 Early Hints\r\nLink: </s.css>\r\n\r\n"
+            b"HTTP/1.1 103 Early Hints\r\nLink: </t.css>\r\n\r\n"
+            b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+            b"Content-Length: 15\r\n\r\n{\"result\":true}")
+        self.assertEqual(status, 200)
+        self.assertEqual(body, b'{"result":true}')
+
+    def test_1xx_with_unbounded_header_block_fails_bounded(self):
+        """A 1xx whose header block never ends must fail bounded (502), not pin
+        the handler thread streaming fake headers."""
+        flood = b"HTTP/1.1 102 Processing\r\n" + b"X-Pad: y\r\n" * 5000 + b"\r\n"
+        status, _ = self._raw_upstream_then_client(flood)
+        self.assertEqual(status, 502)
+
     def test_duplicate_content_type_does_not_flip_to_sse(self):
         """An upstream that emits two Content-Type headers cannot trick the
         proxy into treating a JSON body as SSE (which would drop CL)."""
@@ -803,6 +873,21 @@ class TestHandlerTimeoutAndSurvival(unittest.TestCase):
             proxy.shutdown(); proxy.server_close()
             remote.shutdown(); remote.server_close()
         self.assertEqual(status, 200)
+
+
+class TestNoPrivateStdlibSymbols(unittest.TestCase):
+    """H1 — the 1xx handler must not depend on nonpublic http.client symbols,
+    which "may change" across the 3.10–3.13 matrix. Lock that in source."""
+
+    def test_mcp_http_uses_no_private_http_client_symbols(self):
+        import glassport.adapters.mcp_http as m
+        src = Path(m.__file__).read_text(encoding="utf-8")
+        # strip comments so a mention in prose doesn't trip the check
+        code = "\n".join(ln.split("#", 1)[0] for ln in src.splitlines())
+        for forbidden in ("http.client._read_headers", "http.client._MAXLINE",
+                          "._MAXLINE"):
+            self.assertNotIn(forbidden, code,
+                             f"private stdlib symbol {forbidden!r} in mcp_http.py")
 
 
 if __name__ == "__main__":
