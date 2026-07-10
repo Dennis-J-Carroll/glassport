@@ -319,6 +319,144 @@ def rf_chunked_upstream_dechunked() -> tuple[bool, str]:
     return ok, f"client_recv={data!r}, te={r.getheader('Transfer-Encoding')!r}"
 
 
+def rf_sse_close_delimited() -> tuple[bool, str]:
+    """An SSE response has no Content-Length and the proxy strips Transfer-Encoding,
+    so the proxy must close-delimit: mark Connection: close so the client gets a
+    prompt EOF when the upstream ends the stream instead of hanging on keep-alive."""
+    class SSE(BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def do_POST(self):
+            self.rfile.read(int(self.headers.get("Content-Length", 0) or 0))
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.end_headers()
+            self.wfile.write(b"data: hello\n\ndata: world\n\n")
+
+    remote = _serve(SSE)
+    rp = remote.server_address[1]
+    tap, tp, _ = _start_tap(f"http://127.0.0.1:{rp}/")
+    try:
+        c = http.client.HTTPConnection("127.0.0.1", tp, timeout=4)
+        c.request("POST", "/mcp", body=b'{}')
+        r = c.getresponse()
+        body = r.read()
+        c.close()
+    finally:
+        tap.shutdown(); tap.server_close(); remote.shutdown(); remote.server_close()
+    ok = body == b"data: hello\n\ndata: world\n\n" and r.getheader("Connection") == "close"
+    return ok, f"client_recv={body!r}, conn={r.getheader('Connection')!r}"
+
+
+def rf_content_type_no_sse_flip() -> tuple[bool, str]:
+    """A non-SSE body whose Content-Type merely contains the SSE token in a
+    parameter must not flip to the SSE path (which drops Content-Length). Media
+    type is matched, not any substring; CL is preserved, body intact."""
+    class Flip(BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def do_POST(self):
+            self.rfile.read(int(self.headers.get("Content-Length", 0) or 0))
+            body = b'{"ok":"data"}'
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; note=text/event-stream")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    remote = _serve(Flip)
+    rp = remote.server_address[1]
+    tap, tp, _ = _start_tap(f"http://127.0.0.1:{rp}/")
+    try:
+        c = http.client.HTTPConnection("127.0.0.1", tp, timeout=4)
+        c.request("POST", "/mcp", body=b'{}')
+        r = c.getresponse()
+        body = r.read()
+        c.close()
+    finally:
+        tap.shutdown(); tap.server_close(); remote.shutdown(); remote.server_close()
+    ok = body == b'{"ok":"data"}' and r.getheader("Content-Length") == "13"
+    return ok, f"client_recv={body!r}, cl={r.getheader('Content-Length')!r}"
+
+
+def rf_sse_oversized_event_bounded() -> tuple[bool, str]:
+    """A hostile SSE stream that never sends an event terminator must reach the
+    client in full (the relay is sacred) while the session log stays bounded —
+    _MAX_SSE_BUF caps buffering and one drop-note replaces the runaway."""
+    payload = b"A" * (2 * 1024 * 1024)   # 2 MB, no \n\n terminator
+
+    class Flood(BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def do_POST(self):
+            self.rfile.read(int(self.headers.get("Content-Length", 0) or 0))
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.end_headers()
+            self.wfile.write(b"data: " + payload)
+            self.wfile.flush()
+
+    remote = _serve(Flood)
+    rp = remote.server_address[1]
+    tap, tp, logdir = _start_tap(f"http://127.0.0.1:{rp}/")
+    try:
+        c = http.client.HTTPConnection("127.0.0.1", tp, timeout=8)
+        c.request("POST", "/mcp", body=b'{}')
+        r = c.getresponse()
+        body = r.read()
+        c.close()
+    finally:
+        tap.shutdown(); tap.server_close(); remote.shutdown(); remote.server_close()
+    log_size = sum(f.stat().st_size for f in Path(logdir).rglob("*_http_*.jsonl"))
+    ok = len(body) == len(payload) + len(b"data: ") and log_size < 1_500_000
+    return ok, f"client_recv={len(body)} of {len(payload)+6}, log_size={log_size} (bounded={log_size < 1_500_000})"
+
+
+def rf_pipeline_closes_after_ambiguous_body() -> tuple[bool, str]:
+    """After a close-delimited (ambiguous-framing) response the proxy must close
+    the connection, so a second pipelined request on the same socket is not
+    desynced and reparsed against leftover bytes. Only one response comes back;
+    the second request's bytes die with the closed connection."""
+    class DupCL(BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def do_POST(self):
+            self.rfile.read(int(self.headers.get("Content-Length", 0) or 0))
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", "5")
+            self.send_header("Content-Length", "50")   # ambiguous → close-delimit
+            self.end_headers()
+            self.wfile.write(b"hello")
+
+    remote = _serve(DupCL)
+    rp = remote.server_address[1]
+    tap, tp, _ = _start_tap(f"http://127.0.0.1:{rp}/")
+    try:
+        c = socket.create_connection(("127.0.0.1", tp), timeout=4)
+        c.sendall(b"POST /mcp HTTP/1.1\r\nHost: x\r\nContent-Length: 2\r\n\r\n{}"
+                  b"POST /mcp HTTP/1.1\r\nHost: x\r\nContent-Length: 2\r\n\r\n{}")
+        c.settimeout(3)
+        buf = b""
+        try:
+            while True:
+                d = c.recv(4096)
+                if not d:
+                    break
+                buf += d
+        except socket.timeout:
+            pass
+        c.close()
+    finally:
+        tap.shutdown(); tap.server_close(); remote.shutdown(); remote.server_close()
+    ok = buf.count(b"HTTP/1.1 200") == 1 and b"Connection: close" in buf
+    return ok, f"responses={buf.count(b'HTTP/1.1 200')}, close_present={b'Connection: close' in buf}"
+
+
 # ── R3 · slowloris / thread survival ───────────────────────────────
 def r3_handler_timeout() -> tuple[bool, str]:
     tmp = Path(LOG_DIR); tmp.mkdir(parents=True, exist_ok=True)
@@ -356,6 +494,10 @@ CASES = [
     ("RF lying-short Content-Length forces close (no hang)", rf_lying_short_content_length),
     ("RF bare-LF header smuggling normalized (CL dropped)", rf_bare_lf_header_smuggling),
     ("RF chunked upstream de-chunked (no marker leak)", rf_chunked_upstream_dechunked),
+    ("RF SSE response close-delimited (no client hang)", rf_sse_close_delimited),
+    ("RF Content-Type substring can't flip to SSE (CL kept)", rf_content_type_no_sse_flip),
+    ("RF oversized SSE event memory-bounded (relay sacred)", rf_sse_oversized_event_bounded),
+    ("RF pipeline closes after ambiguous body (no desync)", rf_pipeline_closes_after_ambiguous_body),
     ("R3 handler defines a socket timeout", r3_handler_timeout),
     ("R3 server survives a client aborting mid-request", r3_survives_abort),
 ]

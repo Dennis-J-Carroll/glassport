@@ -49,24 +49,30 @@ Each case returns `(ok, detail)`; `run()` prints `[PASS]/[FAIL]`, writes `dogfoo
 
 ---
 
-## Kimi's charge — the open surfaces
+### Round-4 — SSE framing (`0.6.7`, this session)
 
-The framing surfaces above are locked. The proxy still has two under-grilled regions and a wide fuzz space. Make the table quaint.
+A self-driven pre-probe of surfaces #4/#5 before handing them to Kimi, so the loop starts from a harder floor. Two real bugs found + fixed, four surfaces proven safe.
 
-### Surface #4 — SSE stream abuse (`_stream_sse`, `mcp_http.py:84`)
+- **SSE keep-alive hang (fixed).** An SSE response carries no Content-Length and the proxy strips the upstream's `Transfer-Encoding` (a `_HOP` header), so there was no framing telling the client the response ended — when the upstream closed the stream the client blocked to its own timeout on a kept-alive socket. Fix: the SSE branch now sends `Connection: close` + sets `close_connection`, so the upstream's close reaches the client as a prompt EOF.
+- **Content-Type substring flip (fixed).** `streaming` was `"text/event-stream" in ctype` — a substring test, so `application/json; note=text/event-stream` flipped a normal JSON body onto the SSE path, dropping its Content-Length and reframing it (then hanging on the point above). Fix: match the **media type** — `ctype.split(";", 1)[0].strip().lower() == "text/event-stream"`.
+- **Oversized SSE event (safe, green lock).** A 2 MB `data:` with no terminator reaches the client in full (relay sacred) while the session log stays ~277 bytes — `_MAX_SSE_BUF` (256 KB) bounds buffering and one drop-note replaces the runaway.
+- **Pipeline after ambiguous body (safe, green lock).** After a close-delimited response the proxy closes, so a second pipelined request on the same socket is not reparsed against leftover bytes — one response comes back, the second request dies with the connection.
 
-The SSE path forwards bytes to the client as they arrive and *separately* cuts complete events to log each `data:` payload. Forwarding must never wait on framing. Hunt:
+## Kimi's charge — what's still open
 
-- **Oversized event, no terminator.** `_MAX_SSE_BUF` (256 KB) is meant to bound per-event buffering. Verify a hostile server streaming megabytes with no `\n\n` cannot grow proxy memory *and* that the drop-note (`sse_frame_dropped_oversize`) fires once per overflow, not per chunk.
-- **Terminator smuggling.** Events split across `\r\r`, `\n\n`, `\r\n\r\n`, and a `data:` payload that itself contains a bare terminator or a mid-stream BOM. Does the logged frame match what the client received?
-- **Content-Type flip.** A response whose `Content-Type` flips the `streaming` branch (`"text/event-stream" in ctype` is a substring test — try `application/json; x=text/event-stream`). Does a non-SSE body get mis-framed as SSE, or vice-versa?
-- **SSE + a Content-Length header** (the loop drops CL when streaming — verify it can't leak).
+Round 4 closed the SSE framing headline. Narrower surfaces remain in `_stream_sse` and on the connection/header path. Make the table quaint.
 
-### Surface #5 — connection / hop-by-hop abuse
+### Surface #4 residue — SSE event framing (`_stream_sse`, `mcp_http.py:84`)
 
-- **`Connection: keep-alive` vs. `close_connection`.** An upstream `Connection` header is a `_HOP` (stripped), but probe whether a hostile client `Connection` header, or the proxy's own keep-alive under `HTTP/1.1`, can leave a socket in a state that desyncs the next pipelined request after a close-delimited body.
-- **Header pass-through as an exfil/deception surface.** `Set-Cookie` and arbitrary upstream headers are forwarded verbatim. Not a framing bug, but is there a header the proxy should refuse to relay?
-- **Status-line / trailer abuse.** Chunked responses with trailers; unusual status codes; `100 Continue` handling on the request path.
+- **Terminator smuggling.** Events split across `\r\r`, `\n\n`, `\r\n\r\n`, and a `data:` payload that itself contains a bare terminator or a mid-stream BOM. Does the **logged** frame match what the client received, byte-for-byte? (Forwarding is byte-exact; the logging cut is the suspect.)
+- **`event:`/`id:`/`retry:` metadata + comment lines** — `_log_sse_event` reconstructs full event text when metadata is present; fuzz malformed field mixes and confirm no payload is dropped from the log or mis-joined.
+- **Drop-note reset on interleave.** `dropped_oversize` resets on any real terminator (`mcp_http.py:124`). Can a flood interleaved with tiny valid events dodge the single-note contract or re-grow memory between resets?
+
+### Surface #5 — connection / hop-by-hop / header path
+
+- **Header pass-through as an exfil/deception surface.** `Set-Cookie` and arbitrary upstream headers are forwarded verbatim (only `_HOP` is stripped). Not a framing bug — but is there a header the proxy should refuse to relay, or one whose value can carry a deception the analyst never sees?
+- **Trailers / unusual status / `100 Continue`.** Chunked responses with trailer headers; 1xx/204/304 bodiless responses (does the CL/close logic do the right thing when there is no body?); `Expect: 100-continue` on the request path.
+- **Request-path headers.** The request forwards client headers via `_req_headers`; probe hostile client headers (not just upstream) for a framing or injection angle the response-path work didn't cover.
 
 ### Method
 
