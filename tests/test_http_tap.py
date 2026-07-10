@@ -279,5 +279,56 @@ class TestHttpTapGetDelete(unittest.TestCase):
         self.assertIn("notifications/x", text)      # GET SSE event logged s2c
 
 
+class _PathCapture(BaseHTTPRequestHandler):
+    """Records the exact request-target the upstream received."""
+    seen: list = []
+
+    def log_message(self, *args, **kwargs):
+        pass
+
+    def do_POST(self):
+        type(self).seen.append(self.path)
+        n = int(self.headers.get("Content-Length", 0) or 0)
+        self.rfile.read(n)
+        body = b'{"ok":true}'
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+class TestUpstreamQueryForwarded(unittest.TestCase):
+    """H2 — the configured upstream query string must reach the upstream; a
+    multi-tenant endpoint keyed on ?tenant=... is silently mis-routed without
+    it."""
+
+    def setUp(self):
+        self.logdir = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: shutil.rmtree(self.logdir, ignore_errors=True))
+        _PathCapture.seen = []
+
+    def _run(self, upstream_path: str) -> str:
+        remote = _serve(_PathCapture)
+        rh, rp = remote.server_address
+        proxy = _start_proxy(f"http://{rh}:{rp}{upstream_path}", self.logdir)
+        ph, pp = proxy.server_address
+        try:
+            _post(f"http://{ph}:{pp}/mcp", {"jsonrpc": "2.0", "id": 1})
+        finally:
+            proxy.shutdown(); proxy.server_close()
+            remote.shutdown(); remote.server_close()
+        return _PathCapture.seen[-1]
+
+    def test_query_string_is_forwarded(self):
+        self.assertEqual(self._run("/mcp?tenant=alpha"), "/mcp?tenant=alpha")
+
+    def test_no_query_has_no_stray_question_mark(self):
+        self.assertEqual(self._run("/mcp"), "/mcp")
+
+    def test_root_path_with_query(self):
+        self.assertEqual(self._run("/?tenant=alpha"), "/?tenant=alpha")
+
+
 if __name__ == "__main__":
     unittest.main()
