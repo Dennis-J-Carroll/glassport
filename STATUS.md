@@ -73,6 +73,15 @@ Roughly in dependency order — earlier unlocks later.
 
 ## Recently shipped
 
+- **HTTP-relay round-3 framing** (0.6.6, this PR) — the least-grilled response
+  path, continued. Fix: a **lying-short `Content-Length`** (declares more than it
+  sends, then closes) used to hold the client on a kept-alive socket until its own
+  timeout; the proxy now forces a connection close on the shortfall so the client
+  gets a prompt EOF (can't verify pre-headers without buffering — that is the R1
+  DoS). Plus green safety-locks proving two surfaces are already sound: a chunked
+  upstream reaches the client cleanly de-chunked, and a bare-LF header smuggle is
+  normalized so the CL-dedup catches it. New `dogfood/SPEC-http-relay-redteam.md`
+  hands Kimi the open surfaces (SSE stream abuse, connection/hop-by-hop). 607 tests.
 - **HTTP-relay hardening** (0.6.5, PR #53) — the Streamable-HTTP MITM relay
   (`adapters/mcp_http.py`) bounded against a hostile upstream/client: R1 chunked
   bounded request/response copy (memory + session-log DoS), R2 rejection of
@@ -109,17 +118,16 @@ Roughly in dependency order — earlier unlocks later.
 
 ## Next action
 
-**Releasing 0.6.5 (relay hardening, PR #53).** `0.6.4` is live on PyPI (H1.08
-coverage/e2e + H2.03 `audit --provenance`, plus contributor PRs #46/#47).
-**H2.01 streamable-HTTP tap** (`wrap --transport http --url`) is **merged to
-main** (PR #51) — passive MITM over Streamable-HTTP (POST/GET/SSE),
-trace-identical to stdio, fail-open — and now hardened by the round-2/round-3
-relay work above.
+**Released 0.6.5; 0.6.6 (relay round-3) in this PR.** `0.6.5` is live on PyPI
+(relay hardening R1–R3 + response Content-Length framing, PR #53); `0.6.4` shipped
+H1.08 coverage/e2e + H2.03 `audit --provenance`. **H2.01 streamable-HTTP tap**
+(`wrap --transport http --url`) is **merged to main** (PR #51) — passive MITM over
+Streamable-HTTP (POST/GET/SSE), trace-identical to stdio, fail-open — and now
+hardened by the round-2/round-3 relay work above.
 
-Next (in flight): **relay red-team round 3** — hunt the remaining response-path
-framing/injection surfaces (CRLF header injection, lying single Content-Length,
-chunked upstream, SSE abuse) via `dogfood/eval_http_relay_redteam.py` +
-`dogfood/SPEC-http-relay-redteam.md`. Then on the roadmap: **gate over HTTP**
+Next: the open relay surfaces are handed to the **Kimi loop** in
+`dogfood/SPEC-http-relay-redteam.md` (SSE stream abuse, connection/hop-by-hop).
+On the roadmap: **gate over HTTP**
 (active c2s blocking on the HTTP path — H2.01 shipped passive only), the
 **streaming-detector path** (frame-at-a-time analysis), **H2.06 property-based
 validator tests** (`hypothesis` dev-dep already merged), and GitHub provenance
