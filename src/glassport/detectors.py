@@ -715,11 +715,28 @@ def clamp_text(text: str, limit: int = MAX_RENDER_CHARS) -> str:
     return text[:limit] + f"… [{len(text) - limit} chars truncated]"
 
 
-def _apply_redactions(text: str, hits) -> str:
-    for pat, value in hits:
-        if value and value in text:
-            text = text.replace(value, _redact(value, pat.category))
+def _apply_span_redactions(text: str, spans: list[tuple[int, int, str, str]]) -> str:
+    """Redact original-text ranges. spans = (start, end, category, value),
+    applied right-to-left so earlier offsets stay valid as the string shrinks."""
+    for start, end, category, value in sorted(spans, reverse=True):
+        text = text[:start] + _redact(value, category) + text[end:]
     return text
+
+
+def _spanned_original_redactions(text: str) -> list[tuple[int, int, str, str]]:
+    """Map every normalized-space hit back to an ORIGINAL-text range so the
+    obfuscated bytes (zero-width joiners, homoglyphs) are redacted along with
+    the secret. origin[b-1]+1 covers the whole final source char (a safe
+    over-approximation when NFKC expanded one source char into several)."""
+    norm, origin = _normalize_with_map(text[:MAX_SCAN_BYTES])
+    spans: list[tuple[int, int, str, str]] = []
+    for pat, value, a, b in _scan_normalized(norm):
+        if not value or b <= a:
+            continue
+        start = origin[a]
+        end = origin[b - 1] + 1
+        spans.append((start, end, pat.category, value))
+    return spans
 
 
 # Fixed literal — contains nothing attacker-influenced. Do NOT interpolate the
@@ -728,29 +745,33 @@ _WITHHELD = "[glassport: redaction unavailable — content withheld]"
 
 
 def redact_secrets(text: str) -> str:
-    """Best-effort scrubber: replace every recognized credential/PII with a
-    non-reversible tag, and return the input UNCHANGED if the scan raises.
-    Use only on analytical/internal paths. For anything that emits a
-    shareable artifact (report HTML, SARIF), use redact_secrets_strict()."""
+    """Best-effort scrubber for internal/analytical paths. Replaces every
+    recognized credential/PII with a non-reversible tag; returns the input
+    UNCHANGED if the scan raises. For shareable artifacts (report HTML,
+    SARIF) use redact_secrets_strict()."""
     try:
-        hits = _scan_pii(text)
+        spans = _spanned_original_redactions(text)
     except Exception:
         return text
-    return _apply_redactions(text, hits)
+    return _apply_span_redactions(text, spans)
 
 
 def redact_secrets_strict(text: str) -> str:
-    """Fail-closed scrubber for shareable output (report HTML, SARIF). If the
-    scan raises we cannot prove the text is clean, so we WITHHOLD it rather
-    than risk leaking an unscanned secret into an artifact that leaves the
-    machine — a visible placeholder is strictly safer than a possibly-live
-    key. (`_scan_pii` caps input and its validators are total, so this fires
-    only on genuinely pathological input, never on large-but-benign text.)"""
+    """Fail-closed scrubber for shareable output (report HTML, SARIF).
+    Withholds the whole field if (a) the scan raises, or (b) any secret
+    survives redaction — a span-map imprecision must never leak a live key
+    into an artifact that leaves the machine. A visible placeholder is
+    strictly safer than a possibly-live key. (`_scan_pii`/`_scan_normalized`
+    cap input and their validators are total, so the except path fires only
+    on genuinely pathological input, never on large-but-benign text.)"""
     try:
-        hits = _scan_pii(text)
+        spans = _spanned_original_redactions(text)
+        out = _apply_span_redactions(text, spans)
+        if _scan_pii(out):              # backstop: re-scan the OUTPUT
+            return _WITHHELD
     except Exception:
         return _WITHHELD
-    return _apply_redactions(text, hits)
+    return out
 
 
 # --- Custom-pattern plugin registry -------------------------------------

@@ -517,5 +517,31 @@ class TestRedactFailClosed(unittest.TestCase):
         self.assertNotIn(v, detectors.redact_secrets_strict(v))
 
 
+class TestRedactObfuscated(unittest.TestCase):
+    def _key(self):
+        return "sk-ant-api03-" + "A" * 40 + "1234567890"
+
+    def test_zero_width_split_key_is_removed(self):
+        zwj = "‍"
+        obf = "sk-ant-api03-" + "A" * 20 + zwj + "A" * 20 + "1234567890"
+        out = detectors.redact_secrets_strict(obf)
+        # the reconstructed (de-obfuscated) secret must NOT survive
+        self.assertNotIn(self._key(), out.replace(zwj, ""))
+        self.assertNotIn(zwj, out)                 # obfuscation bytes gone too
+        self.assertIn("redacted", out)
+
+    def test_clean_key_still_redacted(self):
+        out = detectors.redact_secrets_strict(self._key())
+        self.assertNotIn(self._key(), out)
+        self.assertIn("anthropic_key redacted", out)
+
+    def test_backstop_withholds_if_secret_survives(self):
+        # force a survivor: patch the span redactor to a no-op
+        with mock.patch.object(detectors, "_apply_span_redactions",
+                               side_effect=lambda text, spans: text):
+            out = detectors.redact_secrets_strict(self._key())
+        self.assertEqual(out, detectors._WITHHELD)
+
+
 if __name__ == "__main__":
     unittest.main()
