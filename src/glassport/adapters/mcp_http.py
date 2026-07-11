@@ -32,6 +32,27 @@ _HOP = {"connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
         "content-length"}
 
 
+# Own line cap for the 1xx header sweep, so _discard_headers depends on ZERO
+# underscore-prefixed http.client symbols (which "may change" across CPython).
+_MAX_1XX_LINE = 65536
+_MAX_1XX_HEADER_LINES = 100
+
+
+def _discard_headers(fp) -> None:
+    """Read and drop one header block (up to the blank line) from a raw file
+    object, tolerating CRLF and bare-LF terminators. Local replacement for the
+    nonpublic stdlib header-reader so behavior is stable across the 3.10–3.13
+    matrix. Bounded so a hostile upstream cannot stream infinite fake 1xx
+    headers to pin the thread."""
+    for _ in range(_MAX_1XX_HEADER_LINES):
+        line = fp.readline(_MAX_1XX_LINE + 1)
+        if len(line) > _MAX_1XX_LINE:
+            raise http.client.LineTooLong("1xx header line")
+        if line in (b"\r\n", b"\n", b""):
+            return
+    raise http.client.HTTPException("glassport: too many 1xx header lines")
+
+
 class _Sk1xxResponse(http.client.HTTPResponse):
     """HTTPResponse that swallows *all* 1xx informational responses, not just
     100 Continue. A hostile or chatty upstream that emits 102 Processing (or
@@ -49,13 +70,23 @@ class _Sk1xxResponse(http.client.HTTPResponse):
         return super()._read_status()
 
     def begin(self):
-        # Skip every 1xx status line and its headers; stop at the final response.
+        # Skip every 1xx informational status and its headers; stop at the
+        # final response. 101 Switching Protocols is NOT informational-then-
+        # continue: it re-tasks the connection to another protocol. Glassport
+        # strips Upgrade, so a well-behaved upstream never sends 101 — but a
+        # hostile one can, and the bytes after it are not HTTP. Refuse rather
+        # than misparse upgraded-protocol bytes as a status line (this raises
+        # out through getresponse() into _relay's 502 path).
         while True:
             status_tuple = super()._read_status()
-            if not (100 <= status_tuple[1] < 200):
+            code = status_tuple[1]
+            if code == 101:
+                raise http.client.HTTPException(
+                    "glassport: upstream protocol upgrade (101) is unsupported")
+            if not (100 <= code < 200):
                 self._cached_status = status_tuple
                 break
-            http.client._read_headers(self.fp)
+            _discard_headers(self.fp)
         return super().begin()
 
 

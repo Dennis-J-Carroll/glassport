@@ -18,6 +18,7 @@
 | SSE terminated oversized event dropped (log bounded) | PASS | client_recv=524296, log_size=277 (bounded=True) |
 | SSE oversized metadata event dropped (log bounded) | PASS | client_recv=524307, log_size=277 (bounded=True) |
 | RF 1xx Processing skipped (final response reaches client) | PASS | status=200, data=b'{"result":true}' |
+| RF 101 upgrade refused (502, no garbage, no hang) | PASS | hung=False, status=502, garbage_leaked=False |
 | RF 204 No Content drops hostile Content-Length | PASS | status=204, cl=None, conn='close' |
 | RF chunked trailers not forwarded (TE stripped) | PASS | client_recv=b'helloworld', trailer=None |
 | RF pipeline closes after ambiguous body (no desync) | PASS | responses=1, close_present=True |
