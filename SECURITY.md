@@ -34,10 +34,16 @@ only what the wire proves* — implies a specific trust posture:
   `audit_server`'s `path` to `--allow-audit-root` (default: cwd,
   default-deny). Symlinks are resolved before containment checks;
   client-supplied `~` is never expanded.
-- **Cross-uid and cross-process attackers.** Session logs and the gate
-  override file are written with owner-only permissions (0o600, atomic
-  replace). The gate's reader is fail-closed: any loosening of
-  permissions, malformed JSON, or unicode error leaves enforcement ON.
+- **Cross-uid and cross-process attackers.** Session logs are created
+  owner-only (file `0o600`, directory `0o700`), enforced explicitly and
+  independently of the process umask — the log is opened with `O_CREAT`
+  at `0o600` and the mode is re-asserted (`fchmod`/`chmod`) so a
+  pre-existing looser file or directory is tightened. The gate override
+  file is written owner-only (0o600, atomic replace). The gate's reader is
+  fail-closed: any loosening of permissions, malformed JSON, or unicode
+  error leaves enforcement ON. **Non-POSIX note:** on Windows `st_mode` is
+  advisory, so this enforcement is a no-op there; treat session logs on
+  non-POSIX systems as not access-restricted by glassport.
 - **Regex-based denial of service.** Detector patterns scan
   attacker-controlled bytes; PII patterns are ReDoS-bounded (structural
   character-class fixes plus input caps), locked by timing tests.

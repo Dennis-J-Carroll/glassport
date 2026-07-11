@@ -76,9 +76,31 @@ def _now_iso() -> str:
 # ─────────────────────────────────────────────────────────────────
 class SessionLog:
     def __init__(self, path: Path):
-        path.parent.mkdir(parents=True, exist_ok=True)
-        # line-buffered text append; survives abrupt termination well
-        self._fh = open(path, "a", buffering=1, encoding="utf-8")
+        # Create the session dir private (0o700) and the log file private
+        # (0o600) explicitly, independent of the caller's umask. Glassport
+        # logs full MCP traffic — credentials, PII — so world/group access is
+        # a policy violation, not a preference. POSIX only; on other OSes the
+        # mode is advisory and we fall back to normal open() (SECURITY.md).
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        if os.name == "posix":
+            # mkdir(mode=) is subject to umask, and exist_ok means a looser
+            # pre-existing dir is possible — re-assert 0o700 either way.
+            try:
+                os.chmod(path.parent, 0o700)
+            except OSError:
+                pass
+            # O_CREAT with an explicit 0o600 avoids the window where the file
+            # exists at the umask-default mode before a chmod; fchmod
+            # re-asserts if the file pre-existed looser.
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+            try:
+                os.fchmod(fd, 0o600)
+            except OSError:
+                pass
+            self._fh = open(fd, "a", buffering=1, encoding="utf-8")
+        else:
+            # Non-POSIX: st_mode is advisory; do not fake enforcement.
+            self._fh = open(path, "a", buffering=1, encoding="utf-8")
         self._lock = threading.Lock()
         self._seq = 0
         self.path = path
