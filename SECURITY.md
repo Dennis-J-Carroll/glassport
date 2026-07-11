@@ -29,6 +29,10 @@ only what the wire proves* — implies a specific trust posture:
   tool descriptions, results, error strings, unicode tricks, oversized
   payloads. Detectors, renderers, and the TUI treat every wire byte as
   hostile; renderer poisoning-resistance is grill-tested (P1–P11).
+  Credential redaction for shareable artifacts (report HTML, SARIF) is
+  **fail-closed**: if the PII scan raises, the field is withheld behind a
+  fixed placeholder rather than emitted unscanned, so a scan failure can
+  never leak a live key into an artifact that leaves the machine.
 - **A hostile MCP client on the `serve` wire.** The `serve` tools confine
   client-supplied paths: `session_path` to the log directory,
   `audit_server`'s `path` to `--allow-audit-root` (default: cwd,

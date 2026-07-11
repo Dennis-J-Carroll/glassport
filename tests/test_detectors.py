@@ -9,6 +9,7 @@ Pure stdlib, run with:  python3 -m unittest tests.test_detectors
 """
 import json
 import unittest
+from unittest import mock
 
 from glassport.adapters.mcp_session import from_mcp_session
 from glassport.interaction_trace import AnnotationKind, EventKind
@@ -481,6 +482,39 @@ class TestStripeKeyPattern(unittest.TestCase):
         v = "sk_test__EXAMPLE_not_a_real_key_00000000"
         self.assertTrue(any(p.category == "stripe_key"
                             for p, _ in detectors._scan_pii(v)))
+
+
+class TestRedactFailClosed(unittest.TestCase):
+    """S2 — shareable renderers must fail CLOSED when the scan raises."""
+
+    def _boom(self, *a, **k):
+        raise RuntimeError("scan blew up")
+
+    def test_strict_withholds_when_scan_raises(self):
+        secret = "sk_live_" + "B" * 24
+        with mock.patch.object(detectors, "_scan_pii", self._boom):
+            out = detectors.redact_secrets_strict(secret)
+        self.assertEqual(out, detectors._WITHHELD)
+        self.assertNotIn(secret, out)          # the secret never survives
+
+    def test_lenient_still_returns_input_when_scan_raises(self):
+        # the split must preserve best-effort behavior for internal callers
+        text = "just some analytical text"
+        with mock.patch.object(detectors, "_scan_pii", self._boom):
+            self.assertEqual(detectors.redact_secrets(text), text)
+
+    def test_placeholder_is_attacker_free(self):
+        # the withheld literal must not interpolate input, length, or exception
+        with mock.patch.object(detectors, "_scan_pii", self._boom):
+            out = detectors.redact_secrets_strict("A" * 999)
+        self.assertNotIn("999", out)
+        self.assertNotIn("A" * 10, out)
+
+    def test_happy_path_both_variants_redact(self):
+        v = "sk_live_" + "C" * 24
+        self.assertIn("stripe_key redacted", detectors.redact_secrets(v))
+        self.assertIn("stripe_key redacted", detectors.redact_secrets_strict(v))
+        self.assertNotIn(v, detectors.redact_secrets_strict(v))
 
 
 if __name__ == "__main__":
