@@ -919,22 +919,13 @@ _STRUCTURAL_CONTAINERS = frozenset({"jwt_token"})
 _GENERIC_SECRETS = frozenset({"aws_secret_key", "generic_api_key", "high_entropy_token_30_40"})
 
 
-def _scan_pii(text: str) -> list[tuple[PIIPattern, str]]:
-    """Validated, de-duplicated PII hits in one serialized blob.
+def _scan_normalized(text: str) -> list[tuple[PIIPattern, str, int, int]]:
+    """Validated, de-duped PII hits WITH normalized-coordinate spans.
+    `text` is assumed ALREADY normalized (see _normalize_for_scan).
 
-    The blob is normalized first (invisible chars stripped, homoglyphs
-    NFKC-folded) so obfuscated secrets can't slip past the patterns, and
-    capped at MAX_SCAN_BYTES so a multi-megabyte tool payload can't turn
-    the scan itself into a denial of service.
-
-    Span-aware suppression (Kimi R3): a generic-secret match (aws_secret_key,
+    Span-aware suppression: a generic-secret match (aws_secret_key,
     generic_api_key) that falls entirely inside a structural token match
     (jwt_token) is part of that structure, not a separate credential."""
-    if len(text) > MAX_SCAN_BYTES:
-        text = text[:MAX_SCAN_BYTES]
-    text = _normalize_for_scan(text)
-
-    # collect every validated match WITH its span, before de-duping by value
     raw: list[tuple[PIIPattern, str, int, int]] = []
     structural_spans: list[tuple[int, int]] = []
     for pat in _active_patterns():
@@ -947,18 +938,33 @@ def _scan_pii(text: str) -> list[tuple[PIIPattern, str]]:
             if pat.category in _STRUCTURAL_CONTAINERS:
                 structural_spans.append(span)
 
-    hits: list[tuple[PIIPattern, str]] = []
+    hits: list[tuple[PIIPattern, str, int, int]] = []
     seen: set[tuple[str, str]] = set()
     for pat, value, start, end in raw:
         if pat.category in _GENERIC_SECRETS and any(
                 s <= start and end <= e for s, e in structural_spans):
-            continue                       # a fragment of a structural token
+            continue
         dedup = (pat.category, value)
         if dedup in seen:
             continue
         seen.add(dedup)
-        hits.append((pat, value))
+        hits.append((pat, value, start, end))
     return hits
+
+
+def _scan_pii_spanned(text: str) -> list[tuple[PIIPattern, str, int, int]]:
+    """Validated, de-duped PII hits with spans, from raw (un-normalized) text.
+    Caps input at MAX_SCAN_BYTES so a multi-megabyte payload can't turn the
+    scan into a DoS, then normalizes to defeat obfuscation."""
+    if len(text) > MAX_SCAN_BYTES:
+        text = text[:MAX_SCAN_BYTES]
+    return _scan_normalized(_normalize_for_scan(text))
+
+
+def _scan_pii(text: str) -> list[tuple[PIIPattern, str]]:
+    """Validated, de-duplicated PII hits (no spans). Back-compat wrapper for
+    consumers that don't need offsets."""
+    return [(p, v) for p, v, _, _ in _scan_pii_spanned(text)]
 
 
 def _extract_hosts_from_value(value: Any, hosts: set[str]) -> None:

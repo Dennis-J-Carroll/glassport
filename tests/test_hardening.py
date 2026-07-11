@@ -220,5 +220,21 @@ class TestNormalizeWithMap(unittest.TestCase):
                              detectors._normalize_for_scan(s))
 
 
+class TestScanSpanned(unittest.TestCase):
+    def test_spanned_returns_normalized_offsets(self):
+        key = "sk-ant-api03-" + "A" * 40 + "1234567890"
+        hits = detectors._scan_pii_spanned(key)
+        self.assertTrue(hits)
+        pat, value, start, end = hits[0]
+        self.assertEqual(pat.category, "anthropic_key")
+        self.assertEqual(key[start:end], value)
+
+    def test_plain_scan_unchanged(self):
+        key = "sk-ant-api03-" + "A" * 40 + "1234567890"
+        self.assertEqual([(p.category, v) for p, v in detectors._scan_pii(key)],
+                         [(p.category, v) for p, v, _, _ in
+                          detectors._scan_pii_spanned(key)])
+
+
 if __name__ == "__main__":
     unittest.main()
