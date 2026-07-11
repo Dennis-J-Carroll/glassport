@@ -219,5 +219,27 @@ class TestReportFile(unittest.TestCase):
                           out.read_text(encoding="utf-8"))
 
 
+_OBF_SECRET = "sk-ant-api03-" + "aB" * 20 + "1234567890"
+_OBFS = {
+    "zwj":       lambda s: s[:6] + "‍" + s[6:],
+    "fullwidth": lambda s: s.translate(
+        {ord(c): ord(c) + 0xFEE0 for c in s if "!" <= c <= "~"}),
+    "cyrillic":  lambda s: s.replace("a", "а"),          # U+0430
+    "multi":     lambda s: (s[:4] + "‍" + s[4:8].replace("a", "а")
+                            + "​" + s[8:]),               # zwj + homoglyph + zwsp
+}
+
+
+class TestReportRedactsObfuscated(unittest.TestCase):
+    def test_no_reconstructable_secret_in_report(self):
+        for name, obf in _OBFS.items():
+            lines = handshake() + [
+                call(6, 3, "web_search", {"data": obf(_OBF_SECRET)}),
+                result(7, 3)]
+            h = render(lines)
+            # normalize the whole artifact: any obfuscated survivor reconstructs
+            self.assertNotIn(_OBF_SECRET, detectors._normalize_for_scan(h), name)
+
+
 if __name__ == "__main__":
     unittest.main()
