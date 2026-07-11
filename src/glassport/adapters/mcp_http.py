@@ -112,6 +112,17 @@ def _req_headers(headers, remote) -> dict:
     return out
 
 
+def _upstream_target(remote) -> str:
+    """Request-target for the upstream: the configured path PLUS its query
+    string. Dropping the query silently mis-routes multi-tenant endpoints
+    that key on it (e.g. `/mcp?tenant=alpha` → `/mcp`). The query is fixed
+    per-proxy (it's the configured upstream), so it is forwarded verbatim."""
+    target = remote.path or "/"
+    if remote.query:
+        target += "?" + remote.query
+    return target
+
+
 _MAX_SSE_BUF = 256 * 1024  # cap per-event buffering to avoid unbounded growth
 _MAX_LOGGED_BODY = 1_000_000  # cap what a single request/response frame logs
 _RELAY_CHUNK = 65536          # stream bodies in bounded chunks, never all at once
@@ -276,7 +287,7 @@ def _make_handler(remote, log: SessionLog):
                 return
             try:
                 conn = _connect(remote)
-                conn.request(method, remote.path or "/", body=body or None,
+                conn.request(method, _upstream_target(remote), body=body or None,
                              headers=_req_headers(self.headers, remote))
                 resp = conn.getresponse()
             except Exception as exc:
