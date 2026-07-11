@@ -542,6 +542,39 @@ class TestRedactObfuscated(unittest.TestCase):
             out = detectors.redact_secrets_strict(self._key())
         self.assertEqual(out, detectors._WITHHELD)
 
+    def test_overlapping_default_patterns_no_fragment_leak(self):
+        # generic_api_key span (9,47) with private_ip (13,24) nested inside —
+        # a naive right-to-left splice leaks the secret's tail.
+        text = 'api_key="some192.168.1.1xyz1234567890extra00000"'
+        out = detectors.redact_secrets_strict(text)
+        self.assertNotIn("1234567890extra00000", out)   # no secret fragment
+        self.assertNotIn("192.168.1.1", out)            # nor the nested IP
+        self.assertNotIn("some192", out)
+        self.assertNotEqual(out, text)                  # not a silent passthrough
+
+    def test_disjoint_spans_unchanged(self):
+        # two separate secrets far apart still each redacted, order preserved
+        text = ("first sk-ant-api03-" + "A" * 40 + "1234567890"
+                " and second ghp_" + "b" * 36)
+        out = detectors.redact_secrets_strict(text)
+        self.assertNotIn("sk-ant-api03-AAAA", out)
+        self.assertNotIn("ghp_bbbb", out)
+        self.assertEqual(out.count("redacted"), 2)
+
+
+class TestRedactPrimaryScanFailClosed(unittest.TestCase):
+    def test_strict_withholds_when_primary_scan_raises(self):
+        with mock.patch.object(detectors, "_spanned_original_redactions",
+                               side_effect=RuntimeError("boom")):
+            self.assertEqual(
+                detectors.redact_secrets_strict("sk-ant-api03-" + "A" * 40),
+                detectors._WITHHELD)
+
+    def test_lenient_returns_input_when_primary_scan_raises(self):
+        with mock.patch.object(detectors, "_spanned_original_redactions",
+                               side_effect=RuntimeError("boom")):
+            self.assertEqual(detectors.redact_secrets("hello world"), "hello world")
+
 
 if __name__ == "__main__":
     unittest.main()

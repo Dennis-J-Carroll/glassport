@@ -716,9 +716,23 @@ def clamp_text(text: str, limit: int = MAX_RENDER_CHARS) -> str:
 
 
 def _apply_span_redactions(text: str, spans: list[tuple[int, int, str, str]]) -> str:
-    """Redact original-text ranges. spans = (start, end, category, value),
-    applied right-to-left so earlier offsets stay valid as the string shrinks."""
-    for start, end, category, value in sorted(spans, reverse=True):
+    """Redact original-text ranges. spans = (start, end, category, value).
+
+    Overlapping/nested spans are merged into their union FIRST: a naive
+    right-to-left splice over overlapping ranges applies a stale offset once
+    the first replacement resizes the string, leaking a fragment of the
+    secret. Disjoint spans keep their exact (category, value) tag so output
+    is unchanged for the common case; a merged range is retagged from the
+    union slice so no byte of any covered secret survives."""
+    merged: list[tuple[int, int, str, str]] = []
+    for start, end, category, value in sorted(spans):
+        if merged and start < merged[-1][1]:            # overlaps previous
+            ps, pe, pcat, _pval = merged[-1]
+            ne = max(pe, end)
+            merged[-1] = (ps, ne, pcat, text[ps:ne])    # retag from the union
+        else:
+            merged.append((start, end, category, value))
+    for start, end, category, value in reversed(merged):
         text = text[:start] + _redact(value, category) + text[end:]
     return text
 
