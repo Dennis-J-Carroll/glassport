@@ -584,15 +584,30 @@ _CONFUSABLES = str.maketrans({
 })
 
 
+def _normalize_with_map(text: str) -> tuple[str, list[int]]:
+    """Normalize like _normalize_for_scan, but char-by-char, recording for
+    each emitted normalized char the index in the ORIGINAL string it came
+    from. invisible -> dropped (no entry); confusable -> 1:1; NFKC per char
+    -> 0..N chars, all tagged to that one origin index. The map lets a match
+    found in normalized space be redacted back in the original bytes.
+
+    Per-char NFKC differs from whole-string NFKC only for cross-char
+    combining sequences (irrelevant to ASCII-ish credentials); the
+    fail-closed backstop in redact_secrets_strict proves any drift is safe."""
+    out: list[str] = []
+    origin: list[int] = []
+    for i, ch in enumerate(text):
+        if _INVISIBLE_RE.match(ch):
+            continue
+        for nc in unicodedata.normalize("NFKC", ch.translate(_CONFUSABLES)):
+            out.append(nc)
+            origin.append(i)
+    return "".join(out), origin
+
+
 def _normalize_for_scan(text: str) -> str:
-    """Defeat obfuscation before pattern-matching: drop invisible/bidi
-    characters, fold cross-script homoglyphs to ASCII, then NFKC-fold
-    compatibility variants (fullwidth, etc.). A secret split with zero-width
-    joiners, disguised in fullwidth Latin, or wearing a Cyrillic/Greek
-    look-alike reads as plaintext to the validators."""
-    stripped = _INVISIBLE_RE.sub("", text)
-    deconfused = stripped.translate(_CONFUSABLES)
-    return unicodedata.normalize("NFKC", deconfused)
+    """Defeat obfuscation before pattern-matching. See _normalize_with_map."""
+    return _normalize_with_map(text)[0]
 
 
 # Look-alike / hidden characters html.escape leaves untouched. A hostile

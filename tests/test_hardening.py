@@ -204,5 +204,21 @@ class TestSourceWalk(unittest.TestCase):
         self.assertEqual(order, ["a.py", "b.py", "c.py"])
 
 
+class TestNormalizeWithMap(unittest.TestCase):
+    def test_origin_map_tracks_invisible_deletions(self):
+        zwj = "‍"
+        text = "AB" + zwj + "CD"          # zwj at index 2
+        norm, origin = detectors._normalize_with_map(text)
+        self.assertEqual(norm, "ABCD")    # invisible dropped
+        # each normalized char maps back to its source index
+        self.assertEqual(origin, [0, 1, 3, 4])
+
+    def test_map_consistent_with_normalize_for_scan(self):
+        for s in ("sk-ant‍-live", "ＦＵＬＬＷＩＤＴＨ",
+                  "аpple"):  # zwj-split, fullwidth, cyrillic-a
+            self.assertEqual(detectors._normalize_with_map(s)[0],
+                             detectors._normalize_for_scan(s))
+
+
 if __name__ == "__main__":
     unittest.main()
