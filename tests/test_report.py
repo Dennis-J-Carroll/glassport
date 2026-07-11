@@ -13,6 +13,7 @@ import re
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from glassport.adapters.mcp_session import from_mcp_session
 from glassport import detectors
@@ -239,6 +240,17 @@ class TestReportRedactsObfuscated(unittest.TestCase):
             h = render(lines)
             # normalize the whole artifact: any obfuscated survivor reconstructs
             self.assertNotIn(_OBF_SECRET, detectors._normalize_for_scan(h), name)
+
+    def test_redaction_alone_defeats_obfuscation_in_report(self):
+        # Disable the separate neutralize_text layer so this asserts
+        # redact_secrets_strict ALONE keeps the secret out of the report.
+        with mock.patch.object(detectors, "neutralize_text", side_effect=lambda t: t):
+            for name, obf in _OBFS.items():
+                lines = handshake() + [
+                    call(6, 3, "web_search", {"data": obf(_OBF_SECRET)}),
+                    result(7, 3)]
+                h = render(lines)
+                self.assertNotIn(_OBF_SECRET, detectors._normalize_for_scan(h), name)
 
 
 if __name__ == "__main__":

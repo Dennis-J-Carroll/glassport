@@ -217,6 +217,14 @@ class TestSarifRedactsObfuscated(unittest.TestCase):
             doc = sarif.render_sarif(report([f]))
             self.assertNotIn(_OBF_SECRET, detectors._normalize_for_scan(doc), name)
 
+    def test_redaction_alone_defeats_obfuscation_in_sarif(self):
+        with mock.patch.object(sarif, "neutralize_text", side_effect=lambda t: t):
+            for name, obf in _OBFS.items():
+                f = Finding("secret-hardcoded", "critical", "app.py", 9,
+                            obf(_OBF_SECRET))
+                doc = sarif.render_sarif(report([f]))
+                self.assertNotIn(_OBF_SECRET, detectors._normalize_for_scan(doc), name)
+
 
 if __name__ == "__main__":
     unittest.main()
