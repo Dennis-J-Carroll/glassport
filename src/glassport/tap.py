@@ -174,6 +174,28 @@ class SessionLog:
             pass
 
 
+def open_session_log(path: Path) -> "SessionLog | None":
+    """Create a verified-private session log, or return None so the relay
+    runs without recording. The relay is sacred: neither an unwritable dir
+    nor a permission we could not secure may kill the session — we disable
+    logging loudly instead."""
+    try:
+        log = SessionLog(path)
+    except OSError as exc:
+        print(f"[glassport] logging disabled: cannot write to {path.parent} "
+              f"({exc}) -- check permissions or set $GLASSPORT_LOG_DIR; "
+              f"relay continues", file=sys.stderr)
+        return None
+    mode = log.file_mode()
+    if mode is not None and (mode & 0o077):
+        print(f"[glassport] logging disabled: {path} is not owner-only "
+              f"(mode {mode:04o}) -- refusing to record sensitive traffic to "
+              f"a readable file; relay continues", file=sys.stderr)
+        log.close()
+        return None
+    return log
+
+
 # ─────────────────────────────────────────────────────────────────
 # Gate — M5. Active enforcement on the c2s path. Opt-in, last, on
 # purpose: it ships only because the passive detectors came first.
@@ -397,13 +419,7 @@ def run_tap(server_cmd: list[str], log_dir: Path,
     # The relay is sacred: a logging failure must never alter, delay, or kill
     # a live session. If the log dir is unwritable, disable logging and relay
     # anyway — pump() already tolerates a None log.
-    try:
-        log = SessionLog(log_path)
-    except OSError as exc:
-        print(f"[glassport] logging disabled: cannot write to {log_dir} "
-              f"({exc}) -- check permissions or set $GLASSPORT_LOG_DIR; "
-              f"relay continues", file=sys.stderr)
-        log = None
+    log = open_session_log(log_path)
 
     # Announce on stderr only — stdout belongs to the protocol.
     print(f"[glassport] tapping: {shlex.join(server_cmd)}", file=sys.stderr)

@@ -24,7 +24,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from glassport.tap import SessionLog
+from glassport.tap import SessionLog, open_session_log
 
 # hop-by-hop headers (RFC 7230 §6.1) plus Host/Content-Length, which the proxy
 # recomputes — never forwarded verbatim.
@@ -462,6 +462,21 @@ def _make_handler(remote, log: SessionLog):
     return _ProxyHandler
 
 
+class _NullLog:
+    """No-op stand-in for a disabled session log. open_session_log() returns
+    None on an unwritable dir or an unverifiable/non-private file mode, but
+    every request-handling path in this module calls log.record()/log.close()
+    unconditionally (unlike stdio's pump(), which already checks for None) —
+    the relay is sacred, so a disabled log must not crash request handling
+    or shutdown."""
+
+    def record(self, *args, **kwargs) -> None:
+        pass
+
+    def close(self) -> None:
+        pass
+
+
 def run_http_tap(remote_url: str, log_dir: Path, bind: str = "127.0.0.1",
                  port: int = 0, *, ready: "threading.Event | None" = None,
                  server_box: "list | None" = None) -> None:
@@ -474,7 +489,7 @@ def run_http_tap(remote_url: str, log_dir: Path, bind: str = "127.0.0.1",
     log_dir = Path(log_dir)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     log_path = log_dir / f"{stamp}_http_{os.getpid()}.jsonl"
-    log = SessionLog(log_path)
+    log = open_session_log(log_path) or _NullLog()
     httpd = ThreadingHTTPServer((bind, port), _make_handler(remote, log))
     if server_box is not None:
         server_box.append(httpd)

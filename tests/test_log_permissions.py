@@ -12,6 +12,7 @@ import stat
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from glassport.tap import SessionLog
 
@@ -69,6 +70,28 @@ class TestFileMode(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             log = SessionLog(Path(d) / "s.jsonl")
             self.assertEqual(log.file_mode(), 0o600)
+            log.close()
+
+
+class TestOpenSessionLog(unittest.TestCase):
+    def test_unwritable_dir_returns_none_not_raise(self):
+        from glassport.tap import open_session_log
+        bad = Path("/proc/nonexistent/s.jsonl")   # unwritable on Linux CI runners
+        self.assertIsNone(open_session_log(bad))
+
+    @unittest.skipUnless(os.name == "posix", "POSIX modes only")
+    def test_non_private_mode_degrades_to_none(self):
+        from glassport.tap import open_session_log, SessionLog
+        with tempfile.TemporaryDirectory() as d:
+            with mock.patch.object(SessionLog, "file_mode", return_value=0o644):
+                self.assertIsNone(open_session_log(Path(d) / "s.jsonl"))
+
+    def test_valid_dir_returns_a_working_log(self):
+        from glassport.tap import open_session_log
+        with tempfile.TemporaryDirectory() as d:
+            log = open_session_log(Path(d) / "s.jsonl")
+            self.assertIsNotNone(log)
+            log.record("c2s", b'{"jsonrpc":"2.0"}')
             log.close()
 
 
