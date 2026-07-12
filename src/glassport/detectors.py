@@ -772,12 +772,22 @@ def redact_secrets(text: str) -> str:
 
 def redact_secrets_strict(text: str) -> str:
     """Fail-closed scrubber for shareable output (report HTML, SARIF).
-    Withholds the whole field if (a) the scan raises, or (b) any secret
-    survives redaction — a span-map imprecision must never leak a live key
-    into an artifact that leaves the machine. A visible placeholder is
-    strictly safer than a possibly-live key. (`_scan_pii`/`_scan_normalized`
-    cap input and their validators are total, so the except path fires only
-    on genuinely pathological input, never on large-but-benign text.)"""
+    Withholds the whole field if (a) the input is not a string, (b) the scan
+    raises, or (c) any secret survives redaction — a span-map imprecision must
+    never leak a live key into an artifact that leaves the machine. A visible
+    placeholder is strictly safer than a possibly-live key. (`_scan_pii`/
+    `_scan_normalized` cap input and their validators are total, so the except
+    path fires only on genuinely pathological input, never on large-but-benign
+    text.)
+
+    The isinstance check runs FIRST, before any other operation: a non-string
+    value (a list, a raising object) would otherwise pass through the span
+    machinery unchanged when nothing matches (empty spans is a no-op splice),
+    handing a non-string object to whatever renders the result next. Checking
+    the type up front means no method is ever invoked on untrusted non-string
+    input."""
+    if not isinstance(text, str):
+        return _WITHHELD
     try:
         spans = _spanned_original_redactions(text)
         out = _apply_span_redactions(text, spans)
@@ -788,8 +798,8 @@ def redact_secrets_strict(text: str) -> str:
     return out
 
 
-def redact_display(text: str) -> str:
-    """Scrub an attacker-influenced string for any shareable renderer (SARIF,
+def redact_display(text) -> str:
+    """Scrub an attacker-influenced value for any shareable renderer (SARIF,
     JSON audit, text audit, HTML), in the load-bearing order
     strict-redact -> neutralize -> clamp:
 
@@ -803,9 +813,20 @@ def redact_display(text: str) -> str:
     - clamp_text LAST bounds the field (clamp-after-redact is leak-safe: the
       clamp bound sits well inside the scanned window).
 
+    A hostile manifest scan can hand this a non-string (a raising object, a
+    list). `isinstance` is checked FIRST, before any other operation, so a
+    non-string value never has a method invoked on it (no __str__, __eq__,
+    __bool__, __len__) — it withholds immediately instead of risking a raise
+    or attacker-controlled code running during rendering. `None` is the one
+    legitimate "field absent" case and maps to "", not a withhold.
+
     One definition so no renderer can drift into the neutralize-without-redact
-    bug independently."""
-    return clamp_text(neutralize_text(redact_secrets_strict(text))) if text else ""
+    bug — or a totality gap on non-string input — independently."""
+    if not isinstance(text, str):
+        return "" if text is None else _WITHHELD
+    if not text:
+        return ""
+    return clamp_text(neutralize_text(redact_secrets_strict(text)))
 
 
 # --- Custom-pattern plugin registry -------------------------------------

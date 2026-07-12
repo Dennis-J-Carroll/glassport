@@ -313,5 +313,81 @@ class TestProvenanceRedaction(unittest.TestCase):
         self.assertEqual(res["ruleId"], "provenance/prov-not-in-registry")
 
 
+class TestProvenanceRendererBoundaryDefensiveGaps(unittest.TestCase):
+    """Kimi pass-3 renderer-boundary findings: severity was emitted raw
+    (SARIF's own defaultConfiguration.level is fine — _sarif_level maps it —
+    but a hostile/secret-shaped severity must never appear verbatim anywhere),
+    and non-string rule/ecosystem crashed all three renderers because they went
+    through the free-text scrub (which assumes a string) instead of a
+    closed-set structural validator. None of these fields are attacker-reachable
+    through the real evaluate() pipeline today (see
+    tests/test_provenance.py::TestProvenanceFieldReachability) — these are
+    defense-in-depth locks against a future/buggy provenance source, not live
+    exploits, and are reported as such."""
+
+    from glassport.provenance import ProvenanceFinding as _PF
+
+    def _doc(self, pf):
+        report = Report(profile={"name": "demo"}, findings=[], deductions=[],
+                        score=50, grade="F", provenance=[pf])
+        return sarif.render_sarif(report)
+
+    def _pf(self, **kw):
+        base = dict(rule="prov-not-in-registry", severity="high",
+                    ecosystem="npm", package="left-pad",
+                    manifest="package.json", detail="not found in registry")
+        base.update(kw)
+        return self._PF(**base)
+
+    def test_secret_shaped_severity_never_emitted_raw(self):
+        secret = "sk-ant-api03-" + "A" * 40 + "1234567890"
+        doc = self._doc(self._pf(severity=secret))
+        self.assertNotIn(secret, doc)
+        run = json.loads(doc)["runs"][0]
+        self.assertEqual(run["results"][0]["level"], "note")  # safe default
+
+    def test_non_string_rule_does_not_crash_and_collapses_safely(self):
+        for bad_rule in (["a", "b"], 12345, None, {"x": 1}):
+            doc = self._doc(self._pf(rule=bad_rule))     # must not raise
+            run = json.loads(doc)["runs"][0]
+            res = run["results"][0]
+            rule_ids = {r["id"] for r in run["tool"]["driver"]["rules"]}
+            self.assertEqual(res["ruleId"], "provenance/prov-unknown")
+            self.assertIn(res["ruleId"], rule_ids)
+
+    def test_non_string_ecosystem_does_not_crash_and_collapses_safely(self):
+        for bad_eco in (["a", "b"], 12345, None, {"x": 1}):
+            doc = self._doc(self._pf(ecosystem=bad_eco))  # must not raise
+            res = json.loads(doc)["runs"][0]["results"][0]
+            self.assertEqual(res["properties"]["ecosystem"], "unknown")
+
+    def test_hostile_object_never_has_str_or_bool_invoked(self):
+        class Hostile:
+            def __str__(self):
+                raise RuntimeError("str() must never be called")
+
+            def __bool__(self):
+                raise RuntimeError("bool() must never be called")
+
+            def __eq__(self, other):
+                raise RuntimeError("eq must never be called")
+
+            def __hash__(self):
+                return 0
+
+        for field in ("rule", "ecosystem", "package", "manifest"):
+            doc = self._doc(self._pf(**{field: Hostile()}))  # must not raise
+            self.assertIsInstance(doc, str)
+
+    def test_all_existing_green_locks_retained(self):
+        # a minimal spot-check that the earlier obfuscation/backstop/structural
+        # tests in TestProvenanceRedaction still hold after these fixes — the
+        # full suite is the authoritative regression, this guards against an
+        # accidental import-time or wiring break in this class specifically.
+        secret = "sk-ant-api03-" + "A" * 40 + "1234567890"
+        doc = self._doc(self._pf(package=secret))
+        self.assertNotIn(secret, doc)
+
+
 if __name__ == "__main__":
     unittest.main()

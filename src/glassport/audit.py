@@ -37,7 +37,7 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from glassport import detectors
+from glassport import detectors, provenance
 
 RUBRIC_VERSION = "0.3"          # v0.3: capability-note tier (0 weight)
 MAX_FILE_BYTES = 1_000_000
@@ -590,20 +590,31 @@ def render_text(report: Report) -> str:
     # the default (offline) audit stays byte-identical. These never affect the
     # score — they live in a separate channel below the scored findings.
     if report.provenance:
-        # Provenance fields come from the audited (possibly hostile) manifest,
-        # so every attacker-influenced string is scrubbed with the shared
-        # detectors.redact_display before it reaches this shareable text render
-        # — the same scrub the SARIF path applies. Benign npm/PyPI values pass
-        # through unchanged; a credential in a hostile package/detail is removed.
+        # Provenance fields come from the audited (possibly hostile) manifest.
+        # Display text (package/detail) is scrubbed with the shared
+        # detectors.redact_display; STRUCTURAL fields (rule/ecosystem/severity)
+        # are validated against the same closed sets sarif.py uses — never the
+        # free-text scrub, which can hand a non-string value to a str-only
+        # method (that gap crashed this renderer before this fix) — so an
+        # unrecognized or non-string value collapses to a safe sentinel instead
+        # of being emitted raw. Benign npm/PyPI values are unaffected.
         out.append("provenance (network-enriched):")
         for pf in report.provenance:
             pkg = detectors.redact_display(pf.package)
-            eco = detectors.redact_display(pf.ecosystem)
-            rule = detectors.redact_display(pf.rule)
+            eco = provenance.safe_ecosystem(pf.ecosystem)
+            rule = provenance.safe_rule(pf.rule)
+            severity = provenance.safe_severity(pf.severity)
             detail = detectors.redact_display(pf.detail)
             where = f" [{eco}:{pkg}]" if pkg else ""
-            out.append(f"  [{pf.severity}] {rule}{where}")
-            out.append(f"      {detail}")
+            line1 = f"  [{severity}] {rule}{where}"
+            line2 = f"      {detail}"
+            # Backstop, mirroring sarif.py's composed-message re-scrub: two
+            # individually-clean fields could in principle join into a
+            # scannable credential shape across the fixed delimiter. A no-op
+            # on already-clean text (redact_secrets_strict returns benign
+            # input unchanged), so this never touches ordinary npm/PyPI output.
+            block = detectors.redact_secrets_strict(f"{line1}\n{line2}")
+            out.extend(block.split("\n"))
     out.append(f"rubric:   v{report.rubric_version} · score = 100 − Σ "
                f"weight(rule), each rule deducted once · --rubric for "
                f"the full table")
@@ -621,14 +632,19 @@ def render_json(report: Report) -> str:
     }
     # H2.03: add the key only when non-empty so the default audit's JSON is
     # byte-identical with and without --provenance. `vars(pf)` would emit the
-    # attacker-controlled package/detail verbatim, so scrub every hostile-
-    # sourced field with the shared detectors.redact_display (same keys, so the
-    # JSON shape is unchanged; benign values pass through unaltered).
+    # attacker-controlled fields verbatim. STRUCTURAL fields (rule/ecosystem/
+    # severity) are validated against the same closed sets sarif.py and
+    # render_text use — never emitted raw, never fed to the free-text scrub
+    # (which assumes a string and isn't a closed-set validator) — so an
+    # unrecognized or non-string value collapses to a safe sentinel. Display
+    # text (package/detail) is scrubbed with the shared detectors.redact_display;
+    # manifest -> redact_secrets_strict. Same keys, so the JSON shape is
+    # unchanged; benign values pass through unaltered.
     if report.provenance:
         obj["provenance"] = [{
-            "rule": detectors.redact_display(pf.rule),
-            "severity": pf.severity,
-            "ecosystem": detectors.redact_display(pf.ecosystem),
+            "rule": provenance.safe_rule(pf.rule),
+            "severity": provenance.safe_severity(pf.severity),
+            "ecosystem": provenance.safe_ecosystem(pf.ecosystem),
             "package": detectors.redact_display(pf.package),
             "manifest": detectors.redact_secrets_strict(pf.manifest),
             "detail": detectors.redact_display(pf.detail),

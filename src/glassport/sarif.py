@@ -28,6 +28,7 @@ from typing import Union
 from glassport.audit import Report, RULES_BY_ID
 from glassport.detectors import (clamp_text, neutralize_text,
                                   redact_display, redact_secrets_strict)
+from glassport import provenance
 
 DRIVER_VERSION = "0.2.0"
 _INFO_URI = "https://github.com/Dennis-J-Carroll/glassport"
@@ -39,12 +40,16 @@ _INT_LEVEL = {3: "error", 2: "warning", 1: "note"}
 
 
 def _sarif_level(severity: Union[str, int]) -> str:
-    """Unified severity → SARIF level (error/warning/note)."""
+    """Unified severity → SARIF level (error/warning/note). Total: a non-str/int
+    (e.g. a hostile object) never has its __str__ invoked — it maps to the
+    default level instead of risking a raise or attacker code in rendering."""
     if isinstance(severity, bool):                  # bool is an int subclass
         severity = int(severity)
     if isinstance(severity, int):
         return _INT_LEVEL.get(severity, "warning")
-    return _STR_LEVEL.get(str(severity).lower(), "warning")
+    if isinstance(severity, str):
+        return _STR_LEVEL.get(severity.lower(), "warning")
+    return "warning"
 
 
 def _sarif_document(rules: list, results: list, props: dict | None = None) -> str:
@@ -156,9 +161,11 @@ def render_sarif(report: Report, base: str = "") -> str:
     #   - the composed `message.text` is strict-scrubbed again as a backstop so a
     #     secret cannot be reconstructed across the join of two clean fields.
     for pf in getattr(report, "provenance", None) or []:
-        rule = pf.rule if pf.rule in _PROV_RULES else _PROV_UNKNOWN_RULE
-        ecosystem = (pf.ecosystem if pf.ecosystem in _PROV_ECOSYSTEMS
-                     else _PROV_UNKNOWN_ECOSYSTEM)
+        # Structural fields validated against the shared closed sets (total on
+        # non-string / hostile values); display fields scrubbed via redact_display.
+        rule = provenance.safe_rule(pf.rule)
+        ecosystem = provenance.safe_ecosystem(pf.ecosystem)
+        severity = provenance.safe_severity(pf.severity)
         rule_id = f"provenance/{rule}"
         if rule_id not in rules:
             rules[rule_id] = {
@@ -167,7 +174,7 @@ def render_sarif(report: Report, base: str = "") -> str:
                 # Always the catalog text — never the raw (possibly hostile)
                 # rule id, which validation has already reduced to a known key.
                 "shortDescription": {"text": _PROV_RULE_TEXT[rule]},
-                "defaultConfiguration": {"level": _sarif_level(pf.severity)},
+                "defaultConfiguration": {"level": _sarif_level(severity)},
                 "properties": {"category": "provenance"},
             }
         pkg = _sanitize_display(pf.package)
@@ -177,12 +184,14 @@ def render_sarif(report: Report, base: str = "") -> str:
         # fields could in principle reconstruct a pattern across their join.
         msg = redact_secrets_strict(msg)
         locations = []
-        if pf.manifest:
+        # isinstance check first: a hostile non-string manifest must not have
+        # __bool__ invoked by a bare truthiness test.
+        if isinstance(pf.manifest, str) and pf.manifest:
             locations = [{"physicalLocation": {"artifactLocation": {
                 "uri": redact_secrets_strict(_repo_uri(pf.manifest, base))}}}]
         results.append({
             "ruleId": rule_id,
-            "level": _sarif_level(pf.severity),
+            "level": _sarif_level(severity),
             "message": {"text": clamp_text(msg)},
             "properties": {"category": "provenance",
                            "ecosystem": ecosystem, "package": pkg},
@@ -208,15 +217,10 @@ _PROV_RULE_TEXT = {
     # to this catalog entry instead.
     "prov-unknown": "Provenance finding with an unrecognized rule id",
 }
-
-# Structural provenance fields are validated against a closed set, never
-# rendered as free display text: an attacker-supplied `rule`/`ecosystem` that
-# is not in these sets collapses to a safe sentinel so a hostile manifest can
-# never smuggle a credential through the rules table or the ecosystem label.
-_PROV_RULES = frozenset(_PROV_RULE_TEXT)
-_PROV_ECOSYSTEMS = frozenset({"npm", "pypi"})
-_PROV_UNKNOWN_RULE = "prov-unknown"
-_PROV_UNKNOWN_ECOSYSTEM = "unknown"
+# Kept in sync with provenance.VALID_RULES ∪ {UNKNOWN_RULE} — every rule
+# safe_rule() can return must have a shortDescription here.
+assert (provenance.VALID_RULES | {provenance.UNKNOWN_RULE}
+        ) <= set(_PROV_RULE_TEXT), "sarif._PROV_RULE_TEXT missing a provenance rule"
 
 
 # subcategory -> human short description; fallback humanizes the slug
