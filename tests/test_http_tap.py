@@ -334,6 +334,7 @@ class TestRemoteValidation(unittest.TestCase):
     def test_rejects_bad_scheme_userinfo_fragment_port(self):
         from glassport.adapters import mcp_http
         for bad in ("ftp://h/x", "http:///nohost", "http://u:p@h/x",
+                    "http://@h/x", "http://u@h/x",  # empty/partial userinfo still rejected
                     "http://h/x#frag", "http://h:99999/x"):
             with self.assertRaises(ValueError, msg=bad):
                 mcp_http._validate_remote(bad)

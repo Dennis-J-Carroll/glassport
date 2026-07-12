@@ -74,7 +74,9 @@ def _validate_remote(url: str):
         raise ValueError("remote URL has no host")
     if any(ch.isspace() or ord(ch) < 0x20 for ch in r.hostname):
         raise ValueError("remote URL host contains whitespace or control characters")
-    if r.username or r.password:
+    if r.username is not None or r.password is not None:
+        # `is not None` (not truthiness): a stray empty userinfo like "http://@h/x"
+        # yields username="" — falsy but still an embedded-credential shape we reject.
         raise ValueError("remote URL must not embed credentials (user:pass@)")
     if r.fragment:
         raise ValueError("remote URL must not contain a fragment")
