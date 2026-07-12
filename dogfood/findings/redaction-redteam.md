@@ -30,8 +30,8 @@ Two **adjacent** leaks were found outside SARIF: the `--json` and text audit ren
 | FIX-4b | Secret-shaped unknown `pf.ecosystem` | green lock | collapses to `unknown` |
 | FIX-5 | `redact_secrets_strict` raises during render | green lock | fail-closed `_WITHHELD`; `render_sarif` does not crash |
 | FIX-6 | SARIF structural consistency with mixed/unknown provenance | green lock | valid 2.1.0, no duplicate rules, every `ruleId` resolves |
-| ADJ-1 | `--json` audit output provenance leak | **CONFIRMED** | `render_json` emits `vars(pf)` verbatim |
-| ADJ-2 | Text audit output provenance leak | **CONFIRMED** | `render_text` prints `pf.package`/`detail` verbatim |
+| ADJ-1 | `--json` audit output provenance leak | **CONFIRMED → FIXED** | `render_json` was `vars(pf)`; now per-field `redact_display` |
+| ADJ-2 | Text audit output provenance leak | **CONFIRMED → FIXED** | `render_text` scrubs `package`/`ecosystem`/`rule`/`detail` |
 
 ## Fix-specific attacks (all green)
 
@@ -149,9 +149,22 @@ from glassport.audit import render_text
 assert secret in detectors._normalize_for_scan(render_text(report))  # RED
 ```
 
-### Recommended follow-up
+### Resolution (ADJ-1 / ADJ-2 — FIXED in this PR)
 
-Apply the same `_sanitize_display` / closed-set validation treatment to `render_json` and `render_text` provenance output, or route them through the same sanitization layer used for SARIF. Add regression locks in `tests/test_audit.py` mirroring the SARIF provenance redaction tests.
+Both audit renderers now scrub provenance fields with the **shared**
+`detectors.redact_display` (strict-redact → neutralize → clamp), the single
+definition SARIF also uses — so no renderer can drift into the
+neutralize-without-redact bug independently:
+
+- `render_json` builds a per-field sanitized dict instead of `vars(pf)` (same
+  keys, so the JSON shape is unchanged): `package`/`detail`/`ecosystem`/`rule`
+  → `redact_display`, `manifest` → `redact_secrets_strict`.
+- `render_text` scrubs `package`/`ecosystem`/`rule`/`detail` before formatting.
+
+Benign npm/PyPI output is byte-unchanged. Locked by
+`tests/test_audit.py::TestProvenanceRedactionInRenderers` (plain + zero-width /
+fullwidth / Cyrillic obfuscation, JSON schema keys unchanged, ordinary output
+unchanged). Teeth: reverting the audit fix reds 3/5. Grill now **30/30**.
 
 ## Green locks (surface hit, no plain-secret escape found)
 
