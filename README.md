@@ -59,29 +59,29 @@ Glassport sits in the middle and watches. No sandbox, no syscall capture, no clo
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│  PRE-DEPLOYMENT                                                  │
-│                                                                  │
+│  PRE-DEPLOYMENT                                                 │
+│                                                                 │
 │  MCP server source ──▶  audit.py  ──▶  scored findings          │
 │                         (AST + pattern, zero execution)         │
 └─────────────────────────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────────────────────┐
-│  RUNTIME                                                         │
-│                                                                  │
-│  MCP client ◀──▶  glassport_tap.py  ◀──▶  MCP server           │
-│                          │                                       │
-│                    JSONL session log                             │
-│                    (~/.glassport/sessions/)                      │
-│                          │                                       │
+│  RUNTIME                                                        │
+│                                                                 │
+│  MCP client ◀──▶  glassport_tap.py  ◀──▶  MCP server            │
+│                          │                                      │
+│                    JSONL session log                            │
+│                    (~/.glassport/sessions/)                     │
+│                          │                                      │
 │               adapters/mcp_session.py                           │
-│                          │                                       │
-│                    InteractionTrace                              │
-│                          │                                       │
+│                          │                                      │
+│                    InteractionTrace                             │
+│                          │                                      │
 │             ┌────────────┴────────────┐                         │
-│             │                         │                          │
+│             │                         │                         │
 │        detectors.py              watch.py                       │
 │        (per-session)             (drift across sessions)        │
-│             │                                                    │
+│             │                                                   │
 │        report.py ──▶  session.html                              │
 └─────────────────────────────────────────────────────────────────┘
 ```
@@ -683,10 +683,10 @@ Still on the horizon:
 - Remote streamable-HTTP interception
 - Network-enriched audit mode: npm / PyPI / GitHub provenance lookups, as an explicit opt-in flag (kept off the default path so the core audit stays reproducible and offline)
 - Agent↔Agent trace coverage for Google A2A protocol
-- ~~TUI: terminal interface for live session inspection and drift review~~ ✅ Built (`glassport tui`)
-- ~~CI integration: JSON + SARIF export and a GitHub Action that uploads audit findings to the Security tab~~ ✅ Built (`audit --sarif`, `.github/workflows/ci.yml`)
-- ~~Agent advisory: render findings into a fenced block for `CLAUDE.md` / `AGENTS.md`~~ ✅ Built (`glassport advise`)
-- ~~Adversarial red-team grill for `advise` poisoning-resistance~~ ✅ Built (`dogfood/eval_advise_redteam.py`, P1–P11: directive injection, fence-marker breakout, homoglyph, secret/snippet leak, markdown-link, Hangul/Armenian evasion, backtick-twin)
+- TUI: terminal interface for live session inspection and drift review~~ ✅ Built (`glassport tui`)
+- CI integration: JSON + SARIF export and a GitHub Action that uploads audit findings to the Security tab~~ ✅ Built (`audit --sarif`, `.github/workflows/ci.yml`)
+- Agent advisory: render findings into a fenced block for `CLAUDE.md` / `AGENTS.md`~~ ✅ Built (`glassport advise`)
+- Adversarial red-team grill for `advise` poisoning-resistance~~ ✅ Built (`dogfood/eval_advise_redteam.py`, P1–P11: directive injection, fence-marker breakout, homoglyph, secret/snippet leak, markdown-link, Hangul/Armenian evasion, backtick-twin)
 
 ---
 
