@@ -31,6 +31,7 @@ jobs:
           PYTHONPATH=src python dogfood/eval_advise_redteam.py
           PYTHONPATH=src python dogfood/eval_report_redteam.py
           PYTHONPATH=src python dogfood/eval_sarif_redteam.py
+          PYTHONPATH=src python dogfood/eval_redaction_redteam.py
           PYTHONPATH=src python dogfood/eval_server_redteam.py
           PYTHONPATH=src python dogfood/eval_streaming_redteam.py
           PYTHONPATH=src python dogfood/eval_provenance_redteam.py
