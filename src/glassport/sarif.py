@@ -87,6 +87,21 @@ def _rule_object(rule_id: str, severity: str) -> dict:
     return obj
 
 
+def _sanitize_display(text: str) -> str:
+    """Scrub an attacker-displayable string for a shareable artifact, in the
+    load-bearing order strict-redact -> neutralize -> clamp:
+
+    - redact_secrets_strict FIRST (it normalizes internally, so an obfuscated
+      credential is caught and removed, or the field is withheld fail-closed if
+      the scan raises);
+    - neutralize_text THEN reveals any remaining deceptive Unicode as visible
+      sentinels (it is NOT a credential scrubber, so it must run after redaction,
+      never instead of it — that ordering bug is exactly the P0 this fixes);
+    - clamp_text LAST bounds the field (clamp-after-redact is leak-safe: the
+      clamp bound sits well inside the scanned window)."""
+    return clamp_text(neutralize_text(redact_secrets_strict(text))) if text else ""
+
+
 def _repo_uri(path: str, base: str) -> str:
     """Finding.path is relative to the audited root; prefix it with `base`
     (the audited root, itself relative to the repo root) so GitHub code
@@ -138,22 +153,36 @@ def render_sarif(report: Report, base: str = "") -> str:
 
     # H2.03: opt-in network-enriched findings render as a separate `provenance`
     # category, appended only when present so a no-`--provenance` audit is
-    # byte-identical. `pf.detail` is glassport-authored, but `pf.package` /
-    # `pf.manifest` come from the audited (possibly hostile) manifest, so both
-    # are scrubbed exactly like the static-rule path above.
+    # byte-identical. Every provenance field is derived from the audited
+    # (possibly hostile) manifest scan, so NONE may reach the SARIF file raw:
+    #   - `package` / `detail` are attacker-displayable text -> _sanitize_display
+    #     (strict-redact -> neutralize -> clamp); `manifest` -> redact via the URI.
+    #   - `ecosystem` / `rule` are STRUCTURAL: validated against a closed set so
+    #     an unrecognized value collapses to a safe sentinel instead of being
+    #     smuggled into the rules table / ecosystem label.
+    #   - the composed `message.text` is strict-scrubbed again as a backstop so a
+    #     secret cannot be reconstructed across the join of two clean fields.
     for pf in getattr(report, "provenance", None) or []:
-        rule_id = f"provenance/{pf.rule}"
+        rule = pf.rule if pf.rule in _PROV_RULES else _PROV_UNKNOWN_RULE
+        ecosystem = (pf.ecosystem if pf.ecosystem in _PROV_ECOSYSTEMS
+                     else _PROV_UNKNOWN_ECOSYSTEM)
+        rule_id = f"provenance/{rule}"
         if rule_id not in rules:
             rules[rule_id] = {
                 "id": rule_id,
-                "name": pf.rule,
-                "shortDescription": {
-                    "text": _PROV_RULE_TEXT.get(pf.rule, pf.rule)},
+                "name": rule,
+                # Always the catalog text — never the raw (possibly hostile)
+                # rule id, which validation has already reduced to a known key.
+                "shortDescription": {"text": _PROV_RULE_TEXT[rule]},
                 "defaultConfiguration": {"level": _sarif_level(pf.severity)},
                 "properties": {"category": "provenance"},
             }
-        pkg = clamp_text(neutralize_text(pf.package)) if pf.package else ""
-        msg = f"{pf.ecosystem}:{pkg} — {pf.detail}" if pkg else pf.detail
+        pkg = _sanitize_display(pf.package)
+        detail = _sanitize_display(pf.detail)
+        msg = f"{ecosystem}:{pkg} — {detail}" if pkg else detail
+        # Backstop: re-scrub the fully composed message. Individually-clean
+        # fields could in principle reconstruct a pattern across their join.
+        msg = redact_secrets_strict(msg)
         locations = []
         if pf.manifest:
             locations = [{"physicalLocation": {"artifactLocation": {
@@ -163,7 +192,7 @@ def render_sarif(report: Report, base: str = "") -> str:
             "level": _sarif_level(pf.severity),
             "message": {"text": clamp_text(msg)},
             "properties": {"category": "provenance",
-                           "ecosystem": pf.ecosystem, "package": pkg},
+                           "ecosystem": ecosystem, "package": pkg},
             "locations": locations,
         })
 
@@ -179,7 +208,22 @@ _PROV_RULE_TEXT = {
     "prov-single-maintainer": "Dependency has a single maintainer",
     "prov-unsigned": "Dependency's latest release has no provenance attestation",
     "prov-unavailable": "Some dependencies could not be checked",
+    # Fallback for a provenance finding whose rule id is not recognized. A
+    # provenance record comes from the (possibly hostile) manifest scan, so an
+    # unrecognized `rule` must NOT be rendered verbatim as a SARIF rule id/name
+    # — that is a channel to smuggle a secret into the rules table. It collapses
+    # to this catalog entry instead.
+    "prov-unknown": "Provenance finding with an unrecognized rule id",
 }
+
+# Structural provenance fields are validated against a closed set, never
+# rendered as free display text: an attacker-supplied `rule`/`ecosystem` that
+# is not in these sets collapses to a safe sentinel so a hostile manifest can
+# never smuggle a credential through the rules table or the ecosystem label.
+_PROV_RULES = frozenset(_PROV_RULE_TEXT)
+_PROV_ECOSYSTEMS = frozenset({"npm", "pypi"})
+_PROV_UNKNOWN_RULE = "prov-unknown"
+_PROV_UNKNOWN_ECOSYSTEM = "unknown"
 
 
 # subcategory -> human short description; fallback humanizes the slug

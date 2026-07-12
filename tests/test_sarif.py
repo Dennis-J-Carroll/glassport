@@ -226,5 +226,92 @@ class TestSarifRedactsObfuscated(unittest.TestCase):
                 self.assertNotIn(_OBF_SECRET, detectors._normalize_for_scan(doc), name)
 
 
+class TestProvenanceRedaction(unittest.TestCase):
+    """P0 evidence-safety: provenance findings come from the audited (possibly
+    hostile) manifest, so no field may reach the SARIF artifact raw. Kimi
+    confirmed pf.package leaked to message.text + properties.package because
+    sarif.py neutralized but never strict-redacted it. These lock the fix and
+    the adjacent structural/display fields."""
+
+    from glassport.provenance import ProvenanceFinding as _PF
+
+    def _prov_report(self, pf):
+        return Report(profile={"name": "demo"}, findings=[], deductions=[],
+                      score=50, grade="F", provenance=[pf])
+
+    def _doc(self, pf):
+        return sarif.render_sarif(self._prov_report(pf))
+
+    def _pf(self, **kw):
+        base = dict(rule="prov-not-in-registry", severity="high",
+                    ecosystem="npm", package="left-pad",
+                    manifest="package.json", detail="not found in registry")
+        base.update(kw)
+        return self._PF(**base)
+
+    def test_plain_credential_in_package_absent_everywhere(self):
+        secret = "sk-ant-api03-" + "A" * 40 + "1234567890"
+        doc = self._doc(self._pf(package=secret))
+        # gone from the whole normalized artifact...
+        self.assertNotIn(secret, detectors._normalize_for_scan(doc))
+        # ...and specifically from both confirmed sinks
+        run = json.loads(doc)["runs"][0]
+        res = run["results"][0]
+        self.assertNotIn(secret, res["message"]["text"])
+        self.assertNotIn(secret, res["properties"]["package"])
+
+    def test_obfuscated_credential_in_package_absent(self):
+        for name, obf in _OBFS.items():
+            doc = self._doc(self._pf(package=obf(_OBF_SECRET)))
+            self.assertNotIn(_OBF_SECRET, detectors._normalize_for_scan(doc), name)
+
+    def test_secret_in_detail_absent(self):
+        secret = "sk-ant-api03-" + "B" * 40 + "1234567890"
+        doc = self._doc(self._pf(detail=f"resolved from {secret} upstream"))
+        self.assertNotIn(secret, detectors._normalize_for_scan(doc))
+
+    def test_secret_in_ecosystem_or_rule_does_not_leak(self):
+        secret = "sk-ant-api03-" + "C" * 40 + "1234567890"
+        for field in ("ecosystem", "rule"):
+            doc = self._doc(self._pf(**{field: secret}))
+            self.assertNotIn(secret, detectors._normalize_for_scan(doc), field)
+
+    def test_fail_closed_withhold_when_scan_raises(self):
+        secret = "sk-ant-api03-" + "D" * 40 + "1234567890"
+        with mock.patch.object(detectors, "_spanned_original_redactions",
+                               side_effect=RuntimeError("boom")):
+            doc = self._doc(self._pf(package=secret))
+        self.assertNotIn(secret, doc)
+        self.assertIn(detectors._WITHHELD,
+                      json.loads(doc)["runs"][0]["results"][0]["message"]["text"])
+
+    def test_structural_fields_validate_and_stay_consistent(self):
+        # a hostile rule/ecosystem collapses to safe sentinels, and every
+        # emitted ruleId still resolves to an entry in the driver rules table.
+        doc = json.loads(self._doc(self._pf(rule="attacker-rule",
+                                            ecosystem="evil-registry")))
+        run = doc["runs"][0]
+        rule_ids = {r["id"] for r in run["tool"]["driver"]["rules"]}
+        res = run["results"][0]
+        self.assertEqual(res["ruleId"], "provenance/prov-unknown")
+        self.assertIn(res["ruleId"], rule_ids)          # ruleId ↔ rules table
+        self.assertEqual(res["properties"]["ecosystem"], "unknown")
+        # the collapsed rule renders catalog text, not the raw hostile value
+        unknown = next(r for r in run["tool"]["driver"]["rules"]
+                       if r["id"] == "provenance/prov-unknown")
+        self.assertNotIn("attacker-rule", json.dumps(run))
+        self.assertEqual(unknown["name"], "prov-unknown")
+
+    def test_ordinary_provenance_output_unchanged(self):
+        # a benign npm finding renders exactly as before the hardening
+        run = json.loads(self._doc(self._pf()))["runs"][0]
+        res = run["results"][0]
+        self.assertEqual(res["message"]["text"],
+                         "npm:left-pad — not found in registry")
+        self.assertEqual(res["properties"]["package"], "left-pad")
+        self.assertEqual(res["properties"]["ecosystem"], "npm")
+        self.assertEqual(res["ruleId"], "provenance/prov-not-in-registry")
+
+
 if __name__ == "__main__":
     unittest.main()
