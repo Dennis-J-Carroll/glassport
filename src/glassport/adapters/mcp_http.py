@@ -50,14 +50,18 @@ def _validate_remote(url: str):
             f"remote scheme {r.scheme or '(none)'!r} unsupported: use http or https")
     if not r.hostname:
         raise ValueError("remote URL has no host")
+    if any(ch.isspace() or ord(ch) < 0x20 for ch in r.hostname):
+        raise ValueError("remote URL host contains whitespace or control characters")
     if r.username or r.password:
         raise ValueError("remote URL must not embed credentials (user:pass@)")
     if r.fragment:
         raise ValueError("remote URL must not contain a fragment")
     try:
-        _ = r.port                       # property raises ValueError if out of range
-    except ValueError:
-        raise ValueError("remote URL port is out of range")
+        port = r.port                    # property raises ValueError if unparseable/out of range
+    except ValueError as exc:
+        raise ValueError(f"remote URL has an invalid port: {exc}")
+    if port == 0:
+        raise ValueError("remote URL port 0 is not allowed")
     return r
 
 

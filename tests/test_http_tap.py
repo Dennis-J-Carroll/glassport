@@ -353,6 +353,26 @@ class TestRemoteValidation(unittest.TestCase):
         r3 = mcp_http._validate_remote("http://h.example:80/x")   # default port dropped
         self.assertEqual(mcp_http._host_header(r3), "h.example")
 
+    def test_rejects_port_zero(self):
+        from glassport.adapters import mcp_http
+        with self.assertRaises(ValueError):
+            mcp_http._validate_remote("http://h:0/x")
+
+    def test_rejects_whitespace_in_host(self):
+        from glassport.adapters import mcp_http
+        # Note: urlsplit strips \t\r\n from the whole URL before parsing, so
+        # "http://h\tx/y" parses to hostname "hx" (no whitespace survives) and
+        # is out of scope for this check. A literal space is NOT stripped by
+        # urlsplit and is the case this validator must catch.
+        with self.assertRaises(ValueError, msg="http://h /x"):
+            mcp_http._validate_remote("http://h /x")
+
+    def test_non_numeric_port_message_names_the_cause(self):
+        from glassport.adapters import mcp_http
+        with self.assertRaises(ValueError) as ctx:
+            mcp_http._validate_remote("http://h:abc/x")
+        self.assertIn("port", str(ctx.exception).lower())
+
 
 if __name__ == "__main__":
     unittest.main()
