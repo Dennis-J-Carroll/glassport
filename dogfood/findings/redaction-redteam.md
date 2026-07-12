@@ -1,14 +1,52 @@
 # Redaction Red-Team Grill Findings
 
 Branch: `fix/sarif-provenance-redaction` (PR #63)  
-Grill: `PYTHONPATH=src python dogfood/eval_redaction_redteam.py`  
+Grill: `PYTHONPATH=src python dogfood/eval_redaction_redteam.py` (34 cases)  
+Kimi's pass-3 evidence (47 cases, 8 intentionally RED at the time) preserved
+unmodified on `redteam/pass3-evidence` (commit `128a64d`) for the #64 track.  
 Run date: 2026-07-12
 
 ## Executive summary
 
-The SARIF provenance redaction fix is **solid against the requested attack surface**: 28 fix-specific grill rows pass (plain-secret absent from `message.text`, `properties.package`, and the normalized whole SARIF artifact). No obfuscation, boundary-split, validation-bypass, scan-failure, or structural-consistency escape was found in `sarif.render_sarif`.
+Three Kimi red-team passes against the provenance→artifact path, in sequence:
 
-Two **adjacent** leaks were found outside SARIF: the `--json` and text audit renderers still emit provenance findings verbatim and must be hardened in a follow-up PR.
+1. **Pass 1** confirmed the P0: `pf.package` reached SARIF unredacted.
+2. **Pass 2** confirmed the same leak class in the `--json`/text audit renderers (ADJ-1/ADJ-2).
+3. **Pass 3** validated the centralized fix (`detectors.redact_display`, used by
+   all three renderers) and found two further gaps at the renderer boundary:
+   `severity` emitted raw in text/JSON, and non-string `rule`/`ecosystem`
+   crashing all three renderers. Both are **fixed** in this PR. Pass 3 also
+   surfaced Unicode-normalization gaps (combining marks, Latin small-capital-A)
+   and theoretical split-field compositions — **not fixed here**, classified
+   below and tracked separately (issue #64).
+
+**Reachability, established empirically** (`tests/test_provenance.py::
+TestProvenanceFieldReachability`, driving a real `package.json` through
+`discover_deps()` → `evaluate()` — the actual shipped pipeline, not a
+hand-constructed `ProvenanceFinding`): of the six `ProvenanceFinding` fields,
+**only `package` is manifest-derived**. `rule`, `severity`, `ecosystem`,
+`manifest`, and `detail` are all fixed, glassport-authored literals chosen by
+glassport's own code (which file it parsed, which check fired), never read
+from manifest content. This means every renderer-boundary finding below that
+requires attacker control of `severity`/`rule`/`ecosystem`/`detail` — alone or
+in combination with `package` — is **not currently exploitable through the
+real pipeline**. They are fixed anyway, as defense-in-depth against a future or
+buggy provenance source (a new ecosystem adapter, a refactor of `evaluate()`),
+and reported as such — not as live 0-days.
+
+## Glassport's redaction guarantee (stated explicitly, per this round)
+
+Glassport's shareable-artifact redaction guarantees: **no credential appears
+intact, or in a known-obfuscated form (zero-width, homoglyph, fullwidth,
+bidi-override), as a contiguous, directly-usable string within a single
+rendered field or reasonable composed message.** It does **not** guarantee
+against a reconstruction oracle that strips *all* structural punctuation,
+whitespace, and field delimiters before searching — that transformation
+disregards separators a real reader or tool would see and rely on, and chasing
+it risks broad, unjustified over-redaction of ordinary structured output
+(false withholding of benign findings). Where this round narrows or does not
+extend the guarantee (Unicode confusable coverage; a hypothetical
+multi-field-split), it says so explicitly rather than silently.
 
 ## Results table
 
@@ -32,6 +70,17 @@ Two **adjacent** leaks were found outside SARIF: the `--json` and text audit ren
 | FIX-6 | SARIF structural consistency with mixed/unknown provenance | green lock | valid 2.1.0, no duplicate rules, every `ruleId` resolves |
 | ADJ-1 | `--json` audit output provenance leak | **CONFIRMED → FIXED** | `render_json` was `vars(pf)`; now per-field `redact_display` |
 | ADJ-2 | Text audit output provenance leak | **CONFIRMED → FIXED** | `render_text` scrubs `package`/`ecosystem`/`rule`/`detail` |
+| PASS3-1 | `pf.severity` raw in text/JSON | **CONFIRMED → FIXED** | `provenance.safe_severity`, closed set `{high,medium,low,note}` → `note` sentinel; not attacker-reachable today |
+| PASS3-6a | Non-string `pf.rule` crashes all 3 renderers | **CONFIRMED → FIXED** | `provenance.safe_rule` — isinstance-first, no `str()`/`in frozenset` on a hostile value |
+| PASS3-6b | Non-string `pf.ecosystem` crashes all 3 renderers | **CONFIRMED → FIXED** | `provenance.safe_ecosystem`, same pattern |
+| PASS3-hostile | Hostile `__str__`/`__bool__`/`__eq__` on any field | **FIXED** | `redact_secrets_strict`/`redact_display` isinstance-first; SARIF manifest check isinstance-gated before truthiness |
+| PASS3-2a | Combining-mark obfuscation in `package` | **not fixed — tracked** | detector-normalization gap; issue #64 |
+| PASS3-2b | Latin small-capital-A (U+1D00) obfuscation in `package` | **not fixed — tracked** | issue #64; 0.6.9 gated on its explicit disposition |
+| PASS3-3a | Split secret across `package`+`detail` | **classified, not currently reachable** | `detail` is always glassport-authored; no contiguous credential in production oracle — see guarantee statement above |
+| PASS3-3b | Split secret across `ecosystem`+`package` | **classified, not currently reachable + structurally protected** | `ecosystem` is glassport-chosen (never manifest content); closed-set validation discards non-enum content wholesale |
+| PASS3-3c/3d | Split across `rule`+`detail` / JSON punctuation | green lock | delimiter/key-name insertion breaks contiguity in the production scanner |
+| PASS3-5 | Boundary sizes (scan/clamp caps) | green lock | no >cap secret survives |
+| PASS3-7/8/9 | Structural integrity, benign invariance, bypass hunt | green lock | valid SARIF, JSON schema unchanged, only known-safe `pf.*` accesses found |
 
 ## Fix-specific attacks (all green)
 
@@ -113,9 +162,21 @@ assert detectors._WITHHELD in doc
 
 Mixed provenance findings (known, duplicate known, unknown rule, unknown ecosystem) produce a valid SARIF 2.1.0 document, no duplicate rule ids, and every `result.ruleId` resolves to a `driver.rules` entry.
 
-## Observation: Latin small-capital-A obfuscation
+## Deferred to issue #64: Unicode-normalization gaps (NOT in this PR)
 
-`secret.replace("A", "\u1D00")` is **not** detected by the scanner (NFKC does not fold U+1D00 to A; it is not in the confusables table). The SARIF fix therefore cannot remove it, so the obfuscated credential shape survives in `message.text` and `properties.package`. The **plain** secret is absent from the normalized artifact, so by the project's oracle this is not a confirmed leak. It is, however, a readable deception glyph that a human or downstream model could interpret as the real credential. Closing it requires expanding the detector's confusable/NFKC coverage, which is a detector-layer change, not a SARIF fix issue.
+Combining-mark obfuscation (`s\u0332k\u0332-\u0332a\u0332n\u0332t\u0332...`) and Latin small-capital-A (U+1D00) both
+survive in `package` across all three renderers \u2014 the production oracle
+(`detectors._normalize_for_scan`) reports clean because glassport's own
+normalizer doesn't fold these forms either, so its "clean" verdict cannot be
+trusted for these specific glyphs. Per explicit instruction, this is **not**
+dismissed on that basis: [issue #64](https://github.com/Dennis-J-Carroll/glassport/issues/64)
+requires an *independent* reconstruction oracle (not sharing glassport's
+normalizer) to determine actual recoverability, and reachability via `package`
+is now real (see `TestProvenanceFieldReachability`) \u2014 0.6.9 does not ship until
+#64's disposition (fixed, or the supported-obfuscation claim explicitly
+narrowed) is explicit. `secret.replace("A", "\u1D00")` and the combining-mark
+repro are preserved unmodified in Kimi's pass-3 evidence
+(`redteam/pass3-evidence`, commit `128a64d`) for that work.
 
 ## Adjacent findings (outside SARIF / PR #63)
 
@@ -166,9 +227,39 @@ Benign npm/PyPI output is byte-unchanged. Locked by
 fullwidth / Cyrillic obfuscation, JSON schema keys unchanged, ordinary output
 unchanged). Teeth: reverting the audit fix reds 3/5. Grill now **30/30**.
 
+## Pass-3 renderer-boundary fixes (this PR)
+
+`src/glassport/provenance.py` gains three shared, closed-set validators used
+by **all three** renderers (SARIF, JSON, text) — the single point of truth so
+no renderer independently re-derives (and can drift on) the valid-value sets:
+
+- `safe_rule(value)` / `safe_ecosystem(value)` / `safe_severity(value)` — each
+  checks `isinstance(value, str)` **first**, before any other operation, so a
+  non-string or hostile value never has a method invoked on it (`__str__`,
+  `__eq__`, `__bool__`, `__hash__` via `in frozenset`). An unrecognized or
+  non-string value collapses to a fixed sentinel (`prov-unknown` / `unknown` /
+  `note`).
+- `detectors.redact_secrets_strict` and `redact_display` are now themselves
+  isinstance-first: a non-string input immediately withholds/sentinels rather
+  than risking the fallthrough (root cause of the pass-3 crash: an empty-spans
+  no-op splice returned the *unredacted, non-string object itself*, which the
+  next stage's string-only method then crashed on).
+- `render_text` gained a composed-message backstop mirroring SARIF's (re-scrub
+  the fully assembled provenance block) — architecturally consistent, a no-op
+  on already-clean text, closes the one path (text) that previously had no
+  backstop at all.
+
+Locked by `tests/test_sarif.py::TestProvenanceRendererBoundaryDefensiveGaps`
+and `tests/test_audit.py::TestProvenanceRendererBoundaryDefensiveGaps` (severity
+closed-mapping, non-string totality, hostile-dunder-never-invoked, split
+classification) — teeth: reverting all four source files reds 2 failures + 5
+errors across the two classes. Reachability locked separately in
+`tests/test_provenance.py::TestProvenanceFieldReachability`.
+
 ## Green locks (surface hit, no plain-secret escape found)
 
 - P1/P2/P4/P5/P6/P7 remain green locks from the original grill.
 - All SARIF fix-specific obfuscation, boundary, validation, fail-closed, and structural rows are green locks.
+- All pass-3 renderer-boundary rows above (severity, non-string totality, hostile-dunder, split classification) are green locks in the live 34-case grill.
 
 These are tested-surface statements, not proofs of universal safety.

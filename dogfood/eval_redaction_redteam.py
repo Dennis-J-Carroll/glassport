@@ -12,7 +12,7 @@ import json
 import sys
 from typing import Callable
 
-from glassport.audit import Finding, Report
+from glassport.audit import Finding, Report, render_json, render_text
 from glassport.provenance import ProvenanceFinding
 from glassport import sarif
 from glassport import detectors
@@ -613,6 +613,111 @@ def adjacent_text_audit_leaks_provenance():
 
 
 CASES.append(("ADJACENT: text audit provenance leak", adjacent_text_audit_leaks_provenance))
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# PASS3 — renderer-boundary defensive gaps (Kimi 3rd pass)
+#
+# Neither severity nor a non-string rule/ecosystem is attacker-reachable
+# through the real evaluate() pipeline today (only `package` is manifest-
+# derived — see tests/test_provenance.py::TestProvenanceFieldReachability).
+# These are defense-in-depth locks against a future/buggy provenance source,
+# not live exploits, and are asserted as "must not crash + must collapse to a
+# safe sentinel" — not "must crash" (Kimi's pass-3 evidence, preserved
+# unmodified on branch redteam/pass3-evidence, predates the fix and expected
+# a crash; these cases assert the fixed, correct behavior).
+# ═══════════════════════════════════════════════════════════════════════════
+def _prov_report(**pf_kw):
+    base = dict(rule="prov-not-in-registry", severity="high", ecosystem="npm",
+                package="left-pad", manifest="package.json",
+                detail="not found in registry")
+    base.update(pf_kw)
+    pf = ProvenanceFinding(**base)
+    # A full profile dict — render_text() reads path/runtime/files_scanned/
+    # depth/package_name, which the file's minimal _report() helper omits.
+    return Report(
+        profile={
+            "name": "demo", "path": "/tmp/demo", "runtime": "python",
+            "files_scanned": 1, "depth": {"ast": 1, "pattern": 0},
+            "package_name": "", "version": "",
+        },
+        findings=[], deductions=[], score=50, grade="F", provenance=[pf])
+
+
+class _Hostile:
+    """A raising object: no dunder here may ever be invoked by a renderer."""
+    def __str__(self): raise RuntimeError("str() invoked")
+    def __bool__(self): raise RuntimeError("bool() invoked")
+    def __eq__(self, other): raise RuntimeError("eq invoked")
+    def __hash__(self): return 0
+
+
+def pass3_severity_never_raw():
+    secret = _live_secret()
+    r = _prov_report(severity=secret)
+    doc = sarif.render_sarif(r)
+    if secret in doc or secret in render_json(r) or secret in render_text(r):
+        return False, "secret-shaped severity emitted raw in some renderer"
+    return True, "severity closed-mapping green across all renderers"
+
+
+CASES.append(("PASS3: secret-shaped severity never emitted raw", pass3_severity_never_raw))
+
+
+def pass3_non_string_rule_ecosystem_no_crash():
+    for bad in (["a", "b"], 12345, None, {"x": 1}):
+        for field in ("rule", "ecosystem"):
+            r = _prov_report(**{field: bad})
+            try:
+                sarif.render_sarif(r)
+                render_json(r)
+                render_text(r)
+            except Exception as exc:
+                return False, f"{field}={bad!r} crashed: {type(exc).__name__}: {exc}"
+    return True, "non-string rule/ecosystem: no crash across all renderers"
+
+
+CASES.append(("PASS3: non-string rule/ecosystem does not crash any renderer",
+              pass3_non_string_rule_ecosystem_no_crash))
+
+
+def pass3_hostile_object_no_dunder_invoked():
+    for field in ("rule", "ecosystem", "package", "manifest"):
+        r = _prov_report(**{field: _Hostile()})
+        try:
+            sarif.render_sarif(r)
+            render_json(r)
+            render_text(r)
+        except RuntimeError as exc:
+            return False, f"{field}: a forbidden dunder was invoked: {exc}"
+        except Exception as exc:
+            return False, f"{field}: unexpected crash: {type(exc).__name__}: {exc}"
+    return True, "hostile object never has str()/bool()/eq() invoked"
+
+
+CASES.append(("PASS3: hostile object dunders never invoked",
+              pass3_hostile_object_no_dunder_invoked))
+
+
+def pass3_split_package_detail_classified():
+    """Kimi PASS3-3a: package/detail split. Neither field is simultaneously
+    attacker-controlled through the real pipeline (detail is a fixed
+    glassport template). Glassport's guarantee: no CONTIGUOUS, directly-
+    usable credential in the rendered text — verified with the PRODUCTION
+    oracle. An aggressive independent oracle that strips ALL structural
+    punctuation before searching is a different, broader question, tracked
+    separately (see dogfood/findings/redaction-redteam.md) and is
+    deliberately NOT the assertion here."""
+    secret = _live_secret()
+    r = _prov_report(package="sk-ant-api03-", detail="A" * 40 + "1234567890")
+    text = render_text(r)
+    if secret in detectors._normalize_for_scan(text):
+        return False, "contiguous secret reconstructed in text (production oracle)"
+    return True, "package/detail split: no contiguous usable credential (classified, see findings.md)"
+
+
+CASES.append(("PASS3: package/detail split classified (not currently reachable)",
+              pass3_split_package_detail_classified))
 
 
 # ═══════════════════════════════════════════════════════════════════════════
