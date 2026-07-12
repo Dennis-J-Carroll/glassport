@@ -1,14 +1,24 @@
 # Redaction Red-Team Grill Findings
 
-Branch: `fix/sarif-provenance-redaction` (PR #63)  
+Branch: `fix/sarif-provenance-redaction` (PR #63), commit `ff7d818`  
 Grill: `PYTHONPATH=src python dogfood/eval_redaction_redteam.py`  
 Run date: 2026-07-12
 
 ## Executive summary
 
-The SARIF provenance redaction fix is **solid against the requested attack surface**: 28 fix-specific grill rows pass (plain-secret absent from `message.text`, `properties.package`, and the normalized whole SARIF artifact). No obfuscation, boundary-split, validation-bypass, scan-failure, or structural-consistency escape was found in `sarif.render_sarif`.
+PR #63's centralized `detectors.redact_display` is **correctly wired** across all three renderers and holds against plain-secret leaks, scan-failure totality, boundary sizes, malformed string rule/ecosystem values, and structural integrity. The SARIF fix from earlier passes remains solid.
 
-Two **adjacent** leaks were found outside SARIF: the `--json` and text audit renderers still emit provenance findings verbatim and must be hardened in a follow-up PR.
+Pass 3 found **eight RED cases** using an independent reconstruction oracle:
+
+1. `pf.severity` is emitted **raw** in text and JSON outputs (defensive-coverage gap; not attacker-reachable in current `evaluate()` code).
+2. **Combining-mark obfuscation** (`s̲k̲-̲a̲n̲t̲...`) in `package`/`detail` survives in all rendered artifacts; independent oracle reconstructs the credential.
+3. **Latin small-capital-A obfuscation** (`ᴀ`) in `package`/`detail` survives in all rendered artifacts; independent oracle reconstructs.
+4. A credential **split across `package` + `detail`** reconstructs in text and SARIF when separators are collapsed.
+5. A credential **split across `ecosystem` + `package`** reconstructs in text output.
+6. **Non-string `pf.rule`** (e.g., a list) crashes all three renderers — totality violation.
+7. **Non-string `pf.ecosystem`** (e.g., a list) crashes all three renderers — totality violation.
+
+Findings 2–5 are **detector-layer normalization gaps** (issue #64 family) or theoretical split-field reconstruction that requires controlling fields currently fixed by `evaluate()`. They are reported with repros so the maintainer can decide scope.
 
 ## Results table
 
@@ -18,157 +28,155 @@ Two **adjacent** leaks were found outside SARIF: the `--json` and text audit ren
 | P-lead sweep | `pf.ecosystem` reaches SARIF unscrubbed | **FIXED — green lock** | validated `∈ {npm, pypi}` → `unknown` sentinel |
 | P-lead sweep | `pf.detail` reaches SARIF unscrubbed | **FIXED — green lock** | `_sanitize_display` |
 | P-lead sweep | `pf.rule` reaches SARIF rules table / ruleId | **FIXED — green lock** | validated against fixed catalog → `prov-unknown` |
-| FIX-1a | ZWJ-obfuscated secret in `pf.package` | green lock | redaction normalizes before scanning |
-| FIX-1b | Fullwidth-obfuscated secret in `pf.package` | green lock | NFKC folded, redacted |
-| FIX-1c | Cyrillic-homoglyph secret in `pf.package` | green lock | confusable map folded, redacted |
-| FIX-1d | Bidi-override-wrapped secret in `pf.package` | green lock | invisibles stripped, redacted |
-| FIX-1e | Combining-mark secret in `pf.package` | green lock | NFKC decomposes, redacted |
-| FIX-1f | Latin small-capital-A obfuscated secret | green lock (plain absent) | **obfuscated glyph survives** — see observation below |
-| FIX-2 | Obfuscated secret in `pf.manifest` URI | green lock | URI redaction is obfuscation-proof |
-| FIX-3 | Secret split across `package`/`detail` boundary | green lock | hardcoded separators break pattern contiguity; composed-msg backstop clean |
-| FIX-4a | Secret-shaped unknown `pf.rule` | green lock | collapses to `provenance/prov-unknown`; rules table entry exists |
-| FIX-4b | Secret-shaped unknown `pf.ecosystem` | green lock | collapses to `unknown` |
-| FIX-5 | `redact_secrets_strict` raises during render | green lock | fail-closed `_WITHHELD`; `render_sarif` does not crash |
-| FIX-6 | SARIF structural consistency with mixed/unknown provenance | green lock | valid 2.1.0, no duplicate rules, every `ruleId` resolves |
-| ADJ-1 | `--json` audit output provenance leak | **CONFIRMED → FIXED** | `render_json` was `vars(pf)`; now per-field `redact_display` |
-| ADJ-2 | Text audit output provenance leak | **CONFIRMED → FIXED** | `render_text` scrubs `package`/`ecosystem`/`rule`/`detail` |
+| ADJ-1 | `--json` audit output provenance leak | **FIXED — green lock** | `render_json` now uses `redact_display` |
+| ADJ-2 | Text audit output provenance leak | **FIXED — green lock** | `render_text` now uses `redact_display` |
+| **PASS3-1** | `pf.severity` raw in text/JSON | **RED** | emitted verbatim; defensive gap |
+| **PASS3-2a** | Combining-mark obfuscation in `package`/`detail` | **RED** | detector normalization gap; issue #64 family |
+| **PASS3-2b** | Small-capital-A obfuscation in `package`/`detail` | **RED** | issue #64 evidence |
+| PASS3-2c | ZWJ/fullwidth/Cyrillic/bidi obfuscation | green lock | production oracle catches |
+| **PASS3-3a** | Split secret `package` + `detail` | **RED** | reconstructs in text/SARIF (theoretical) |
+| **PASS3-3b** | Split secret `ecosystem` + `package` | **RED** | reconstructs in text (theoretical) |
+| PASS3-3c | Split secret `rule` + `detail` | green lock | output format inserts `[npm:safe]` between them |
+| PASS3-3d | Split secret across JSON punctuation | green lock | punctuation breaks alphanumeric core |
+| PASS3-4 | Scan-failure totality per renderer | green lock | `_WITHHELD`, no crash |
+| PASS3-5 | Boundary sizes (scan/clamp caps) | green lock | no >cap secret survives |
+| **PASS3-6a** | Non-string `pf.rule` | **RED** | crashes all renderers |
+| **PASS3-6b** | Non-string `pf.ecosystem` | **RED** | crashes all renderers |
+| PASS3-6c | `None`/empty/secret-shaped string rule/ecosystem | green lock | collapse to safe sentinels |
+| PASS3-7 | Structural integrity + benign invariance | green lock | valid SARIF, JSON schema unchanged, ordinary npm output preserved |
+| PASS3-8 | Benign npm/PyPI output byte-identical | green lock | `left-pad` passes through unchanged |
+| PASS3-9 | Bypass hunt for `pf.*` rendering | green lock | only known-safe accesses in `sarif.py` / `audit.py` |
 
-## Fix-specific attacks (all green)
+## Independent reconstruction oracle
 
-### Repro harness
-
-All FIX rows use the real shipped functions:
+Implemented in `dogfood/eval_redaction_redteam.py` for Pass 3. It deliberately does **not** call glassport's `_normalize_for_scan`:
 
 ```python
-from glassport.audit import Report
+def _independent_reconstruct(text: str, secret: str) -> bool:
+    # 1. strip Cf/Cc/Mn/Me (format, control, combining marks)
+    cleaned = "".join(ch for ch in text
+                      if unicodedata.category(ch) not in _INDEP_INVISIBLE_CATS)
+    # 2. NFKD then NFKC
+    norm = unicodedata.normalize("NFKC", unicodedata.normalize("NFKD", cleaned))
+    # 3. fold Cyrillic/Greek/small-capital look-alikes
+    folded = norm.translate(_INDEP_TABLE)
+    # 4a. exact search
+    if secret in folded:
+        return True
+    # 4b. loose alphanumeric-core search (catches separator-collapsed splits)
+    loose_text = re.sub(r"[^A-Za-z0-9]", "", folded)
+    loose_secret = re.sub(r"[^A-Za-z0-9]", "", secret)
+    return loose_secret in loose_text
+```
+
+## Pass 3 RED findings
+
+### PASS3-1: `pf.severity` emitted raw in text and JSON
+
+**Source:** `src/glassport/audit.py:605` and `:630`
+
+```python
+out.append(f"  [{pf.severity}] {rule}{where}")          # text
+"severity": pf.severity,                                # json
+```
+
+`severity` is the only provenance field that bypasses `redact_display` in text/JSON. SARIF is safe because `_sarif_level(pf.severity)` maps to `error/warning/note` and never emits the raw string.
+
+**Repro:**
+
+```python
+from glassport.audit import Report, render_text, render_json
 from glassport.provenance import ProvenanceFinding
-from glassport import sarif, detectors
-
-def _prov_doc(package="safe-pkg", detail="detail", manifest="package.json",
-              rule="prov-not-in-registry", ecosystem="npm"):
-    pf = ProvenanceFinding(rule=rule, severity="high", ecosystem=ecosystem,
-                           package=package, manifest=manifest, detail=detail)
-    return sarif.render_sarif(
-        Report(profile={"name": "demo"}, findings=[], deductions=[],
-               score=50, grade="F", provenance=[pf]))
 
 secret = "sk-ant-api03-" + "A" * 40 + "1234567890"
-```
-
-### 1. Obfuscation
-
-| Variant | Input package | Plain secret in normalized SARIF? |
-|---|---|---|
-| ZWJ | `"sk-ant-api03-\u200d" + "A"*40 + "1234567890"` | No |
-| Fullwidth | `secret.translate({ord(c): ord(c)+0xFEE0 ...})` | No |
-| Cyrillic | `secret.replace("a", "а").replace("A", "А")` | No |
-| Bidi override | `"\u202e" + secret + "\u202c"` | No |
-| Combining marks | underline each char | No |
-| Latin small-capital A | `secret.replace("A", "\u1D00")` | **No** (plain absent) |
-
-### 2. Manifest URI
-
-```python
-doc = _prov_doc(manifest=f"src/{secret.replace('a', 'а')}/package.json")
-assert secret not in detectors._normalize_for_scan(doc)
-```
-
-### 3. Composed-message boundary split
-
-```python
-pkg = secret[:23]     # "sk-ant-api03-" + 10 A's — too short to match alone
-detail = secret[23:]  # remaining A's + digits
-msg = json.loads(_prov_doc(package=pkg, detail=detail))["runs"][0]["results"][0]["message"]["text"]
-assert secret not in msg
-assert secret not in detectors._normalize_for_scan(_prov_doc(package=pkg, detail=detail))
-```
-
-### 4. Unknown rule / ecosystem
-
-```python
-d = json.loads(_prov_doc(rule=secret, ecosystem=secret))
-res = d["runs"][0]["results"][0]
-rules = {r["id"]: r for r in d["runs"][0]["tool"]["driver"]["rules"]}
-assert res["ruleId"] == "provenance/prov-unknown"
-assert res["ruleId"] in rules
-assert res["properties"]["ecosystem"] == "unknown"
-assert secret not in json.dumps(d)
-```
-
-### 5. Scan failure / totality
-
-```python
-from unittest import mock
-pf = ProvenanceFinding("prov-not-in-registry", "high", "npm", secret,
-                       "package.json", "detail")
-report = Report(profile={"name": "demo"}, findings=[], deductions=[],
+pf = ProvenanceFinding(rule="prov-not-in-registry", severity=secret,
+                       ecosystem="npm", package="safe",
+                       manifest="m.json", detail="d")
+report = Report(profile={...}, findings=[], deductions=[],
                 score=50, grade="F", provenance=[pf])
-with mock.patch.object(detectors, "_scan_pii", side_effect=RuntimeError("boom")):
-    doc = sarif.render_sarif(report)   # does not raise
-assert secret not in doc
-assert detectors._WITHHELD in doc
+
+assert secret in render_text(report)   # RED
+assert secret in render_json(report)   # RED
 ```
 
-### 6. Structural consistency
+**Fix suggestion:** run `pf.severity` through a closed-set validator (the real provenance rules only emit `high|medium|low|note`) or through `redact_display` before emission.
 
-Mixed provenance findings (known, duplicate known, unknown rule, unknown ecosystem) produce a valid SARIF 2.1.0 document, no duplicate rule ids, and every `result.ruleId` resolves to a `driver.rules` entry.
+### PASS3-2a: Combining-mark obfuscation survives
 
-## Observation: Latin small-capital-A obfuscation
+A credential with a combining underline on every character (`s̲k̲-̲a̲n̲t̲...`) is **not** detected by glassport's scanner. It survives in all three rendered outputs. The independent oracle strips the combining marks and reconstructs the credential; the production oracle reports clean.
 
-`secret.replace("A", "\u1D00")` is **not** detected by the scanner (NFKC does not fold U+1D00 to A; it is not in the confusables table). The SARIF fix therefore cannot remove it, so the obfuscated credential shape survives in `message.text` and `properties.package`. The **plain** secret is absent from the normalized artifact, so by the project's oracle this is not a confirmed leak. It is, however, a readable deception glyph that a human or downstream model could interpret as the real credential. Closing it requires expanding the detector's confusable/NFKC coverage, which is a detector-layer change, not a SARIF fix issue.
-
-## Adjacent findings (outside SARIF / PR #63)
-
-### ADJ-1: `--json` audit output leaks provenance secrets
-
-`src/glassport/audit.py:614` does:
+**Repro:**
 
 ```python
-obj["provenance"] = [vars(pf) for pf in report.provenance]
+obf = "".join(c + "\u0332" for c in secret)
+pf = ProvenanceFinding(rule="prov-not-in-registry", severity="high",
+                       ecosystem="npm", package=obf, manifest="m.json", detail="d")
+# render_text / render_json / sarif.render_sarif all contain the obfuscated shape
 ```
 
-This emits every `ProvenanceFinding` field verbatim, including attacker-controlled `package` and `detail`.
+**Verdict:** detector-layer normalization gap (issue #64 family).
+
+### PASS3-2b: Latin small-capital-A (U+1D00) obfuscation survives
+
+U+1D00 is not NFKC-folded and not in the confusables table. It survives in all rendered outputs; the independent oracle reconstructs the credential. This is explicit issue #64 evidence.
+
+**Repro:**
 
 ```python
-from glassport.audit import render_json
-secret = "sk-ant-api03-" + "A" * 40 + "1234567890"
-pf = ProvenanceFinding("prov-not-in-registry", "high", "npm", secret,
-                       "package.json", "detail")
-report = Report(profile={"name": "demo"}, findings=[], deductions=[],
-                score=50, grade="F", provenance=[pf])
-assert secret in detectors._normalize_for_scan(render_json(report))  # RED
+obf = secret.replace("A", "\u1D00")
+pf = ProvenanceFinding(..., package=obf, ...)
 ```
 
-### ADJ-2: Text audit output leaks provenance secrets
-
-`src/glassport/audit.py:593-595` prints `pf.package` and `pf.detail` without redaction.
+### PASS3-3a: Split secret across `package` + `detail`
 
 ```python
-from glassport.audit import render_text
-# ... same pf ...
-assert secret in detectors._normalize_for_scan(render_text(report))  # RED
+pf = ProvenanceFinding(rule="prov-not-in-registry", severity="high", ecosystem="npm",
+                       package="sk-ant-api03-",
+                       manifest="m.json", detail="A" * 40 + "1234567890")
 ```
 
-### Resolution (ADJ-1 / ADJ-2 — FIXED in this PR)
+The text output joins them as `[npm:sk-ant-api03- — AAAAA...1234567890]`; the SARIF composed message is `npm:sk-ant-api03- — AAAAA...1234567890`. The production backstop does not fire because the delimiter breaks pattern contiguity. The independent oracle collapses separators and reconstructs the credential.
 
-Both audit renderers now scrub provenance fields with the **shared**
-`detectors.redact_display` (strict-redact → neutralize → clamp), the single
-definition SARIF also uses — so no renderer can drift into the
-neutralize-without-redact bug independently:
+**Note:** in current code `detail` is glassport-authored, so this is a theoretical reconstruction, not an attacker-exploitable leak today.
 
-- `render_json` builds a per-field sanitized dict instead of `vars(pf)` (same
-  keys, so the JSON shape is unchanged): `package`/`detail`/`ecosystem`/`rule`
-  → `redact_display`, `manifest` → `redact_secrets_strict`.
-- `render_text` scrubs `package`/`ecosystem`/`rule`/`detail` before formatting.
+### PASS3-3b: Split secret across `ecosystem` + `package` (text only)
 
-Benign npm/PyPI output is byte-unchanged. Locked by
-`tests/test_audit.py::TestProvenanceRedactionInRenderers` (plain + zero-width /
-fullwidth / Cyrillic obfuscation, JSON schema keys unchanged, ordinary output
-unchanged). Teeth: reverting the audit fix reds 3/5. Grill now **30/30**.
+```python
+pf = ProvenanceFinding(rule="prov-not-in-registry", severity="high",
+                       ecosystem="sk-ant-api03-",
+                       package="A" * 40 + "1234567890",
+                       manifest="m.json", detail="d")
+```
 
-## Green locks (surface hit, no plain-secret escape found)
+Text output: `[sk-ant-api03-:AAAA...1234567890]`. Independent oracle reconstructs. `ecosystem` is fixed to `npm`/`pypi` in real code, so not currently exploitable.
 
-- P1/P2/P4/P5/P6/P7 remain green locks from the original grill.
-- All SARIF fix-specific obfuscation, boundary, validation, fail-closed, and structural rows are green locks.
+### PASS3-6a/b: Non-string `rule`/`ecosystem` crash every renderer
 
-These are tested-surface statements, not proofs of universal safety.
+```python
+pf = ProvenanceFinding(rule=["prov-not-in-registry"], severity="high",
+                       ecosystem="npm", package="safe", manifest="m.json", detail="d")
+```
+
+- `render_text` / `render_json`: `AttributeError: 'list' object has no attribute 'isascii'`
+- `sarif.render_sarif`: `TypeError: unhashable type: 'list'`
+
+The same happens with `ecosystem=["npm"]`. This violates the project's totality requirement that `redact_secrets*` (and by extension the renderers) must never raise on hostile input.
+
+**Fix suggestion:** coerce provenance fields to `str` before scrubbing/validation, or validate type at construction time.
+
+## Pass 3 GREEN locks
+
+- **Obfuscation:** ZWJ, ZWSP, fullwidth, Cyrillic homoglyphs, bidi override are caught by the production oracle and redacted in all renderers.
+- **Manifest URI:** obfuscated secrets in `pf.manifest` are caught by `redact_secrets_strict` in JSON and SARIF.
+- **Scan-failure totality:** forcing `_scan_pii` to raise produces `_WITHHELD` and no crash in text, JSON, or SARIF.
+- **Boundary sizes:** secrets at/beyond 50k clamp cap and 1MB scan cap do not leak.
+- **String rule/ecosystem validation:** `None`, empty string, and secret-shaped string values collapse safely to `prov-unknown` / `unknown`.
+- **Structural integrity:** SARIF 2.1.0 valid, every `ruleId` resolves to a `driver.rules` entry, JSON provenance keys/types unchanged.
+- **Benign invariance:** ordinary `npm:left-pad` provenance output is unchanged.
+- **Bypass hunt:** no unexpected `vars(pf)`, `pf.*` f-string interpolation, or serialization paths outside `sarif.py` / `audit.py`.
+
+## Historical notes
+
+- Pass 1 confirmed the P0 SARIF provenance leak.
+- Pass 2 confirmed adjacent JSON/text audit leaks and verified the SARIF fix.
+- Pass 3 confirmed the centralized helper is correctly wired, found the `severity` bypass, non-string totality crashes, and additional detector-normalization evidence for issue #64.

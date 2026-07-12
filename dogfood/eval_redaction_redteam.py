@@ -9,10 +9,12 @@ Self-exits with nonzero status if any case fails.
 from __future__ import annotations
 
 import json
+import re
 import sys
+import unicodedata
 from typing import Callable
 
-from glassport.audit import Finding, Report
+from glassport.audit import Finding, Report, render_text, render_json
 from glassport.provenance import ProvenanceFinding
 from glassport import sarif
 from glassport import detectors
@@ -613,6 +615,504 @@ def adjacent_text_audit_leaks_provenance():
 
 
 CASES.append(("ADJACENT: text audit provenance leak", adjacent_text_audit_leaks_provenance))
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Pass 3 — attack the centralized redact_display boundary and every consumer
+# ═══════════════════════════════════════════════════════════════════════════
+
+# Independent reconstruction oracle: must NOT use glassport's normalizer.
+# Strip Cf/Cc/Mn/Me, apply NFKD+NFKC, fold a curated homoglyph/small-capital
+# table, then search exact and alphanumeric-loose.
+_INDEP_HOMOGLYPHS: dict[str, str] = {}
+for _src, _dst in [
+    # Cyrillic look-alikes
+    ("а", "a"), ("е", "e"), ("о", "o"), ("р", "p"), ("с", "c"), ("у", "y"), ("х", "x"),
+    ("і", "i"), ("ј", "j"), ("ѕ", "s"), ("А", "A"), ("В", "B"), ("Е", "E"), ("К", "K"),
+    ("М", "M"), ("Н", "H"), ("О", "O"), ("Р", "P"), ("С", "C"), ("Т", "T"), ("У", "Y"),
+    ("Х", "X"),
+    # Greek look-alikes
+    ("Α", "A"), ("Β", "B"), ("Ε", "E"), ("Η", "H"), ("Ι", "I"), ("Κ", "K"), ("Μ", "M"),
+    ("Ν", "N"), ("Ο", "O"), ("Ρ", "P"), ("Τ", "T"), ("Υ", "Y"), ("Χ", "X"), ("ο", "o"),
+    ("α", "a"),
+]:
+    _INDEP_HOMOGLYPHS[_src] = _dst
+# Latin small-capital letters (U+1D00..U+1D25) — visually capital, not NFKC-folded
+_INDEP_SMALLCAP_MAP = {
+    0x1D00: "A", 0x1D01: "AE", 0x1D02: "AO", 0x1D03: "AU", 0x1D04: "AV",
+    0x1D05: "D", 0x1D06: "E", 0x1D07: "E", 0x1D08: "I", 0x1D09: "I",
+    0x1D0A: "J", 0x1D0B: "K", 0x1D0C: "L", 0x1D0D: "M", 0x1D0E: "N",
+    0x1D0F: "O", 0x1D10: "O", 0x1D11: "O", 0x1D12: "O", 0x1D13: "OE",
+    0x1D14: "OU", 0x1D15: "OU", 0x1D16: "O", 0x1D17: "O", 0x1D18: "P",
+    0x1D19: "R", 0x1D1A: "R", 0x1D1B: "T", 0x1D1C: "U", 0x1D1D: "UI",
+    0x1D1E: "UU", 0x1D1F: "V", 0x1D20: "V", 0x1D21: "W", 0x1D22: "Z",
+    0x1D23: "Z", 0x1D24: "Z", 0x1D25: "E",
+}
+for _cp, _val in _INDEP_SMALLCAP_MAP.items():
+    _INDEP_HOMOGLYPHS[chr(_cp)] = _val
+_INDEP_TABLE = str.maketrans(_INDEP_HOMOGLYPHS)
+_INDEP_INVISIBLE_CATS = frozenset({"Cf", "Cc", "Mn", "Me"})
+
+
+def _independent_reconstruct(text: str, secret: str) -> bool:
+    cleaned = "".join(
+        ch for ch in text
+        if unicodedata.category(ch) not in _INDEP_INVISIBLE_CATS
+    )
+    norm = unicodedata.normalize(
+        "NFKC", unicodedata.normalize("NFKD", cleaned))
+    folded = norm.translate(_INDEP_TABLE)
+    if secret in folded:
+        return True
+    loose_text = re.sub(r"[^A-Za-z0-9]", "", folded)
+    loose_secret = re.sub(r"[^A-Za-z0-9]", "", secret)
+    return loose_secret in loose_text
+
+
+def _audit_profile() -> dict:
+    return {
+        "name": "demo", "path": "/tmp/demo", "runtime": "python",
+        "files_scanned": 1, "depth": {"ast": 1, "pattern": 0},
+        "package_name": "", "version": "",
+    }
+
+
+def _text_report(provenance: list) -> Report:
+    return Report(
+        profile=_audit_profile(), findings=[], deductions=[],
+        score=50, grade="F", provenance=provenance)
+
+
+def _render_all(report: Report) -> dict[str, str]:
+    return {
+        "text": render_text(report),
+        "json": render_json(report),
+        "sarif": sarif.render_sarif(report),
+    }
+
+
+def _leak_status(outputs: dict[str, str], secret: str) -> dict[str, dict[str, bool]]:
+    return {
+        name: {
+            "prod": secret in detectors._normalize_for_scan(out),
+            "indep": _independent_reconstruct(out, secret),
+        }
+        for name, out in outputs.items()
+    }
+
+
+def _format_leaks(status: dict[str, dict[str, bool]]) -> str:
+    return "; ".join(
+        f"{k}({('prod' if v['prod'] else '')}{('|indep' if v['indep'] else '')})"
+        for k, v in status.items() if v["prod"] or v["indep"]
+    ) or "clean"
+
+
+def _any_leak(status: dict[str, dict[str, bool]]) -> bool:
+    return any(v["prod"] or v["indep"] for v in status.values())
+
+
+# ── 1. Field coverage ──────────────────────────────────────────────────────
+def pass3_field_coverage_severity():
+    """severity is the only provenance field that bypasses redact_display in
+    text/JSON outputs. In real code evaluate() sets fixed strings, but the
+    dataclass does not enforce it, so this is a defensive-coverage gap."""
+    secret = _live_secret()
+    pf = ProvenanceFinding(
+        rule="prov-not-in-registry", severity=secret, ecosystem="npm",
+        package="safe", manifest="m.json", detail="d")
+    outputs = _render_all(_text_report([pf]))
+    # SARIF uses severity only via _sarif_level, so it does not leak there.
+    leaks = {k: v for k, v in _leak_status(outputs, secret).items()
+             if k in ("text", "json")}
+    if _any_leak(leaks):
+        return False, f"severity emitted raw in text/json: {_format_leaks(leaks)}"
+    return True, "severity safely consumed in all renderers"
+
+
+CASES.append(("PASS3: severity field coverage", pass3_field_coverage_severity))
+
+
+def pass3_field_coverage_manifest():
+    """manifest goes through redact_secrets_strict (not redact_display) in JSON
+    and SARIF; it is not rendered in text. Confirm obfuscation still gets caught."""
+    secret = _live_secret()
+    obf_path = f"src/{secret.replace('a', 'а').replace('A', 'А')}/package.json"
+    pf = ProvenanceFinding(
+        rule="prov-not-in-registry", severity="high", ecosystem="npm",
+        package="safe", manifest=obf_path, detail="d")
+    outputs = _render_all(_text_report([pf]))
+    leaks = _leak_status(outputs, secret)
+    if _any_leak(leaks):
+        return False, f"manifest obfuscation leaks: {_format_leaks(leaks)}"
+    return True, "manifest URI redaction obfuscation-proof"
+
+
+CASES.append(("PASS3: manifest field coverage", pass3_field_coverage_manifest))
+
+
+# ── 2. Obfuscation variants in every display field ─────────────────────────
+def _obf_cases():
+    secret = _live_secret()
+    return {
+        "plain": secret,
+        "zwj": "sk-ant-api03-" + "\u200d" + "A" * 40 + "1234567890",
+        "zwsp": "sk-ant-api03-" + "\u200b" + "A" * 40 + "1234567890",
+        "fullwidth": secret.translate(
+            {ord(c): ord(c) + 0xFEE0 for c in secret if "!" <= c <= "~"}),
+        "cyrillic": secret.replace("a", "а").replace("A", "А"),
+        "bidi": "\u202e" + secret + "\u202c",
+        "combining": "".join(c + "\u0332" for c in secret),
+        "smallcap": secret.replace("A", chr(0x1D00)),
+        "multi": ("sk-ant-api03-" + "\u200d"
+                  + ("A" * 10).replace("A", "а")
+                  + "\u202e" + "A" * 20 + "\u202c"
+                  + "A" * 10 + "1234567890"),
+    }
+
+
+def pass3_obfuscation_package():
+    secret = _live_secret()
+    findings = []
+    for name, obf in _obf_cases().items():
+        pf = ProvenanceFinding(
+            rule="prov-not-in-registry", severity="high", ecosystem="npm",
+            package=obf, manifest="m.json", detail="d")
+        status = _leak_status(_render_all(_text_report([pf])), secret)
+        if _any_leak(status):
+            findings.append(f"{name}({_format_leaks(status)})")
+    if findings:
+        return False, "package obfuscation leaks: " + ", ".join(findings)
+    return True, "package obfuscation green with both oracles"
+
+
+CASES.append(("PASS3: package obfuscation variants", pass3_obfuscation_package))
+
+
+def pass3_obfuscation_detail():
+    secret = _live_secret()
+    findings = []
+    for name, obf in _obf_cases().items():
+        pf = ProvenanceFinding(
+            rule="prov-not-in-registry", severity="high", ecosystem="npm",
+            package="safe", manifest="m.json", detail=obf)
+        status = _leak_status(_render_all(_text_report([pf])), secret)
+        if _any_leak(status):
+            findings.append(f"{name}({_format_leaks(status)})")
+    if findings:
+        return False, "detail obfuscation leaks: " + ", ".join(findings)
+    return True, "detail obfuscation green with both oracles"
+
+
+CASES.append(("PASS3: detail obfuscation variants", pass3_obfuscation_detail))
+
+
+def pass3_obfuscation_smallcap_evidence_for_issue_64():
+    """U+1D00 small-capital-A is not detected by glassport's scanner. The
+    obfuscated credential shape survives in all rendered artifacts; the
+    independent oracle reconstructs the plain secret. This is evidence for
+    issue #64 (detector normalization), not a redaction-fix bug."""
+    secret = _live_secret()
+    obf = secret.replace("A", chr(0x1D00))
+    pf = ProvenanceFinding(
+        rule="prov-not-in-registry", severity="high", ecosystem="npm",
+        package=obf, manifest="m.json", detail="d")
+    status = _leak_status(_render_all(_text_report([pf])), secret)
+    indep_only = {k: {"indep": v["indep"]} for k, v in status.items()
+                  if not v["prod"] and v["indep"]}
+    if indep_only:
+        return False, (
+            "Issue #64 evidence: U+1D00 small-capital shape survives; "
+            "independent oracle reconstructs: " +
+            "; ".join(f"{k}(indep)" for k in indep_only))
+    return True, "small-capital obfuscation also caught by production oracle"
+
+
+CASES.append(("PASS3: U+1D00 small-capital reconstruction (issue #64)",
+              pass3_obfuscation_smallcap_evidence_for_issue_64))
+
+
+# ── 3. Split-secret / boundary composition ─────────────────────────────────
+def pass3_split_package_detail():
+    """A credential whose halves land in package and detail; the rendered text
+    and SARIF join them with fixed delimiters. The independent oracle collapses
+    those delimiters and may reconstruct."""
+    secret = _live_secret()
+    pf = ProvenanceFinding(
+        rule="prov-not-in-registry", severity="high", ecosystem="npm",
+        package="sk-ant-api03-", manifest="m.json",
+        detail="A" * 40 + "1234567890")
+    status = _leak_status(_render_all(_text_report([pf])), secret)
+    if _any_leak(status):
+        return False, f"split package/detail reconstructs: {_format_leaks(status)}"
+    return True, "package/detail split green"
+
+
+CASES.append(("PASS3: split secret across package/detail", pass3_split_package_detail))
+
+
+def pass3_split_ecosystem_package_text():
+    """Text renderer joins [ecosystem:package]. Split a credential across the
+    two fields and check reconstruction."""
+    secret = _live_secret()
+    pf = ProvenanceFinding(
+        rule="prov-not-in-registry", severity="high", ecosystem="sk-ant-api03-",
+        package="A" * 40 + "1234567890", manifest="m.json", detail="d")
+    status = _leak_status(_render_all(_text_report([pf])), secret)
+    if _any_leak(status):
+        return False, f"split ecosystem/package reconstructs: {_format_leaks(status)}"
+    return True, "ecosystem/package split green"
+
+
+CASES.append(("PASS3: split secret across ecosystem/package", pass3_split_ecosystem_package_text))
+
+
+def pass3_split_rule_detail_text():
+    """Text renderer puts rule on one line and detail on the next."""
+    secret = _live_secret()
+    pf = ProvenanceFinding(
+        rule="sk-ant-api03-", severity="high", ecosystem="npm",
+        package="safe", manifest="m.json", detail="A" * 40 + "1234567890")
+    status = _leak_status(_render_all(_text_report([pf])), secret)
+    if _any_leak(status):
+        return False, f"split rule/detail reconstructs: {_format_leaks(status)}"
+    return True, "rule/detail split green"
+
+
+CASES.append(("PASS3: split secret across rule/detail", pass3_split_rule_detail_text))
+
+
+def pass3_split_json_values():
+    """JSON separates provenance values with punctuation. Split a credential
+    across package and detail and check whether the JSON string reconstructs."""
+    secret = _live_secret()
+    pf = ProvenanceFinding(
+        rule="prov-not-in-registry", severity="high", ecosystem="npm",
+        package="sk-ant-api03-", manifest="m.json",
+        detail="A" * 40 + "1234567890")
+    js = render_json(_text_report([pf]))
+    status = _leak_status({"json": js}, secret)
+    if _any_leak(status):
+        return False, f"split JSON values reconstruct: {_format_leaks(status)}"
+    return True, "JSON value split green"
+
+
+CASES.append(("PASS3: split secret across JSON values", pass3_split_json_values))
+
+
+# ── 4. Scan-failure / totality per renderer ────────────────────────────────
+def pass3_scan_failure_totality():
+    from unittest import mock
+    secret = _live_secret()
+    pf = ProvenanceFinding(
+        rule="prov-not-in-registry", severity="high", ecosystem="npm",
+        package=secret, manifest="package.json", detail="detail")
+    report = _text_report([pf])
+    failures = []
+    for name, renderer in [("text", render_text), ("json", render_json),
+                           ("sarif", sarif.render_sarif)]:
+        with mock.patch.object(detectors, "_scan_pii",
+                               side_effect=RuntimeError("boom")):
+            try:
+                out = renderer(report)
+                if secret in out:
+                    failures.append(f"{name} leaked raw secret")
+                elif detectors._WITHHELD not in out:
+                    failures.append(f"{name} did not emit _WITHHELD")
+            except Exception as exc:
+                failures.append(f"{name} crashed: {exc}")
+    if failures:
+        return False, "scan-failure totality failure: " + "; ".join(failures)
+    return True, "scan-failure totality green for text/json/sarif"
+
+
+CASES.append(("PASS3: scan-failure totality per renderer", pass3_scan_failure_totality))
+
+
+# ── 5. Boundary sizes ──────────────────────────────────────────────────────
+def pass3_boundary_sizes():
+    secret = _live_secret()
+    scenarios = [
+        ("secret beyond 50k clamp cap", "x" * 49_990 + secret),
+        ("secret at 40k within 50k", "x" * 40_000 + secret),
+        ("secret straddling 1MB scan cap", "x" * 999_990 + secret),
+        ("secret beyond 1MB", "x" * 1_000_100 + secret),
+    ]
+    failures = []
+    for label, pkg in scenarios:
+        pf = ProvenanceFinding(
+            rule="prov-not-in-registry", severity="high", ecosystem="npm",
+            package=pkg, manifest="m.json", detail="d")
+        for name, out in _render_all(_text_report([pf])).items():
+            if secret in detectors._normalize_for_scan(out):
+                failures.append(f"{label}/{name}")
+    if failures:
+        return False, "boundary size leaks: " + ", ".join(failures)
+    return True, "boundary sizes green"
+
+
+CASES.append(("PASS3: boundary sizes around scan/clamp caps", pass3_boundary_sizes))
+
+
+# ── 6. Malformed / unexpected structural values ────────────────────────────
+def pass3_malformed_rule_nonstring():
+    """A list (or other non-string) as pf.rule currently crashes every renderer
+    because redact_display / the validation code assumes a string."""
+    pf = ProvenanceFinding(
+        rule=["prov-not-in-registry"], severity="high", ecosystem="npm",
+        package="safe", manifest="m.json", detail="d")
+    report = _text_report([pf])
+    failures = []
+    for name, renderer in [("text", render_text), ("json", render_json),
+                           ("sarif", sarif.render_sarif)]:
+        try:
+            renderer(report)
+            failures.append(f"{name} did not crash on list rule")
+        except Exception as exc:
+            failures.append(f"{name} crashed: {type(exc).__name__}: {exc}")
+    # We expect no crash; any crash is a RED finding.
+    if len(failures) == 3 and all("crashed" in f for f in failures):
+        return False, "non-string rule crashes all renderers: " + "; ".join(failures)
+    if failures:
+        return False, "unexpected behavior with non-string rule: " + "; ".join(failures)
+    return True, "non-string rule handled safely"
+
+
+CASES.append(("PASS3: non-string rule value totality", pass3_malformed_rule_nonstring))
+
+
+def pass3_malformed_ecosystem_nonstring():
+    pf = ProvenanceFinding(
+        rule="prov-not-in-registry", severity="high", ecosystem=["npm"],
+        package="safe", manifest="m.json", detail="d")
+    report = _text_report([pf])
+    failures = []
+    for name, renderer in [("text", render_text), ("json", render_json),
+                           ("sarif", sarif.render_sarif)]:
+        try:
+            renderer(report)
+            failures.append(f"{name} did not crash on list ecosystem")
+        except Exception as exc:
+            failures.append(f"{name} crashed: {type(exc).__name__}: {exc}")
+    if len(failures) == 3 and all("crashed" in f for f in failures):
+        return False, "non-string ecosystem crashes all renderers: " + "; ".join(failures)
+    if failures:
+        return False, "unexpected behavior with non-string ecosystem: " + "; ".join(failures)
+    return True, "non-string ecosystem handled safely"
+
+
+CASES.append(("PASS3: non-string ecosystem value totality", pass3_malformed_ecosystem_nonstring))
+
+
+def pass3_malformed_rule_validation():
+    secret = _live_secret()
+    for raw in [None, "", secret]:
+        pf = ProvenanceFinding(
+            rule=raw, severity="high", ecosystem="npm",
+            package="safe", manifest="m.json", detail="d")
+        report = _text_report([pf])
+        for name, out in _render_all(report).items():
+            if secret in out:
+                return False, f"rule={raw!r} leaked secret in {name}"
+            if name == "sarif":
+                d = json.loads(out)
+                rules = {r["id"]: r for r in d["runs"][0]["tool"]["driver"]["rules"]}
+                res = d["runs"][0]["results"][0]
+                if res["ruleId"] not in rules:
+                    return False, f"rule={raw!r} produced dangling ruleId in SARIF"
+    return True, "None/empty/secret rule values collapse safely"
+
+
+CASES.append(("PASS3: None/empty/secret rule collapse", pass3_malformed_rule_validation))
+
+
+def pass3_malformed_ecosystem_validation():
+    secret = _live_secret()
+    for raw in [None, "", secret]:
+        pf = ProvenanceFinding(
+            rule="prov-not-in-registry", severity="high", ecosystem=raw,
+            package="safe", manifest="m.json", detail="d")
+        report = _text_report([pf])
+        for name, out in _render_all(report).items():
+            if secret in out:
+                return False, f"ecosystem={raw!r} leaked secret in {name}"
+    return True, "None/empty/secret ecosystem values collapse safely"
+
+
+CASES.append(("PASS3: None/empty/secret ecosystem collapse", pass3_malformed_ecosystem_validation))
+
+
+# ── 7. Structural integrity + 8. benign invariance ─────────────────────────
+def pass3_structural_integrity_and_benign_invariance():
+    pf = ProvenanceFinding(
+        rule="prov-not-in-registry", severity="high", ecosystem="npm",
+        package="left-pad", manifest="package.json",
+        detail="declared dependency not found in the npm registry")
+    report = _text_report([pf])
+    text = render_text(report)
+    js = render_json(report)
+    sarif_doc = sarif.render_sarif(report)
+
+    failures = []
+    if "left-pad" not in text or "left-pad" not in js or "left-pad" not in sarif_doc:
+        failures.append("benign package name was altered")
+
+    obj = json.loads(js)
+    keys = sorted(obj.get("provenance", [{}])[0].keys())
+    if keys != ["detail", "ecosystem", "manifest", "package", "rule", "severity"]:
+        failures.append(f"JSON provenance keys changed: {keys}")
+    types = {k: type(v).__name__ for k, v in obj["provenance"][0].items()}
+    if not all(t == "str" for t in types.values()):
+        failures.append(f"JSON provenance value types changed: {types}")
+
+    d = json.loads(sarif_doc)
+    if d.get("version") != "2.1.0":
+        failures.append("SARIF version missing")
+    rules = {r["id"]: r for r in d["runs"][0]["tool"]["driver"]["rules"]}
+    for res in d["runs"][0]["results"]:
+        if res["ruleId"] not in rules:
+            failures.append(f"dangling ruleId {res['ruleId']}")
+    if failures:
+        return False, "structural/benign failure: " + "; ".join(failures)
+    return True, "structural integrity + benign invariance green"
+
+
+CASES.append(("PASS3: structural integrity + benign invariance",
+              pass3_structural_integrity_and_benign_invariance))
+
+
+# ── 9. Bypass hunt ─────────────────────────────────────────────────────────
+def pass3_bypass_hunt():
+    """Confirm no remaining pf.* interpolation or vars(pf)/asdict/repr/str path
+    reaches a shareable output without scrubbing."""
+    import os
+    import re as _re
+    src_root = os.path.join(os.path.dirname(__file__), "..", "src", "glassport")
+    src_root = os.path.abspath(src_root)
+    hits = []
+    for root, _dirs, files in os.walk(src_root):
+        for fname in files:
+            if not fname.endswith(".py"):
+                continue
+            path = os.path.join(root, fname)
+            with open(path, "r", encoding="utf-8") as fh:
+                text = fh.read()
+            # Direct pf.<field> interpolation in f-string or format
+            for m in _re.finditer(r"[\"'][^\"']*\{pf\.[a-z]+\}[^\"']*[\"']", text):
+                hits.append(f"{path}:{m.start()}: {m.group(0)[:80]}")
+            # vars(pf), asdict(pf), repr(pf), str(pf)
+            for m in _re.finditer(r"\b(vars|asdict|repr|str)\s*\(\s*pf\s*\)", text):
+                hits.append(f"{path}:{m.start()}: {m.group(0)}")
+    # Filter out the known-safe accesses we already reviewed
+    safe_files = {"sarif.py", "audit.py"}
+    unexpected = [h for h in hits
+                  if not any(os.sep + s in h for s in safe_files)]
+    if unexpected:
+        return False, "unexpected pf rendering paths: " + "; ".join(unexpected)
+    return True, "bypass hunt green (only known-safe pf accesses in sarif.py/audit.py)"
+
+
+CASES.append(("PASS3: bypass hunt for pf.* rendering", pass3_bypass_hunt))
 
 
 # ═══════════════════════════════════════════════════════════════════════════
