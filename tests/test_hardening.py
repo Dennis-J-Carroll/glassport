@@ -204,5 +204,37 @@ class TestSourceWalk(unittest.TestCase):
         self.assertEqual(order, ["a.py", "b.py", "c.py"])
 
 
+class TestNormalizeWithMap(unittest.TestCase):
+    def test_origin_map_tracks_invisible_deletions(self):
+        zwj = "‍"
+        text = "AB" + zwj + "CD"          # zwj at index 2
+        norm, origin = detectors._normalize_with_map(text)
+        self.assertEqual(norm, "ABCD")    # invisible dropped
+        # each normalized char maps back to its source index
+        self.assertEqual(origin, [0, 1, 3, 4])
+
+    def test_map_consistent_with_normalize_for_scan(self):
+        for s in ("sk-ant‍-live", "ＦＵＬＬＷＩＤＴＨ",
+                  "аpple"):  # zwj-split, fullwidth, cyrillic-a
+            self.assertEqual(detectors._normalize_with_map(s)[0],
+                             detectors._normalize_for_scan(s))
+
+
+class TestScanSpanned(unittest.TestCase):
+    def test_spanned_returns_normalized_offsets(self):
+        key = "sk-ant-api03-" + "A" * 40 + "1234567890"
+        hits = detectors._scan_pii_spanned(key)
+        self.assertTrue(hits)
+        pat, value, start, end = hits[0]
+        self.assertEqual(pat.category, "anthropic_key")
+        self.assertEqual(key[start:end], value)
+
+    def test_plain_scan_unchanged(self):
+        key = "sk-ant-api03-" + "A" * 40 + "1234567890"
+        self.assertEqual([(p.category, v) for p, v in detectors._scan_pii(key)],
+                         [(p.category, v) for p, v, _, _ in
+                          detectors._scan_pii_spanned(key)])
+
+
 if __name__ == "__main__":
     unittest.main()

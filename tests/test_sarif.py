@@ -198,5 +198,33 @@ class TestBounding(unittest.TestCase):
         self.assertIn("chars truncated", msg)
 
 
+_OBF_SECRET = "sk-ant-api03-" + "aB" * 20 + "1234567890"
+_OBFS = {
+    "zwj":       lambda s: s[:6] + "‍" + s[6:],
+    "fullwidth": lambda s: s.translate(
+        {ord(c): ord(c) + 0xFEE0 for c in s if "!" <= c <= "~"}),
+    "cyrillic":  lambda s: s.replace("a", "а"),
+    "multi":     lambda s: (s[:4] + "‍" + s[4:8].replace("a", "а")
+                            + "​" + s[8:]),
+}
+
+
+class TestSarifRedactsObfuscated(unittest.TestCase):
+    def test_no_reconstructable_secret_in_sarif(self):
+        for name, obf in _OBFS.items():
+            f = Finding("secret-hardcoded", "critical", "app.py", 9,
+                        obf(_OBF_SECRET))
+            doc = sarif.render_sarif(report([f]))
+            self.assertNotIn(_OBF_SECRET, detectors._normalize_for_scan(doc), name)
+
+    def test_redaction_alone_defeats_obfuscation_in_sarif(self):
+        with mock.patch.object(sarif, "neutralize_text", side_effect=lambda t: t):
+            for name, obf in _OBFS.items():
+                f = Finding("secret-hardcoded", "critical", "app.py", 9,
+                            obf(_OBF_SECRET))
+                doc = sarif.render_sarif(report([f]))
+                self.assertNotIn(_OBF_SECRET, detectors._normalize_for_scan(doc), name)
+
+
 if __name__ == "__main__":
     unittest.main()

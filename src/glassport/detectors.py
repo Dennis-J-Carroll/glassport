@@ -584,15 +584,30 @@ _CONFUSABLES = str.maketrans({
 })
 
 
+def _normalize_with_map(text: str) -> tuple[str, list[int]]:
+    """Normalize like _normalize_for_scan, but char-by-char, recording for
+    each emitted normalized char the index in the ORIGINAL string it came
+    from. invisible -> dropped (no entry); confusable -> 1:1; NFKC per char
+    -> 0..N chars, all tagged to that one origin index. The map lets a match
+    found in normalized space be redacted back in the original bytes.
+
+    Per-char NFKC differs from whole-string NFKC only for cross-char
+    combining sequences (irrelevant to ASCII-ish credentials); the
+    fail-closed backstop in redact_secrets_strict proves any drift is safe."""
+    out: list[str] = []
+    origin: list[int] = []
+    for i, ch in enumerate(text):
+        if _INVISIBLE_RE.match(ch):
+            continue
+        for nc in unicodedata.normalize("NFKC", ch.translate(_CONFUSABLES)):
+            out.append(nc)
+            origin.append(i)
+    return "".join(out), origin
+
+
 def _normalize_for_scan(text: str) -> str:
-    """Defeat obfuscation before pattern-matching: drop invisible/bidi
-    characters, fold cross-script homoglyphs to ASCII, then NFKC-fold
-    compatibility variants (fullwidth, etc.). A secret split with zero-width
-    joiners, disguised in fullwidth Latin, or wearing a Cyrillic/Greek
-    look-alike reads as plaintext to the validators."""
-    stripped = _INVISIBLE_RE.sub("", text)
-    deconfused = stripped.translate(_CONFUSABLES)
-    return unicodedata.normalize("NFKC", deconfused)
+    """Defeat obfuscation before pattern-matching. See _normalize_with_map."""
+    return _normalize_with_map(text)[0]
 
 
 # Look-alike / hidden characters html.escape leaves untouched. A hostile
@@ -700,11 +715,42 @@ def clamp_text(text: str, limit: int = MAX_RENDER_CHARS) -> str:
     return text[:limit] + f"… [{len(text) - limit} chars truncated]"
 
 
-def _apply_redactions(text: str, hits) -> str:
-    for pat, value in hits:
-        if value and value in text:
-            text = text.replace(value, _redact(value, pat.category))
+def _apply_span_redactions(text: str, spans: list[tuple[int, int, str, str]]) -> str:
+    """Redact original-text ranges. spans = (start, end, category, value).
+
+    Overlapping/nested spans are merged into their union FIRST: a naive
+    right-to-left splice over overlapping ranges applies a stale offset once
+    the first replacement resizes the string, leaking a fragment of the
+    secret. Disjoint spans keep their exact (category, value) tag so output
+    is unchanged for the common case; a merged range is retagged from the
+    union slice so no byte of any covered secret survives."""
+    merged: list[tuple[int, int, str, str]] = []
+    for start, end, category, value in sorted(spans):
+        if merged and start < merged[-1][1]:            # overlaps previous
+            ps, pe, pcat, _pval = merged[-1]
+            ne = max(pe, end)
+            merged[-1] = (ps, ne, pcat, text[ps:ne])    # retag from the union
+        else:
+            merged.append((start, end, category, value))
+    for start, end, category, value in reversed(merged):
+        text = text[:start] + _redact(value, category) + text[end:]
     return text
+
+
+def _spanned_original_redactions(text: str) -> list[tuple[int, int, str, str]]:
+    """Map every normalized-space hit back to an ORIGINAL-text range so the
+    obfuscated bytes (zero-width joiners, homoglyphs) are redacted along with
+    the secret. origin[b-1]+1 covers the whole final source char (a safe
+    over-approximation when NFKC expanded one source char into several)."""
+    norm, origin = _normalize_with_map(text[:MAX_SCAN_BYTES])
+    spans: list[tuple[int, int, str, str]] = []
+    for pat, value, a, b in _scan_normalized(norm):
+        if not value or b <= a:
+            continue
+        start = origin[a]
+        end = origin[b - 1] + 1
+        spans.append((start, end, pat.category, value))
+    return spans
 
 
 # Fixed literal — contains nothing attacker-influenced. Do NOT interpolate the
@@ -713,29 +759,33 @@ _WITHHELD = "[glassport: redaction unavailable — content withheld]"
 
 
 def redact_secrets(text: str) -> str:
-    """Best-effort scrubber: replace every recognized credential/PII with a
-    non-reversible tag, and return the input UNCHANGED if the scan raises.
-    Use only on analytical/internal paths. For anything that emits a
-    shareable artifact (report HTML, SARIF), use redact_secrets_strict()."""
+    """Best-effort scrubber for internal/analytical paths. Replaces every
+    recognized credential/PII with a non-reversible tag; returns the input
+    UNCHANGED if the scan raises. For shareable artifacts (report HTML,
+    SARIF) use redact_secrets_strict()."""
     try:
-        hits = _scan_pii(text)
+        spans = _spanned_original_redactions(text)
     except Exception:
         return text
-    return _apply_redactions(text, hits)
+    return _apply_span_redactions(text, spans)
 
 
 def redact_secrets_strict(text: str) -> str:
-    """Fail-closed scrubber for shareable output (report HTML, SARIF). If the
-    scan raises we cannot prove the text is clean, so we WITHHOLD it rather
-    than risk leaking an unscanned secret into an artifact that leaves the
-    machine — a visible placeholder is strictly safer than a possibly-live
-    key. (`_scan_pii` caps input and its validators are total, so this fires
-    only on genuinely pathological input, never on large-but-benign text.)"""
+    """Fail-closed scrubber for shareable output (report HTML, SARIF).
+    Withholds the whole field if (a) the scan raises, or (b) any secret
+    survives redaction — a span-map imprecision must never leak a live key
+    into an artifact that leaves the machine. A visible placeholder is
+    strictly safer than a possibly-live key. (`_scan_pii`/`_scan_normalized`
+    cap input and their validators are total, so the except path fires only
+    on genuinely pathological input, never on large-but-benign text.)"""
     try:
-        hits = _scan_pii(text)
+        spans = _spanned_original_redactions(text)
+        out = _apply_span_redactions(text, spans)
+        if _scan_pii(out):              # backstop: re-scan the OUTPUT
+            return _WITHHELD
     except Exception:
         return _WITHHELD
-    return _apply_redactions(text, hits)
+    return out
 
 
 # --- Custom-pattern plugin registry -------------------------------------
@@ -904,22 +954,13 @@ _STRUCTURAL_CONTAINERS = frozenset({"jwt_token"})
 _GENERIC_SECRETS = frozenset({"aws_secret_key", "generic_api_key", "high_entropy_token_30_40"})
 
 
-def _scan_pii(text: str) -> list[tuple[PIIPattern, str]]:
-    """Validated, de-duplicated PII hits in one serialized blob.
+def _scan_normalized(text: str) -> list[tuple[PIIPattern, str, int, int]]:
+    """Validated, de-duped PII hits WITH normalized-coordinate spans.
+    `text` is assumed ALREADY normalized (see _normalize_for_scan).
 
-    The blob is normalized first (invisible chars stripped, homoglyphs
-    NFKC-folded) so obfuscated secrets can't slip past the patterns, and
-    capped at MAX_SCAN_BYTES so a multi-megabyte tool payload can't turn
-    the scan itself into a denial of service.
-
-    Span-aware suppression (Kimi R3): a generic-secret match (aws_secret_key,
+    Span-aware suppression: a generic-secret match (aws_secret_key,
     generic_api_key) that falls entirely inside a structural token match
     (jwt_token) is part of that structure, not a separate credential."""
-    if len(text) > MAX_SCAN_BYTES:
-        text = text[:MAX_SCAN_BYTES]
-    text = _normalize_for_scan(text)
-
-    # collect every validated match WITH its span, before de-duping by value
     raw: list[tuple[PIIPattern, str, int, int]] = []
     structural_spans: list[tuple[int, int]] = []
     for pat in _active_patterns():
@@ -932,18 +973,33 @@ def _scan_pii(text: str) -> list[tuple[PIIPattern, str]]:
             if pat.category in _STRUCTURAL_CONTAINERS:
                 structural_spans.append(span)
 
-    hits: list[tuple[PIIPattern, str]] = []
+    hits: list[tuple[PIIPattern, str, int, int]] = []
     seen: set[tuple[str, str]] = set()
     for pat, value, start, end in raw:
         if pat.category in _GENERIC_SECRETS and any(
                 s <= start and end <= e for s, e in structural_spans):
-            continue                       # a fragment of a structural token
+            continue
         dedup = (pat.category, value)
         if dedup in seen:
             continue
         seen.add(dedup)
-        hits.append((pat, value))
+        hits.append((pat, value, start, end))
     return hits
+
+
+def _scan_pii_spanned(text: str) -> list[tuple[PIIPattern, str, int, int]]:
+    """Validated, de-duped PII hits with spans, from raw (un-normalized) text.
+    Caps input at MAX_SCAN_BYTES so a multi-megabyte payload can't turn the
+    scan into a DoS, then normalizes to defeat obfuscation."""
+    if len(text) > MAX_SCAN_BYTES:
+        text = text[:MAX_SCAN_BYTES]
+    return _scan_normalized(_normalize_for_scan(text))
+
+
+def _scan_pii(text: str) -> list[tuple[PIIPattern, str]]:
+    """Validated, de-duplicated PII hits (no spans). Back-compat wrapper for
+    consumers that don't need offsets."""
+    return [(p, v) for p, v, _, _ in _scan_pii_spanned(text)]
 
 
 def _extract_hosts_from_value(value: Any, hosts: set[str]) -> None:
