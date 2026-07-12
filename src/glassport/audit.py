@@ -37,6 +37,8 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from glassport import detectors
+
 RUBRIC_VERSION = "0.3"          # v0.3: capability-note tier (0 weight)
 MAX_FILE_BYTES = 1_000_000
 
@@ -588,11 +590,20 @@ def render_text(report: Report) -> str:
     # the default (offline) audit stays byte-identical. These never affect the
     # score — they live in a separate channel below the scored findings.
     if report.provenance:
+        # Provenance fields come from the audited (possibly hostile) manifest,
+        # so every attacker-influenced string is scrubbed with the shared
+        # detectors.redact_display before it reaches this shareable text render
+        # — the same scrub the SARIF path applies. Benign npm/PyPI values pass
+        # through unchanged; a credential in a hostile package/detail is removed.
         out.append("provenance (network-enriched):")
         for pf in report.provenance:
-            where = f" [{pf.ecosystem}:{pf.package}]" if pf.package else ""
-            out.append(f"  [{pf.severity}] {pf.rule}{where}")
-            out.append(f"      {pf.detail}")
+            pkg = detectors.redact_display(pf.package)
+            eco = detectors.redact_display(pf.ecosystem)
+            rule = detectors.redact_display(pf.rule)
+            detail = detectors.redact_display(pf.detail)
+            where = f" [{eco}:{pkg}]" if pkg else ""
+            out.append(f"  [{pf.severity}] {rule}{where}")
+            out.append(f"      {detail}")
     out.append(f"rubric:   v{report.rubric_version} · score = 100 − Σ "
                f"weight(rule), each rule deducted once · --rubric for "
                f"the full table")
@@ -609,9 +620,19 @@ def render_json(report: Report) -> str:
         "findings": [vars(f) for f in report.findings],
     }
     # H2.03: add the key only when non-empty so the default audit's JSON is
-    # byte-identical with and without --provenance.
+    # byte-identical with and without --provenance. `vars(pf)` would emit the
+    # attacker-controlled package/detail verbatim, so scrub every hostile-
+    # sourced field with the shared detectors.redact_display (same keys, so the
+    # JSON shape is unchanged; benign values pass through unaltered).
     if report.provenance:
-        obj["provenance"] = [vars(pf) for pf in report.provenance]
+        obj["provenance"] = [{
+            "rule": detectors.redact_display(pf.rule),
+            "severity": pf.severity,
+            "ecosystem": detectors.redact_display(pf.ecosystem),
+            "package": detectors.redact_display(pf.package),
+            "manifest": detectors.redact_secrets_strict(pf.manifest),
+            "detail": detectors.redact_display(pf.detail),
+        } for pf in report.provenance]
     return json.dumps(obj, indent=2, ensure_ascii=False)
 
 

@@ -788,6 +788,26 @@ def redact_secrets_strict(text: str) -> str:
     return out
 
 
+def redact_display(text: str) -> str:
+    """Scrub an attacker-influenced string for any shareable renderer (SARIF,
+    JSON audit, text audit, HTML), in the load-bearing order
+    strict-redact -> neutralize -> clamp:
+
+    - redact_secrets_strict FIRST — it normalizes internally, so an obfuscated
+      credential is caught and removed, or the field is withheld fail-closed if
+      the scan raises;
+    - neutralize_text THEN reveals any remaining deceptive Unicode as visible
+      sentinels (it is NOT a credential scrubber, so it must run after redaction,
+      never instead of it — reversing that order is exactly the provenance-SARIF
+      leak this centralizes to prevent recurring);
+    - clamp_text LAST bounds the field (clamp-after-redact is leak-safe: the
+      clamp bound sits well inside the scanned window).
+
+    One definition so no renderer can drift into the neutralize-without-redact
+    bug independently."""
+    return clamp_text(neutralize_text(redact_secrets_strict(text))) if text else ""
+
+
 # --- Custom-pattern plugin registry -------------------------------------
 # Consumer-supplied PII patterns live here, kept SEPARATE from the built-in
 # PII_PATTERNS so the baseline can never be corrupted and a reset is a single

@@ -26,7 +26,8 @@ from pathlib import Path
 from typing import Union
 
 from glassport.audit import Report, RULES_BY_ID
-from glassport.detectors import clamp_text, neutralize_text, redact_secrets_strict
+from glassport.detectors import (clamp_text, neutralize_text,
+                                  redact_display, redact_secrets_strict)
 
 DRIVER_VERSION = "0.2.0"
 _INFO_URI = "https://github.com/Dennis-J-Carroll/glassport"
@@ -87,19 +88,11 @@ def _rule_object(rule_id: str, severity: str) -> dict:
     return obj
 
 
-def _sanitize_display(text: str) -> str:
-    """Scrub an attacker-displayable string for a shareable artifact, in the
-    load-bearing order strict-redact -> neutralize -> clamp:
-
-    - redact_secrets_strict FIRST (it normalizes internally, so an obfuscated
-      credential is caught and removed, or the field is withheld fail-closed if
-      the scan raises);
-    - neutralize_text THEN reveals any remaining deceptive Unicode as visible
-      sentinels (it is NOT a credential scrubber, so it must run after redaction,
-      never instead of it — that ordering bug is exactly the P0 this fixes);
-    - clamp_text LAST bounds the field (clamp-after-redact is leak-safe: the
-      clamp bound sits well inside the scanned window)."""
-    return clamp_text(neutralize_text(redact_secrets_strict(text))) if text else ""
+# Provenance display fields (package, detail) are scrubbed with the shared
+# detectors.redact_display (strict-redact -> neutralize -> clamp). Kept as a
+# module alias so the render block reads locally and a future change here can
+# only ever be a re-export, never a divergent re-implementation of the order.
+_sanitize_display = redact_display
 
 
 def _repo_uri(path: str, base: str) -> str:

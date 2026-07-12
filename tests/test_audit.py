@@ -282,5 +282,65 @@ class TestOutput(unittest.TestCase):
                          .replace("# ", ""))
 
 
+class TestProvenanceRedactionInRenderers(unittest.TestCase):
+    """P0 evidence-safety: provenance fields come from the audited (possibly
+    hostile) manifest, so the JSON and text audit renderers must scrub them,
+    not emit them verbatim. Kimi's adjacent findings: render_json did
+    `vars(pf)` (ADJ-1) and render_text printed pf.package/pf.detail raw (ADJ-2).
+    Mirrors tests/test_sarif.py::TestProvenanceRedaction for the audit path."""
+
+    from glassport.provenance import ProvenanceFinding as _PF
+    from glassport import detectors as _det
+
+    def _report_with_prov(self, **pf_kw):
+        base = dict(rule="prov-not-in-registry", severity="high",
+                    ecosystem="npm", package="left-pad",
+                    manifest="package.json", detail="not found in registry")
+        base.update(pf_kw)
+        r = audit_src("x = 1\n")           # a real, complete Report
+        r.provenance = [self._PF(**base)]
+        return r
+
+    def test_json_provenance_secret_absent(self):
+        secret = "sk-ant-api03-" + "A" * 40 + "1234567890"
+        r = self._report_with_prov(package=secret, detail=f"dep {secret}")
+        out = audit.render_json(r)
+        self.assertNotIn(secret, self._det._normalize_for_scan(out))
+
+    def test_text_provenance_secret_absent(self):
+        secret = "sk-ant-api03-" + "B" * 40 + "1234567890"
+        r = self._report_with_prov(package=secret, detail=f"dep {secret}")
+        out = audit.render_text(r)
+        self.assertNotIn(secret, self._det._normalize_for_scan(out))
+
+    def test_json_obfuscated_secret_absent(self):
+        secret = "sk-ant-api03-" + "aB" * 20 + "1234567890"
+        obfs = {
+            "zwj": secret[:6] + "‍" + secret[6:],
+            "fullwidth": secret.translate(
+                {ord(c): ord(c) + 0xFEE0 for c in secret if "!" <= c <= "~"}),
+            "cyrillic": secret.replace("a", "а"),
+        }
+        for name, obf in obfs.items():
+            out = audit.render_json(self._report_with_prov(package=obf))
+            self.assertNotIn(secret, self._det._normalize_for_scan(out), name)
+
+    def test_json_schema_keys_unchanged(self):
+        data = json.loads(audit.render_json(self._report_with_prov()))
+        self.assertEqual(
+            set(data["provenance"][0]),
+            {"rule", "severity", "ecosystem", "package", "manifest", "detail"})
+
+    def test_ordinary_provenance_output_unchanged(self):
+        r = self._report_with_prov()
+        data = json.loads(audit.render_json(r))
+        self.assertEqual(data["provenance"][0]["package"], "left-pad")
+        self.assertEqual(data["provenance"][0]["ecosystem"], "npm")
+        self.assertEqual(data["provenance"][0]["rule"], "prov-not-in-registry")
+        text = audit.render_text(r)
+        self.assertIn("npm:left-pad", text)
+        self.assertIn("not found in registry", text)
+
+
 if __name__ == "__main__":
     unittest.main()
