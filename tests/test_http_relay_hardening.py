@@ -875,6 +875,28 @@ class TestHandlerTimeoutAndSurvival(unittest.TestCase):
         self.assertEqual(status, 200)
 
 
+class TestConnectionNominatedHops(unittest.TestCase):
+    def test_connection_nominated_header_is_dropped(self):
+        from glassport.adapters import mcp_http
+        pairs = [("Connection", "keep-alive, X-Internal-Hop"),
+                 ("X-Internal-Hop", "secret"), ("X-Keep", "ok")]
+        drop = mcp_http._hop_headers(pairs)
+        self.assertIn("x-internal-hop", drop)   # nominated → dropped
+        self.assertIn("connection", drop)       # static _HOP member
+        self.assertNotIn("x-keep", drop)        # ordinary header survives
+
+    def test_multiple_connection_headers_all_parsed(self):
+        from glassport.adapters import mcp_http
+        pairs = [("Connection", "Foo"), ("Connection", "Bar, Baz")]
+        drop = mcp_http._hop_headers(pairs)
+        self.assertTrue({"foo", "bar", "baz"} <= drop)
+
+    def test_static_hop_set_still_present_with_no_connection(self):
+        from glassport.adapters import mcp_http
+        drop = mcp_http._hop_headers([("Content-Type", "application/json")])
+        self.assertEqual(drop, set(mcp_http._HOP))
+
+
 class TestNoPrivateStdlibSymbols(unittest.TestCase):
     """H1 — the 1xx handler must not depend on nonpublic http.client symbols,
     which "may change" across the 3.10–3.13 matrix. Lock that in source."""

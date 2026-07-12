@@ -642,6 +642,83 @@ def rf_chunked_trailers_not_forwarded() -> tuple[bool, str]:
     return ok, f"client_recv={data!r}, trailer={r.getheader('X-Trailer')!r}"
 
 
+def rf_connection_nominated_hop_stripped_response() -> tuple[bool, str]:
+    """s2c: an upstream Connection header nominates X-Internal-Hop as
+    hop-by-hop; the proxy must NOT forward that connection-local header to the
+    client, while ordinary headers and the body pass through. Locks finding #2
+    (response direction)."""
+    rp, t = _serve_raw(
+        b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+        b"Connection: close, X-Internal-Hop\r\n"
+        b"X-Internal-Hop: leaked-secret\r\n"
+        b"X-Keep: ok\r\n"
+        b"Content-Length: 5\r\n\r\nhello")
+    tap, tp, _ = _start_tap(f"http://127.0.0.1:{rp}/")
+    try:
+        c = http.client.HTTPConnection("127.0.0.1", tp, timeout=5)
+        c.request("POST", "/mcp", body=b'{}')
+        r = c.getresponse()
+        data = r.read()
+        hop = r.getheader("X-Internal-Hop")
+        keep = r.getheader("X-Keep")
+        c.close()
+    finally:
+        tap.shutdown(); tap.server_close(); t.join(2)
+    ok = data == b"hello" and hop is None and keep == "ok"
+    return ok, f"client_recv={data!r}, x_internal_hop={hop!r}, x_keep={keep!r}"
+
+
+def req_connection_nominated_hop_stripped_request() -> tuple[bool, str]:
+    """c2s: a client Connection header nominates X-Internal-Hop; the proxy must
+    NOT forward that connection-local header upstream, while ordinary headers
+    reach the server. Locks finding #2 (request direction)."""
+    captured: dict = {}
+
+    class _Capture(BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def do_POST(self):
+            captured["x_internal_hop"] = self.headers.get("X-Internal-Hop")
+            captured["x_keep"] = self.headers.get("X-Keep")
+            self.rfile.read(int(self.headers.get("Content-Length", 0) or 0))
+            self.send_response(200)
+            self.send_header("Content-Length", "2")
+            self.end_headers()
+            self.wfile.write(b"ok")
+
+    remote = _serve(_Capture)
+    rp = remote.server_address[1]
+    tap, tp, _ = _start_tap(f"http://127.0.0.1:{rp}/")
+    try:
+        s = socket.create_connection(("127.0.0.1", tp), timeout=5)
+        s.sendall(
+            b"POST /mcp HTTP/1.1\r\nHost: x\r\n"
+            b"Connection: keep-alive, X-Internal-Hop\r\n"
+            b"X-Internal-Hop: leaked-secret\r\n"
+            b"X-Keep: ok\r\n"
+            b"Content-Length: 2\r\n\r\n{}")
+        s.settimeout(5)
+        buf = b""
+        try:
+            while True:
+                d = s.recv(4096)
+                if not d:
+                    break
+                buf += d
+        except socket.timeout:
+            pass
+        s.close()
+    finally:
+        tap.shutdown(); tap.server_close(); remote.shutdown(); remote.server_close()
+    ok = (captured.get("x_internal_hop") is None
+          and captured.get("x_keep") == "ok"
+          and buf.count(b"HTTP/1.1 200") == 1)
+    return ok, (f"upstream_x_internal_hop={captured.get('x_internal_hop')!r}, "
+                f"upstream_x_keep={captured.get('x_keep')!r}, "
+                f"responses={buf.count(b'HTTP/1.1 200')}")
+
+
 def r2_duplicate_identical_content_length_rejected() -> tuple[bool, str]:
     """Any duplicate Content-Length header line is malformed per RFC 7230,
     even if the two values are identical."""
@@ -768,6 +845,8 @@ CASES = [
     ("RF 204 No Content drops hostile Content-Length", rf_204_no_content_drops_cl),
     ("RF chunked trailers not forwarded (TE stripped)", rf_chunked_trailers_not_forwarded),
     ("RF pipeline closes after ambiguous body (no desync)", rf_pipeline_closes_after_ambiguous_body),
+    ("RF Connection-nominated hop stripped from response", rf_connection_nominated_hop_stripped_response),
+    ("REQ Connection-nominated hop stripped from request", req_connection_nominated_hop_stripped_request),
     ("REQ header CRLF inject cannot desync framing", req_header_crlf_inject_no_desync),
     ("REQ Expect: 100-continue forwarded safely", req_expect_100_continue_safe),
     ("R3 handler defines a socket timeout", r3_handler_timeout),

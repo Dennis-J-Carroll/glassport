@@ -22,6 +22,8 @@
 | RF 204 No Content drops hostile Content-Length | PASS | status=204, cl=None, conn='close' |
 | RF chunked trailers not forwarded (TE stripped) | PASS | client_recv=b'helloworld', trailer=None |
 | RF pipeline closes after ambiguous body (no desync) | PASS | responses=1, close_present=True |
+| RF Connection-nominated hop stripped from response | PASS | client_recv=b'hello', x_internal_hop=None, x_keep='ok' |
+| REQ Connection-nominated hop stripped from request | PASS | upstream_x_internal_hop=None, upstream_x_keep='ok', responses=1 |
 | REQ header CRLF inject cannot desync framing | PASS | upstream_paths=['/', '/'], responses=2 |
 | REQ Expect: 100-continue forwarded safely | PASS | status=200, data=b'{"x":1}' |
 | R3 handler defines a socket timeout | PASS | handler.timeout=30 |

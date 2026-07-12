@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import http.client
 import os
+import re
 import sys
 import threading
 from datetime import datetime, timezone
@@ -32,10 +33,72 @@ _HOP = {"connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
         "content-length"}
 
 
+# An RFC 7230 token, lowercased — the only shape a Connection-nominated field
+# name can legitimately take. Anything else in the list is ignored (we never
+# ADD a header to the drop set on a malformed token, only skip it).
+_HOP_TOKEN_RE = re.compile(r"^[!#$%&'*+.^_`|~0-9a-z-]+$")
+
+
+def _hop_headers(pairs) -> set[str]:
+    """The static hop-by-hop set plus any field a Connection header nominates.
+    HTTP (RFC 7230 §6.1) lets a connection mark extra headers as hop-by-hop by
+    listing them in Connection; those must not be forwarded end-to-end. `pairs`
+    is an iterable of (name, value) header tuples (request or response)."""
+    drop = set(_HOP)
+    for k, v in pairs:
+        if k.lower() == "connection":
+            for tok in v.split(","):
+                name = tok.strip().lower()
+                if name and _HOP_TOKEN_RE.match(name):
+                    drop.add(name)
+    return drop
+
+
 # Own line cap for the 1xx header sweep, so _discard_headers depends on ZERO
 # underscore-prefixed http.client symbols (which "may change" across CPython).
 _MAX_1XX_LINE = 65536
 _MAX_1XX_HEADER_LINES = 100
+
+
+def _validate_remote(url: str):
+    """Parse and strictly validate the upstream URL before the proxy binds.
+    A security tool must parse its own configuration narrowly: reject any
+    scheme but http/https, require a host, and refuse embedded credentials
+    or a fragment (neither belongs in a proxy target and both are silent
+    footguns). Returns the SplitResult; raises ValueError on anything off."""
+    r = urlsplit(url)
+    if r.scheme not in ("http", "https"):
+        raise ValueError(
+            f"remote scheme {r.scheme or '(none)'!r} unsupported: use http or https")
+    if not r.hostname:
+        raise ValueError("remote URL has no host")
+    if any(ch.isspace() or ord(ch) < 0x20 for ch in r.hostname):
+        raise ValueError("remote URL host contains whitespace or control characters")
+    if r.username is not None or r.password is not None:
+        # `is not None` (not truthiness): a stray empty userinfo like "http://@h/x"
+        # yields username="" — falsy but still an embedded-credential shape we reject.
+        raise ValueError("remote URL must not embed credentials (user:pass@)")
+    if r.fragment:
+        raise ValueError("remote URL must not contain a fragment")
+    try:
+        port = r.port                    # property raises ValueError if unparseable/out of range
+    except ValueError as exc:
+        raise ValueError(f"remote URL has an invalid port: {exc}")
+    if port == 0:
+        raise ValueError("remote URL port 0 is not allowed")
+    return r
+
+
+def _host_header(remote) -> str:
+    """Host header from hostname (+ explicit non-default port), never raw
+    netloc — netloc can carry userinfo the proxy must not forward upstream."""
+    host = remote.hostname or ""
+    if ":" in host:                      # IPv6 literal
+        host = f"[{host}]"
+    default = 443 if remote.scheme == "https" else 80
+    if remote.port and remote.port != default:
+        return f"{host}:{remote.port}"
+    return host
 
 
 def _discard_headers(fp) -> None:
@@ -107,8 +170,9 @@ def _connect(remote) -> http.client.HTTPConnection:
 
 
 def _req_headers(headers, remote) -> dict:
-    out = {k: v for k, v in headers.items() if k.lower() not in _HOP}
-    out["Host"] = remote.netloc
+    drop = _hop_headers(headers.items())
+    out = {k: v for k, v in headers.items() if k.lower() not in drop}
+    out["Host"] = _host_header(remote)
     return out
 
 
@@ -316,8 +380,9 @@ def _make_handler(remote, log: SessionLog):
                 len(all_ct) == 1
                 and ctype.split(";", 1)[0].strip().lower() == "text/event-stream"
             )
+            resp_drop = _hop_headers(resp.getheaders())
             for k, v in resp.getheaders():
-                if k.lower() in _HOP:
+                if k.lower() in resp_drop:
                     continue
                 if streaming and k.lower() == "content-length":
                     continue
@@ -405,7 +470,7 @@ def run_http_tap(remote_url: str, log_dir: Path, bind: str = "127.0.0.1",
     `ready` is set once the server is bound; `server_box` (if given) receives
     the server so a caller/test can read `server_address` and `shutdown()`.
     """
-    remote = urlsplit(remote_url)
+    remote = _validate_remote(remote_url)
     log_dir = Path(log_dir)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     log_path = log_dir / f"{stamp}_http_{os.getpid()}.jsonl"

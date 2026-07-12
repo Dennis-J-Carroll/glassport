@@ -849,7 +849,11 @@ def main(argv: list[str]) -> int:
                   "<remote-mcp-url>", file=sys.stderr)
             return 2
         from glassport.adapters.mcp_http import run_http_tap
-        run_http_tap(remote_url, log_dir)
+        try:
+            run_http_tap(remote_url, log_dir)
+        except ValueError as exc:
+            print(f"[glassport] invalid --url: {exc}", file=sys.stderr)
+            return 2
         return 0
     if transport != "stdio":
         print(f"glassport: unknown transport {transport!r} "
