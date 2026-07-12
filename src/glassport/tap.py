@@ -105,6 +105,21 @@ class SessionLog:
         self._seq = 0
         self.path = path
 
+    def file_mode(self) -> int | None:
+        """POSIX permission bits of the open log, or None (non-POSIX / error)."""
+        if os.name != "posix":
+            return None
+        try:
+            return os.fstat(self._fh.fileno()).st_mode & 0o777
+        except OSError:
+            return None
+
+    def close(self) -> None:
+        try:
+            self._fh.close()
+        except Exception:
+            pass
+
     def record(self, direction: str, line: bytes,
                gate: dict | None = None) -> None:
         """Log one wire line. Never raises — relay must outlive logging.

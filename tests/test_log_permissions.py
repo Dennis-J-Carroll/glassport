@@ -63,5 +63,14 @@ class TestLogPermissions(unittest.TestCase):
         self.assertIn('"method": "ping"', lines[0])
 
 
+@unittest.skipUnless(os.name == "posix", "POSIX modes only")
+class TestFileMode(unittest.TestCase):
+    def test_reports_owner_only_mode(self):
+        with tempfile.TemporaryDirectory() as d:
+            log = SessionLog(Path(d) / "s.jsonl")
+            self.assertEqual(log.file_mode(), 0o600)
+            log.close()
+
+
 if __name__ == "__main__":
     unittest.main()
