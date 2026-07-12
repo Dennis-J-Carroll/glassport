@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import http.client
 import os
+import re
 import sys
 import threading
 from datetime import datetime, timezone
@@ -30,6 +31,27 @@ from glassport.tap import SessionLog
 _HOP = {"connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
         "te", "trailers", "transfer-encoding", "upgrade", "host",
         "content-length"}
+
+
+# An RFC 7230 token, lowercased — the only shape a Connection-nominated field
+# name can legitimately take. Anything else in the list is ignored (we never
+# ADD a header to the drop set on a malformed token, only skip it).
+_HOP_TOKEN_RE = re.compile(r"^[!#$%&'*+.^_`|~0-9a-z-]+$")
+
+
+def _hop_headers(pairs) -> set[str]:
+    """The static hop-by-hop set plus any field a Connection header nominates.
+    HTTP (RFC 7230 §6.1) lets a connection mark extra headers as hop-by-hop by
+    listing them in Connection; those must not be forwarded end-to-end. `pairs`
+    is an iterable of (name, value) header tuples (request or response)."""
+    drop = set(_HOP)
+    for k, v in pairs:
+        if k.lower() == "connection":
+            for tok in v.split(","):
+                name = tok.strip().lower()
+                if name and _HOP_TOKEN_RE.match(name):
+                    drop.add(name)
+    return drop
 
 
 # Own line cap for the 1xx header sweep, so _discard_headers depends on ZERO
@@ -146,7 +168,8 @@ def _connect(remote) -> http.client.HTTPConnection:
 
 
 def _req_headers(headers, remote) -> dict:
-    out = {k: v for k, v in headers.items() if k.lower() not in _HOP}
+    drop = _hop_headers(headers.items())
+    out = {k: v for k, v in headers.items() if k.lower() not in drop}
     out["Host"] = _host_header(remote)
     return out
 
@@ -355,8 +378,9 @@ def _make_handler(remote, log: SessionLog):
                 len(all_ct) == 1
                 and ctype.split(";", 1)[0].strip().lower() == "text/event-stream"
             )
+            resp_drop = _hop_headers(resp.getheaders())
             for k, v in resp.getheaders():
-                if k.lower() in _HOP:
+                if k.lower() in resp_drop:
                     continue
                 if streaming and k.lower() == "content-length":
                     continue
