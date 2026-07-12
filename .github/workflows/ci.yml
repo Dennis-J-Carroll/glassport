@@ -55,11 +55,12 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: advise / report / sarif / serve / provenance / http red-team grills
+      - name: advise / report / sarif / redaction / serve / provenance / http red-team grills
         run: |
           PYTHONPATH=src python dogfood/eval_advise_redteam.py
           PYTHONPATH=src python dogfood/eval_report_redteam.py
           PYTHONPATH=src python dogfood/eval_sarif_redteam.py
+          PYTHONPATH=src python dogfood/eval_redaction_redteam.py
           PYTHONPATH=src python dogfood/eval_server_redteam.py
           PYTHONPATH=src python dogfood/eval_streaming_redteam.py
           PYTHONPATH=src python dogfood/eval_provenance_redteam.py

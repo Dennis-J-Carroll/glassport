@@ -422,5 +422,57 @@ class TestScrubPackage(unittest.TestCase):
         self.assertEqual(_scrub_package("left-pad"), "left-pad")
 
 
+class TestProvenanceFieldReachability(unittest.TestCase):
+    """End-to-end reachability proof (Kimi pass-3 follow-up): drives a REAL
+    hostile package.json through discover_deps() -> evaluate(), the actual
+    shipped pipeline, rather than hand-constructing ProvenanceFinding. Confirms
+    which fields an attacker-controlled manifest can actually influence, so
+    the renderer red-team findings (severity/rule/ecosystem/detail as
+    "attacker-controlled") can be classified by real reachability rather than
+    only what a direct constructor call can express."""
+
+    def _findings_from_manifest(self, dep_name: str) -> list:
+        d = Path(tempfile.mkdtemp())
+        (d / "package.json").write_text(
+            json.dumps({"dependencies": {dep_name: "1.0.0"}}), encoding="utf-8")
+        self.addCleanup(lambda: shutil.rmtree(d))
+        deps = discover_deps(d)
+        self.assertEqual(len(deps), 1)
+        return evaluate(deps[0], Fetched(status="not_found", payload={}), now=NOW)
+
+    def test_only_package_carries_the_manifest_supplied_name(self):
+        secret = "sk-ant-api03-" + "A" * 40 + "1234567890"
+        findings = self._findings_from_manifest(secret)
+        self.assertEqual(len(findings), 1)
+        pf = findings[0]
+        # the ONLY field the manifest can put attacker bytes into:
+        self.assertEqual(pf.package, secret)
+        # every other field is a fixed glassport-authored literal, never
+        # derived from the manifest content — confirmed empirically, not
+        # merely by reading evaluate()'s source:
+        self.assertEqual(pf.rule, "prov-not-in-registry")
+        self.assertEqual(pf.severity, "high")
+        self.assertEqual(pf.ecosystem, "npm")          # chosen by which file
+        self.assertEqual(pf.manifest, "package.json")  # matched, not content
+        self.assertNotIn(secret, pf.detail)
+        self.assertNotIn(secret, pf.rule)
+        self.assertNotIn(secret, pf.ecosystem)
+        self.assertNotIn(secret, pf.manifest)
+
+    def test_obfuscated_package_name_reaches_only_package_field(self):
+        # combining-mark obfuscation, via a REAL manifest — establishes
+        # reachability for the issue #64 detector-normalization gap without
+        # asserting anything about whether it's currently redacted (that is
+        # #64's question, not this test's).
+        secret = "sk-ant-api03-" + "A" * 40 + "1234567890"
+        obf = "".join(c + "̲" for c in secret)  # combining low line
+        findings = self._findings_from_manifest(obf)
+        pf = findings[0]
+        self.assertEqual(pf.package, obf)  # combining marks survive un-stripped
+        self.assertEqual(pf.detail,
+                         "declared dependency not found in the npm registry "
+                         "(possible typosquat or private-name confusion)")
+
+
 if __name__ == "__main__":
     unittest.main()

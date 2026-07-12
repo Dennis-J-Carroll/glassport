@@ -53,6 +53,41 @@ class ProvenanceFinding:
     detail: str         # glassport's own sentence; structured facts only
 
 
+# --- Structural-field validation (shared by every renderer) --------------
+# rule / ecosystem / severity are STRUCTURAL: a renderer must never emit an
+# unrecognized or non-string value for them raw. Each safe_* collapses anything
+# outside its closed set to a fixed sentinel, and — crucially — checks
+# isinstance(str) FIRST so a non-string (an unhashable list, an int) or a
+# hostile object never reaches an `in frozenset` (which would raise) and never
+# has its own __str__ invoked (which could raise or run attacker code). A
+# credential can only ride a field the renderer prints verbatim; these never do.
+VALID_RULES = frozenset({
+    "prov-not-in-registry", "prov-deprecated", "prov-stale",
+    "prov-single-maintainer", "prov-unsigned", "prov-unavailable",
+})
+VALID_ECOSYSTEMS = frozenset({"npm", "pypi"})
+VALID_SEVERITIES = frozenset({"high", "medium", "low", "note"})
+UNKNOWN_RULE = "prov-unknown"
+UNKNOWN_ECOSYSTEM = "unknown"
+UNKNOWN_SEVERITY = "note"        # a safe default level; never a raw unknown
+
+
+def safe_rule(value) -> str:
+    return value if isinstance(value, str) and value in VALID_RULES else UNKNOWN_RULE
+
+
+def safe_ecosystem(value) -> str:
+    # "" is glassport's own value for the prov-unavailable meta-finding; keep it.
+    if isinstance(value, str) and (value == "" or value in VALID_ECOSYSTEMS):
+        return value
+    return UNKNOWN_ECOSYSTEM
+
+
+def safe_severity(value) -> str:
+    return (value if isinstance(value, str) and value in VALID_SEVERITIES
+            else UNKNOWN_SEVERITY)
+
+
 @dataclass(frozen=True)
 class Fetched:
     status: str         # "ok" | "not_found" | "error"

@@ -26,7 +26,9 @@ from pathlib import Path
 from typing import Union
 
 from glassport.audit import Report, RULES_BY_ID
-from glassport.detectors import clamp_text, neutralize_text, redact_secrets_strict
+from glassport.detectors import (clamp_text, neutralize_text,
+                                  redact_display, redact_secrets_strict)
+from glassport import provenance
 
 DRIVER_VERSION = "0.2.0"
 _INFO_URI = "https://github.com/Dennis-J-Carroll/glassport"
@@ -38,12 +40,16 @@ _INT_LEVEL = {3: "error", 2: "warning", 1: "note"}
 
 
 def _sarif_level(severity: Union[str, int]) -> str:
-    """Unified severity → SARIF level (error/warning/note)."""
+    """Unified severity → SARIF level (error/warning/note). Total: a non-str/int
+    (e.g. a hostile object) never has its __str__ invoked — it maps to the
+    default level instead of risking a raise or attacker code in rendering."""
     if isinstance(severity, bool):                  # bool is an int subclass
         severity = int(severity)
     if isinstance(severity, int):
         return _INT_LEVEL.get(severity, "warning")
-    return _STR_LEVEL.get(str(severity).lower(), "warning")
+    if isinstance(severity, str):
+        return _STR_LEVEL.get(severity.lower(), "warning")
+    return "warning"
 
 
 def _sarif_document(rules: list, results: list, props: dict | None = None) -> str:
@@ -85,6 +91,13 @@ def _rule_object(rule_id: str, severity: str) -> dict:
     if meta and meta.fix:
         obj["help"] = {"text": meta.fix}
     return obj
+
+
+# Provenance display fields (package, detail) are scrubbed with the shared
+# detectors.redact_display (strict-redact -> neutralize -> clamp). Kept as a
+# module alias so the render block reads locally and a future change here can
+# only ever be a re-export, never a divergent re-implementation of the order.
+_sanitize_display = redact_display
 
 
 def _repo_uri(path: str, base: str) -> str:
@@ -138,32 +151,50 @@ def render_sarif(report: Report, base: str = "") -> str:
 
     # H2.03: opt-in network-enriched findings render as a separate `provenance`
     # category, appended only when present so a no-`--provenance` audit is
-    # byte-identical. `pf.detail` is glassport-authored, but `pf.package` /
-    # `pf.manifest` come from the audited (possibly hostile) manifest, so both
-    # are scrubbed exactly like the static-rule path above.
+    # byte-identical. Every provenance field is derived from the audited
+    # (possibly hostile) manifest scan, so NONE may reach the SARIF file raw:
+    #   - `package` / `detail` are attacker-displayable text -> _sanitize_display
+    #     (strict-redact -> neutralize -> clamp); `manifest` -> redact via the URI.
+    #   - `ecosystem` / `rule` are STRUCTURAL: validated against a closed set so
+    #     an unrecognized value collapses to a safe sentinel instead of being
+    #     smuggled into the rules table / ecosystem label.
+    #   - the composed `message.text` is strict-scrubbed again as a backstop so a
+    #     secret cannot be reconstructed across the join of two clean fields.
     for pf in getattr(report, "provenance", None) or []:
-        rule_id = f"provenance/{pf.rule}"
+        # Structural fields validated against the shared closed sets (total on
+        # non-string / hostile values); display fields scrubbed via redact_display.
+        rule = provenance.safe_rule(pf.rule)
+        ecosystem = provenance.safe_ecosystem(pf.ecosystem)
+        severity = provenance.safe_severity(pf.severity)
+        rule_id = f"provenance/{rule}"
         if rule_id not in rules:
             rules[rule_id] = {
                 "id": rule_id,
-                "name": pf.rule,
-                "shortDescription": {
-                    "text": _PROV_RULE_TEXT.get(pf.rule, pf.rule)},
-                "defaultConfiguration": {"level": _sarif_level(pf.severity)},
+                "name": rule,
+                # Always the catalog text — never the raw (possibly hostile)
+                # rule id, which validation has already reduced to a known key.
+                "shortDescription": {"text": _PROV_RULE_TEXT[rule]},
+                "defaultConfiguration": {"level": _sarif_level(severity)},
                 "properties": {"category": "provenance"},
             }
-        pkg = clamp_text(neutralize_text(pf.package)) if pf.package else ""
-        msg = f"{pf.ecosystem}:{pkg} — {pf.detail}" if pkg else pf.detail
+        pkg = _sanitize_display(pf.package)
+        detail = _sanitize_display(pf.detail)
+        msg = f"{ecosystem}:{pkg} — {detail}" if pkg else detail
+        # Backstop: re-scrub the fully composed message. Individually-clean
+        # fields could in principle reconstruct a pattern across their join.
+        msg = redact_secrets_strict(msg)
         locations = []
-        if pf.manifest:
+        # isinstance check first: a hostile non-string manifest must not have
+        # __bool__ invoked by a bare truthiness test.
+        if isinstance(pf.manifest, str) and pf.manifest:
             locations = [{"physicalLocation": {"artifactLocation": {
                 "uri": redact_secrets_strict(_repo_uri(pf.manifest, base))}}}]
         results.append({
             "ruleId": rule_id,
-            "level": _sarif_level(pf.severity),
+            "level": _sarif_level(severity),
             "message": {"text": clamp_text(msg)},
             "properties": {"category": "provenance",
-                           "ecosystem": pf.ecosystem, "package": pkg},
+                           "ecosystem": ecosystem, "package": pkg},
             "locations": locations,
         })
 
@@ -179,7 +210,17 @@ _PROV_RULE_TEXT = {
     "prov-single-maintainer": "Dependency has a single maintainer",
     "prov-unsigned": "Dependency's latest release has no provenance attestation",
     "prov-unavailable": "Some dependencies could not be checked",
+    # Fallback for a provenance finding whose rule id is not recognized. A
+    # provenance record comes from the (possibly hostile) manifest scan, so an
+    # unrecognized `rule` must NOT be rendered verbatim as a SARIF rule id/name
+    # — that is a channel to smuggle a secret into the rules table. It collapses
+    # to this catalog entry instead.
+    "prov-unknown": "Provenance finding with an unrecognized rule id",
 }
+# Kept in sync with provenance.VALID_RULES ∪ {UNKNOWN_RULE} — every rule
+# safe_rule() can return must have a shortDescription here.
+assert (provenance.VALID_RULES | {provenance.UNKNOWN_RULE}
+        ) <= set(_PROV_RULE_TEXT), "sarif._PROV_RULE_TEXT missing a provenance rule"
 
 
 # subcategory -> human short description; fallback humanizes the slug
