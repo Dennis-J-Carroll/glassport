@@ -111,14 +111,8 @@ class SessionLog:
             return None
         try:
             return os.fstat(self._fh.fileno()).st_mode & 0o777
-        except OSError:
+        except (OSError, ValueError):
             return None
-
-    def close(self) -> None:
-        try:
-            self._fh.close()
-        except Exception:
-            pass
 
     def record(self, direction: str, line: bytes,
                gate: dict | None = None) -> None:
