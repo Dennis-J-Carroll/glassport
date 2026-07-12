@@ -38,6 +38,41 @@ _MAX_1XX_LINE = 65536
 _MAX_1XX_HEADER_LINES = 100
 
 
+def _validate_remote(url: str):
+    """Parse and strictly validate the upstream URL before the proxy binds.
+    A security tool must parse its own configuration narrowly: reject any
+    scheme but http/https, require a host, and refuse embedded credentials
+    or a fragment (neither belongs in a proxy target and both are silent
+    footguns). Returns the SplitResult; raises ValueError on anything off."""
+    r = urlsplit(url)
+    if r.scheme not in ("http", "https"):
+        raise ValueError(
+            f"remote scheme {r.scheme or '(none)'!r} unsupported: use http or https")
+    if not r.hostname:
+        raise ValueError("remote URL has no host")
+    if r.username or r.password:
+        raise ValueError("remote URL must not embed credentials (user:pass@)")
+    if r.fragment:
+        raise ValueError("remote URL must not contain a fragment")
+    try:
+        _ = r.port                       # property raises ValueError if out of range
+    except ValueError:
+        raise ValueError("remote URL port is out of range")
+    return r
+
+
+def _host_header(remote) -> str:
+    """Host header from hostname (+ explicit non-default port), never raw
+    netloc — netloc can carry userinfo the proxy must not forward upstream."""
+    host = remote.hostname or ""
+    if ":" in host:                      # IPv6 literal
+        host = f"[{host}]"
+    default = 443 if remote.scheme == "https" else 80
+    if remote.port and remote.port != default:
+        return f"{host}:{remote.port}"
+    return host
+
+
 def _discard_headers(fp) -> None:
     """Read and drop one header block (up to the blank line) from a raw file
     object, tolerating CRLF and bare-LF terminators. Local replacement for the
@@ -108,7 +143,7 @@ def _connect(remote) -> http.client.HTTPConnection:
 
 def _req_headers(headers, remote) -> dict:
     out = {k: v for k, v in headers.items() if k.lower() not in _HOP}
-    out["Host"] = remote.netloc
+    out["Host"] = _host_header(remote)
     return out
 
 
@@ -405,7 +440,7 @@ def run_http_tap(remote_url: str, log_dir: Path, bind: str = "127.0.0.1",
     `ready` is set once the server is bound; `server_box` (if given) receives
     the server so a caller/test can read `server_address` and `shutdown()`.
     """
-    remote = urlsplit(remote_url)
+    remote = _validate_remote(remote_url)
     log_dir = Path(log_dir)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     log_path = log_dir / f"{stamp}_http_{os.getpid()}.jsonl"

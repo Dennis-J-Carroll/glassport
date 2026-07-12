@@ -330,5 +330,29 @@ class TestUpstreamQueryForwarded(unittest.TestCase):
         self.assertEqual(self._run("/?tenant=alpha"), "/?tenant=alpha")
 
 
+class TestRemoteValidation(unittest.TestCase):
+    def test_rejects_bad_scheme_userinfo_fragment_port(self):
+        from glassport.adapters import mcp_http
+        for bad in ("ftp://h/x", "http:///nohost", "http://u:p@h/x",
+                    "http://h/x#frag", "http://h:99999/x"):
+            with self.assertRaises(ValueError, msg=bad):
+                mcp_http._validate_remote(bad)
+
+    def test_accepts_plain_https_with_query(self):
+        from glassport.adapters import mcp_http
+        r = mcp_http._validate_remote("https://h.example/mcp?tenant=alpha")
+        self.assertEqual(r.hostname, "h.example")
+        self.assertEqual(r.query, "tenant=alpha")
+
+    def test_host_header_excludes_userinfo_and_default_port(self):
+        from glassport.adapters import mcp_http
+        r = mcp_http._validate_remote("https://h.example:8443/x")
+        self.assertEqual(mcp_http._host_header(r), "h.example:8443")
+        r2 = mcp_http._validate_remote("https://h.example/x")
+        self.assertEqual(mcp_http._host_header(r2), "h.example")
+        r3 = mcp_http._validate_remote("http://h.example:80/x")   # default port dropped
+        self.assertEqual(mcp_http._host_header(r3), "h.example")
+
+
 if __name__ == "__main__":
     unittest.main()
