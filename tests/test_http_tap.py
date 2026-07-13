@@ -5,6 +5,7 @@ logs every JSON-RPC message into the same JSONL the stdio tap writes.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import shutil
 import tempfile
@@ -14,6 +15,7 @@ import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from unittest import mock
 
 from glassport.adapters.mcp_http import run_http_tap
 from glassport.adapters.mcp_session import from_mcp_session_file
@@ -123,6 +125,57 @@ class TestHttpTapJson(unittest.TestCase):
         self.assertIn("search", trace.declared_tools())
         self.assertTrue(any(e.kind == EventKind.TOOL_RESULT for e in trace.events)
                         or trace.events)  # trace built from HTTP-captured frames
+
+
+class TestHttpTapLogDegrade(unittest.TestCase):
+    """The relay is sacred: a None log (unwritable dir / insecure permissions,
+    per open_session_log) must not crash request handling or shutdown."""
+
+    def setUp(self):
+        self.logdir = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: shutil.rmtree(self.logdir))
+
+    def test_relay_survives_when_logging_disabled(self):
+        remote = _serve(_JsonRemote)
+        rh, rp = remote.server_address
+        with mock.patch("glassport.adapters.mcp_http.open_session_log",
+                        return_value=None):
+            proxy = _start_proxy(f"http://{rh}:{rp}/mcp", self.logdir)
+            ph, pp = proxy.server_address
+            try:
+                resp = json.loads(_post(f"http://{ph}:{pp}/mcp",
+                                        {"jsonrpc": "2.0", "id": 1,
+                                         "method": "tools/list"}))
+                self.assertIn("search", json.dumps(resp))
+            finally:
+                proxy.shutdown()
+                remote.shutdown()
+
+    def test_client_bytes_identical_logging_on_vs_off(self):
+        """The relay is sacred: whether the session log opens successfully or
+        degrades to None, the exact bytes the client receives must be
+        identical. Logging state must never alter the wire."""
+        def _run(disable_logging: bool):
+            remote = _serve(_JsonRemote)
+            rh, rp = remote.server_address
+            patcher = (mock.patch("glassport.adapters.mcp_http.open_session_log",
+                                  return_value=None)
+                       if disable_logging else contextlib.nullcontext())
+            with patcher:
+                proxy = _start_proxy(f"http://{rh}:{rp}/mcp", self.logdir)
+                ph, pp = proxy.server_address
+                try:
+                    return _post(f"http://{ph}:{pp}/mcp",
+                                {"jsonrpc": "2.0", "id": 1,
+                                 "method": "tools/list"})
+                finally:
+                    proxy.shutdown()
+                    remote.shutdown()
+
+        bytes_with_logging = _run(disable_logging=False)
+        bytes_without_logging = _run(disable_logging=True)
+        self.assertEqual(bytes_with_logging, bytes_without_logging)
+        self.assertTrue(bytes_with_logging)  # sanity: not comparing two empties
 
 
 class TestHttpTapSse(unittest.TestCase):

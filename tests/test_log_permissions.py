@@ -12,6 +12,7 @@ import stat
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from glassport.tap import SessionLog
 
@@ -61,6 +62,45 @@ class TestLogPermissions(unittest.TestCase):
         lines = path.read_text(encoding="utf-8").splitlines()
         self.assertEqual(len(lines), 1)
         self.assertIn('"method": "ping"', lines[0])
+
+
+@unittest.skipUnless(os.name == "posix", "POSIX modes only")
+class TestFileMode(unittest.TestCase):
+    def test_reports_owner_only_mode(self):
+        with tempfile.TemporaryDirectory() as d:
+            log = SessionLog(Path(d) / "s.jsonl")
+            self.assertEqual(log.file_mode(), 0o600)
+            log.close()
+
+
+class TestOpenSessionLog(unittest.TestCase):
+    def test_unwritable_dir_returns_none_not_raise(self):
+        from glassport.tap import open_session_log
+        # Cross-platform unwritable/uncreatable target: the log's parent
+        # directory component is an existing REGULAR FILE, not a directory.
+        # mkdir(parents=True) then raises OSError (FileExistsError /
+        # NotADirectoryError, both OSError subclasses) identically on POSIX
+        # and Windows -- no chmod, no /proc, no platform-specific path.
+        with tempfile.TemporaryDirectory() as d:
+            blocker = Path(d) / "blocker"
+            blocker.write_text("not a directory")
+            bad = blocker / "nested" / "s.jsonl"
+            self.assertIsNone(open_session_log(bad))
+
+    @unittest.skipUnless(os.name == "posix", "POSIX modes only")
+    def test_non_private_mode_degrades_to_none(self):
+        from glassport.tap import open_session_log, SessionLog
+        with tempfile.TemporaryDirectory() as d:
+            with mock.patch.object(SessionLog, "file_mode", return_value=0o644):
+                self.assertIsNone(open_session_log(Path(d) / "s.jsonl"))
+
+    def test_valid_dir_returns_a_working_log(self):
+        from glassport.tap import open_session_log
+        with tempfile.TemporaryDirectory() as d:
+            log = open_session_log(Path(d) / "s.jsonl")
+            self.assertIsNotNone(log)
+            log.record("c2s", b'{"jsonrpc":"2.0"}')
+            log.close()
 
 
 if __name__ == "__main__":

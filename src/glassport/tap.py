@@ -105,6 +105,15 @@ class SessionLog:
         self._seq = 0
         self.path = path
 
+    def file_mode(self) -> int | None:
+        """POSIX permission bits of the open log, or None (non-POSIX / error)."""
+        if os.name != "posix":
+            return None
+        try:
+            return os.fstat(self._fh.fileno()).st_mode & 0o777
+        except (OSError, ValueError):
+            return None
+
     def record(self, direction: str, line: bytes,
                gate: dict | None = None) -> None:
         """Log one wire line. Never raises — relay must outlive logging.
@@ -157,6 +166,28 @@ class SessionLog:
             self._fh.close()
         except Exception:
             pass
+
+
+def open_session_log(path: Path) -> "SessionLog | None":
+    """Create a verified-private session log, or return None so the relay
+    runs without recording. The relay is sacred: neither an unwritable dir
+    nor a permission we could not secure may kill the session — we disable
+    logging loudly instead."""
+    try:
+        log = SessionLog(path)
+    except OSError as exc:
+        print(f"[glassport] logging disabled: cannot write to {path.parent} "
+              f"({exc}) -- check permissions or set $GLASSPORT_LOG_DIR; "
+              f"relay continues", file=sys.stderr)
+        return None
+    mode = log.file_mode()
+    if mode is not None and (mode & 0o077):
+        print(f"[glassport] logging disabled: {path} is not owner-only "
+              f"(mode {mode:04o}) -- refusing to record sensitive traffic to "
+              f"a readable file; relay continues", file=sys.stderr)
+        log.close()
+        return None
+    return log
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -382,13 +413,7 @@ def run_tap(server_cmd: list[str], log_dir: Path,
     # The relay is sacred: a logging failure must never alter, delay, or kill
     # a live session. If the log dir is unwritable, disable logging and relay
     # anyway — pump() already tolerates a None log.
-    try:
-        log = SessionLog(log_path)
-    except OSError as exc:
-        print(f"[glassport] logging disabled: cannot write to {log_dir} "
-              f"({exc}) -- check permissions or set $GLASSPORT_LOG_DIR; "
-              f"relay continues", file=sys.stderr)
-        log = None
+    log = open_session_log(log_path)
 
     # Announce on stderr only — stdout belongs to the protocol.
     print(f"[glassport] tapping: {shlex.join(server_cmd)}", file=sys.stderr)
