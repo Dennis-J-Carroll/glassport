@@ -16,6 +16,7 @@ Pure stdlib / unittest.
 """
 import json
 import time
+import unicodedata
 import unittest
 from pathlib import Path
 
@@ -193,6 +194,31 @@ class TestPrecisionAndEvasion(unittest.TestCase):
             out = detectors.redact_secrets_strict(text)
             self.assertEqual(out, text, text)   # unchanged: nothing to redact
 
+    def test_mc_me_strip_no_false_positive_on_real_script_text(self):
+        # issue #64 round 3: scan-only stripping was extended from Mn to
+        # Mn+Mc+Me. Mc (spacing combining marks) are SCRIPT-ESSENTIAL in
+        # Devanagari/Tamil/Sinhala (vowel signs) — dropping them for
+        # scanning purposes must never manufacture a false PII match or
+        # unnecessarily redact/withhold real, benign text in these scripts.
+        # Me (enclosing marks) covered via a keycap-emoji sequence.
+        from glassport import detectors
+        samples = {
+            "devanagari": "नमस्ते, आप कैसे हैं? मुझे हिंदी भाषा पसंद है।",
+            "tamil": "வணக்கம், நீங்கள் எப்படி இருக்கிறீர்கள்? "
+                     "எனக்கு தமிழ் மொழி பிடிக்கும்।",
+            "sinhala": "ආයුබෝවන්, ඔබ කොහොමද? මට සිංහල භාෂාව කැමතියි.",
+            "arabic_plain": "مرحبا، كيف حالك؟ أحب اللغة العربية كثيرا.",
+            "arabic_diacritized": "بِسْمِ اللَّهِ الرَّحْمَٰنِ الرَّحِيمِ",
+            "enclosing_keycap": "Choose option 1⃣ or 2⃣ to continue.",
+            "mixed_script": "The Hindi greeting नमस्ते and Tamil வணக்கம் "
+                            "both mean hello, with IPA /nʌˈmɑːsteɪ/ and a "
+                            "mark A̲B̲.",
+        }
+        for name, text in samples.items():
+            self.assertEqual(detectors._scan_pii(text), [], name)
+            out = detectors.redact_secrets_strict(text)
+            self.assertEqual(out, text, name)   # unchanged: nothing to redact
+
     def test_combining_mark_strip_is_linear_not_quadratic(self):
         # issue #64: the trailing-run consumption added to
         # _spanned_original_redactions must stay bounded even when a match
@@ -263,15 +289,81 @@ class TestNormalizeWithMap(unittest.TestCase):
         self.assertEqual(norm, "ABC")
         self.assertEqual(origin, [0, 2, 4])
 
-    def test_small_capital_folds_via_confusables(self):
-        # issue #64: U+1D00 has no Unicode decomposition; only the curated
-        # table folds it. All 14 curated small capitals fold correctly.
-        pairs = {"ᴀ": "A", "ᴄ": "C", "ᴅ": "D", "ᴇ": "E", "ᴊ": "J", "ᴋ": "K",
-                "ᴍ": "M", "ᴏ": "O", "ᴘ": "P", "ᴛ": "T", "ᴜ": "U", "ᴠ": "V",
-                "ᴡ": "W", "ᴢ": "Z"}
-        for smallcap, ascii_letter in pairs.items():
-            self.assertEqual(detectors._normalize_for_scan(smallcap),
-                             ascii_letter)
+    def test_manifest_included_entries_fold_correctly(self):
+        # issue #64 round 3: reads _PHONETIC_EXT_MANIFEST directly (the
+        # single reviewed source of truth) rather than a second, independently
+        # hand-typed pairs dict — a hand-typed duplicate list is exactly how
+        # the round-3 gap happened (the manifest and the ad hoc test list
+        # silently drifted apart). Every entry the manifest marks `included`
+        # must actually fold to its recorded target via the real scan path.
+        for entry in detectors._PHONETIC_EXT_MANIFEST:
+            if not entry.included:
+                continue
+            glyph = chr(entry.codepoint)
+            got = detectors._normalize_for_scan(glyph)
+            self.assertEqual(got, entry.target,
+                             f"U+{entry.codepoint:04X} {entry.unicode_name}: "
+                             f"expected {entry.target!r}, got {got!r}")
+
+    def test_manifest_excluded_entries_stay_excluded(self):
+        # the Greek/Cyrillic tail must NOT appear in _CONFUSABLES (confirms
+        # the manifest's "out of scope" entries were not accidentally wired in).
+        for entry in detectors._PHONETIC_EXT_MANIFEST:
+            if entry.included:
+                continue
+            glyph = chr(entry.codepoint)
+            got = detectors._normalize_for_scan(glyph)
+            self.assertEqual(got, unicodedata.normalize("NFKC", glyph),
+                             f"U+{entry.codepoint:04X} {entry.unicode_name} "
+                             f"should be untouched (excluded) but changed")
+
+    def test_manifest_single_vs_multi_partition_matches_confusables_table(self):
+        # _CONFUSABLES must contain exactly the manifest's included entries —
+        # no more, no less — so production and the manifest can never drift.
+        for entry in detectors._PHONETIC_EXT_MANIFEST:
+            glyph_ord = entry.codepoint
+            in_table = glyph_ord in detectors._CONFUSABLES
+            self.assertEqual(in_table, entry.included,
+                             f"U+{entry.codepoint:04X}: in _CONFUSABLES="
+                             f"{in_table}, manifest included={entry.included}")
+            if entry.included:
+                self.assertEqual(detectors._CONFUSABLES[glyph_ord], entry.target)
+
+    def test_origin_map_tracks_mc_me_deletions(self):
+        # issue #64 round 3: spacing-combining (Mc) and enclosing (Me) marks
+        # are dropped for scanning exactly like Mn — no origin-map entry.
+        mc = "ு"  # Tamil vowel sign U (Mc)
+        me = "⃝"  # combining enclosing circle (Me)
+        text = "A" + mc + "B" + me + "C"
+        norm, origin = detectors._normalize_with_map(text)
+        self.assertEqual(norm, "ABC")
+        self.assertEqual(origin, [0, 2, 4])
+
+    def test_multi_letter_ligature_origin_map_and_redaction(self):
+        # issue #64 round 3: AE/OE/OU ligature folds expand ONE source char
+        # into TWO normalized chars — verify the origin map fans both output
+        # chars out to the SAME source index (not a drift/off-by-one), and
+        # that a secret obfuscated with a ligature glyph is fully redacted.
+        ligature = "ᴁ"  # U+1D01 LATIN LETTER SMALL CAPITAL AE -> "AE"
+        text = "X" + ligature + "Y"
+        norm, origin = detectors._normalize_with_map(text)
+        self.assertEqual(norm, "XAEY")
+        # both 'A' and 'E' (from the one ligature char) map back to index 1
+        self.assertEqual(origin, [0, 1, 1, 2])
+
+        secret = "sk-ant-api03-" + "AE" * 20 + "1234567890"
+        obf = secret.replace("AE", ligature)
+        out = detectors.redact_secrets_strict(obf)
+        self.assertNotIn(secret, out)
+        self.assertNotIn(ligature, out)
+        self.assertIn("redacted", out)
+
+    def test_multi_letter_ligature_no_false_positive(self):
+        # a bare ligature glyph in ordinary prose must not trigger a PII
+        # match or unnecessary redaction.
+        text = "The æ ligature (ᴁ small-capital form) appears in Old English."
+        self.assertEqual(detectors._scan_pii(text), [])
+        self.assertEqual(detectors.redact_secrets_strict(text), text)
 
 
 class TestScanSpanned(unittest.TestCase):

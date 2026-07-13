@@ -562,6 +562,173 @@ _INVISIBLE_RE = re.compile(
 # still reads correctly to a human. Curated to letters that look IDENTICAL to
 # ASCII — kept minimal to avoid folding legitimate Cyrillic/Greek text into
 # spurious matches. Extend only with a same-glyph pair.
+# --- Phonetic-extension (U+1D00 block) fold manifest — issue #64, round 3 --
+#
+# The whole U+1D00-U+1D2B block has NO Unicode decomposition at all
+# (confirmed: unicodedata.decomposition() is empty for every codepoint in
+# it) — these are semantically distinct IPA/phonetic letters, not
+# compatibility variants, so NFKC can never fold them. Only a curated table
+# closes this gap.
+#
+# A first pass (PR #66) hand-picked 14 "clean" glyphs and excluded the rest
+# on an ad hoc "same-glyph" judgment call, with no written rationale per
+# codepoint. Kimi's round-3 red-team reconstructed credentials through every
+# excluded glyph (both single-letter and the AE/OE/OU ligatures), via an
+# oracle independent of this module. That ad hoc list is exactly the kind of
+# undocumented, hard-to-audit policy this manifest replaces: every codepoint
+# in the block gets a recorded decision, so the production table and the
+# regression tests derive from ONE reviewed policy instead of two
+# independently hand-typed lists that can silently drift apart (which is
+# precisely how the round-3 gap happened).
+#
+# No live UTS #39 (Unicode confusables.txt) data is available — glassport is
+# zero-runtime-dependency and this is built and reviewed offline. Where UTS
+# #39's public confusables skeleton mappings are known to cover a glyph, that
+# is noted; everything else states glassport's own visual-similarity
+# rationale explicitly, so a future reviewer can agree or disagree with a
+# concrete written reason rather than an implicit list membership.
+#
+# Decision principle for THIS block specifically: it is a narrow, ~44-code-
+# point range used almost exclusively for historical/dialectological
+# phonetic transcription — a vanishingly small legitimate-use surface in
+# ordinary MCP tool traffic — and Kimi's red-team empirically demonstrated
+# every single-letter glyph in it is exploitable for credential obfuscation
+# regardless of visual distortion (turned/reversed/half-forms still read as
+# their base letter in an obfuscated-secret context, which is the exact
+# confusability this table defends against). Multi-letter (ligature) glyphs
+# are folded too, but are deliberately routed through a SEPARATE dict
+# (`_PHONETIC_EXT_MULTI`) with their own dedicated origin-map/boundary/
+# false-positive tests (see tests/test_hardening.py), since a multi-char
+# expansion is architecturally different from a 1:1 fold and must not be
+# included in a table just because an oracle happens to be able to expand
+# it. The Greek/Cyrillic-letter tail of the block (U+1D26-U+1D2B — these are
+# small-capital forms of GREEK GAMMA/LAMDA/PI/RHO/PSI and a CYRILLIC EL, not
+# Latin ASCII look-alikes) is out of scope: it would need its own review
+# against the EXISTING Greek/Cyrillic ASCII-confusables tables above, is not
+# a Latin-letter credential-obfuscation vector, and was not part of Kimi's
+# demonstrated exploit set.
+class _PhoneticExtEntry(NamedTuple):
+    codepoint: int
+    unicode_name: str
+    target: str            # ASCII fold target ("" if excluded)
+    rationale: str
+    included: bool
+    multi_letter: bool = False
+
+
+_PHONETIC_EXT_MANIFEST: tuple[_PhoneticExtEntry, ...] = (
+    _PhoneticExtEntry(0x1D00, "LATIN LETTER SMALL CAPITAL A", "A",
+                      "clean small capital, no stroke/rotation", True),
+    _PhoneticExtEntry(0x1D01, "LATIN LETTER SMALL CAPITAL AE", "AE",
+                      "AE ligature; UTS#39-style digraph fold", True, True),
+    _PhoneticExtEntry(0x1D02, "LATIN SMALL LETTER TURNED AE", "AE",
+                      "180-degree-rotated AE ligature; still reads as the "
+                      "AE digraph in an obfuscated-secret context", True, True),
+    _PhoneticExtEntry(0x1D03, "LATIN LETTER SMALL CAPITAL BARRED B", "B",
+                      "small-capital B with a crossbar; base shape is B", True),
+    _PhoneticExtEntry(0x1D04, "LATIN LETTER SMALL CAPITAL C", "C",
+                      "clean small capital, no stroke/rotation", True),
+    _PhoneticExtEntry(0x1D05, "LATIN LETTER SMALL CAPITAL D", "D",
+                      "clean small capital, no stroke/rotation", True),
+    _PhoneticExtEntry(0x1D06, "LATIN LETTER SMALL CAPITAL ETH", "D",
+                      "eth's small-capital form; base shape reads as D", True),
+    _PhoneticExtEntry(0x1D07, "LATIN LETTER SMALL CAPITAL E", "E",
+                      "clean small capital, no stroke/rotation", True),
+    _PhoneticExtEntry(0x1D08, "LATIN SMALL LETTER TURNED OPEN E", "E",
+                      "rotated open-E; base shape reads as E", True),
+    _PhoneticExtEntry(0x1D09, "LATIN SMALL LETTER TURNED I", "I",
+                      "180-degree-rotated I; a rotated I is still legible as I", True),
+    _PhoneticExtEntry(0x1D0A, "LATIN LETTER SMALL CAPITAL J", "J",
+                      "clean small capital, no stroke/rotation", True),
+    _PhoneticExtEntry(0x1D0B, "LATIN LETTER SMALL CAPITAL K", "K",
+                      "clean small capital, no stroke/rotation", True),
+    _PhoneticExtEntry(0x1D0C, "LATIN LETTER SMALL CAPITAL L WITH STROKE", "L",
+                      "small-capital L with a stroke; base shape reads as L", True),
+    _PhoneticExtEntry(0x1D0D, "LATIN LETTER SMALL CAPITAL M", "M",
+                      "clean small capital, no stroke/rotation", True),
+    _PhoneticExtEntry(0x1D0E, "LATIN LETTER SMALL CAPITAL REVERSED N", "N",
+                      "mirrored N; base shape reads as N", True),
+    _PhoneticExtEntry(0x1D0F, "LATIN LETTER SMALL CAPITAL O", "O",
+                      "clean small capital, no stroke/rotation", True),
+    _PhoneticExtEntry(0x1D10, "LATIN LETTER SMALL CAPITAL OPEN O", "O",
+                      "open-O variant; base shape reads as O", True),
+    _PhoneticExtEntry(0x1D11, "LATIN SMALL LETTER SIDEWAYS O", "O",
+                      "rotated O; a rotated O is still legible as O", True),
+    _PhoneticExtEntry(0x1D12, "LATIN SMALL LETTER SIDEWAYS OPEN O", "O",
+                      "rotated open-O; base shape reads as O", True),
+    _PhoneticExtEntry(0x1D13, "LATIN SMALL LETTER SIDEWAYS O WITH STROKE", "O",
+                      "rotated, stroked O; base shape reads as O", True),
+    _PhoneticExtEntry(0x1D14, "LATIN SMALL LETTER TURNED OE", "OE",
+                      "180-degree-rotated OE ligature; still reads as the "
+                      "OE digraph in an obfuscated-secret context", True, True),
+    _PhoneticExtEntry(0x1D15, "LATIN LETTER SMALL CAPITAL OU", "OU",
+                      "OU digraph; UTS#39-style digraph fold", True, True),
+    _PhoneticExtEntry(0x1D16, "LATIN SMALL LETTER TOP HALF O", "O",
+                      "half-glyph O; base shape reads as O", True),
+    _PhoneticExtEntry(0x1D17, "LATIN SMALL LETTER BOTTOM HALF O", "O",
+                      "half-glyph O; base shape reads as O", True),
+    _PhoneticExtEntry(0x1D18, "LATIN LETTER SMALL CAPITAL P", "P",
+                      "clean small capital, no stroke/rotation", True),
+    _PhoneticExtEntry(0x1D19, "LATIN LETTER SMALL CAPITAL REVERSED R", "R",
+                      "mirrored R; base shape reads as R", True),
+    _PhoneticExtEntry(0x1D1A, "LATIN LETTER SMALL CAPITAL TURNED R", "R",
+                      "rotated R; base shape reads as R", True),
+    _PhoneticExtEntry(0x1D1B, "LATIN LETTER SMALL CAPITAL T", "T",
+                      "clean small capital, no stroke/rotation", True),
+    _PhoneticExtEntry(0x1D1C, "LATIN LETTER SMALL CAPITAL U", "U",
+                      "clean small capital, no stroke/rotation", True),
+    _PhoneticExtEntry(0x1D1D, "LATIN SMALL LETTER SIDEWAYS U", "U",
+                      "rotated U; base shape reads as U", True),
+    _PhoneticExtEntry(0x1D1E, "LATIN SMALL LETTER SIDEWAYS DIAERESIZED U", "U",
+                      "rotated, diaeresized U; base shape reads as U", True),
+    _PhoneticExtEntry(0x1D1F, "LATIN SMALL LETTER SIDEWAYS TURNED M", "V",
+                      "a sideways-turned M reads as a V/W shape; matches the "
+                      "empirically-demonstrated obfuscation target", True),
+    _PhoneticExtEntry(0x1D20, "LATIN LETTER SMALL CAPITAL V", "V",
+                      "clean small capital, no stroke/rotation", True),
+    _PhoneticExtEntry(0x1D21, "LATIN LETTER SMALL CAPITAL W", "W",
+                      "clean small capital, no stroke/rotation", True),
+    _PhoneticExtEntry(0x1D22, "LATIN LETTER SMALL CAPITAL Z", "Z",
+                      "clean small capital, no stroke/rotation", True),
+    _PhoneticExtEntry(0x1D23, "LATIN LETTER SMALL CAPITAL EZH", "Z",
+                      "ezh's small-capital form; base shape reads as Z", True),
+    _PhoneticExtEntry(0x1D24, "LATIN LETTER VOICED LARYNGEAL SPIRANT", "Z",
+                      "a curled glyph derived from ezh/Z in phonetic use", True),
+    _PhoneticExtEntry(0x1D25, "LATIN LETTER AIN", "E",
+                      "small-capital-reversed-epsilon shape reads as E", True),
+    # Greek/Cyrillic tail: not Latin-ASCII look-alikes, out of scope for this
+    # manifest (see rationale above). Recorded so the manifest is complete
+    # for the whole block, not silently truncated.
+    _PhoneticExtEntry(0x1D26, "GREEK LETTER SMALL CAPITAL GAMMA", "",
+                      "Greek letter, not ASCII-confusable; out of scope "
+                      "(would extend the Greek table above, not this one)", False),
+    _PhoneticExtEntry(0x1D27, "GREEK LETTER SMALL CAPITAL LAMDA", "",
+                      "Greek letter, not ASCII-confusable; out of scope", False),
+    _PhoneticExtEntry(0x1D28, "GREEK LETTER SMALL CAPITAL PI", "",
+                      "Greek letter, not ASCII-confusable; out of scope", False),
+    _PhoneticExtEntry(0x1D29, "GREEK LETTER SMALL CAPITAL RHO", "",
+                      "Greek letter; the existing table already folds "
+                      "regular Greek RHO (P) as ASCII-identical, but this "
+                      "small-capital phonetic form is a separate, "
+                      "narrower review out of scope here", False),
+    _PhoneticExtEntry(0x1D2A, "GREEK LETTER SMALL CAPITAL PSI", "",
+                      "Greek letter, not ASCII-confusable; out of scope", False),
+    _PhoneticExtEntry(0x1D2B, "CYRILLIC LETTER SMALL CAPITAL EL", "",
+                      "Cyrillic letter, not ASCII-confusable; out of scope", False),
+)
+
+# Single-letter folds derived from the manifest — the ONLY thing that feeds
+# _CONFUSABLES. Multi-letter (ligature) folds are a separate table, wired in
+# separately below with their own dedicated test coverage.
+_PHONETIC_EXT_SINGLE: dict[str, str] = {
+    chr(e.codepoint): e.target
+    for e in _PHONETIC_EXT_MANIFEST if e.included and not e.multi_letter
+}
+_PHONETIC_EXT_MULTI: dict[str, str] = {
+    chr(e.codepoint): e.target
+    for e in _PHONETIC_EXT_MANIFEST if e.included and e.multi_letter
+}
+
 _CONFUSABLES = str.maketrans({
     # Cyrillic lowercase -> ASCII
     "а": "a", "е": "e", "о": "o", "р": "p", "с": "c",
@@ -581,36 +748,49 @@ _CONFUSABLES = str.maketrans({
     "մ": "m", "յ": "y", "ն": "n", "շ": "w", "ո": "n", "չ": "q",
     "պ": "p", "ջ": "j", "ռ": "r", "ս": "u", "վ": "v", "տ": "t",
     "ր": "r", "ց": "u", "փ": "p", "ք": "q", "օ": "o", "ֆ": "f",
-    # Latin phonetic-extension small capitals (U+1D00 block) -> ASCII.
-    # Unlike the scripts above, Unicode assigns these NO decomposition at
-    # all (confirmed: unicodedata.decomposition() is empty for the whole
-    # block) — they are semantically distinct IPA/phonetic letters, so NFKC
-    # can never fold them; only a curated table closes this gap (issue #64).
-    # Curated to the letters that render as a plain small capital with no
-    # extra stroke/rotation (same-glyph rule); "TURNED"/"SIDEWAYS"/"BARRED"/
-    # ligature variants in this block are visually distinct and excluded.
-    "ᴀ": "A", "ᴄ": "C", "ᴅ": "D", "ᴇ": "E", "ᴊ": "J", "ᴋ": "K",
-    "ᴍ": "M", "ᴏ": "O", "ᴘ": "P", "ᴛ": "T", "ᴜ": "U", "ᴠ": "V",
-    "ᴡ": "W", "ᴢ": "Z",
+    # Latin phonetic-extension small capitals, derived from the reviewed
+    # manifest above (issue #64, round 3). str.translate() applies a
+    # multi-char target exactly like a 1:1 fold — the SEPARATION between
+    # _PHONETIC_EXT_SINGLE/_MULTI is for documentation and dedicated test
+    # coverage (multi-char expansion changes the origin-map fan-out), not a
+    # runtime mechanism; both are merged here so a single normalization pass
+    # handles every entry.
+    **_PHONETIC_EXT_SINGLE,
+    **_PHONETIC_EXT_MULTI,
 })
+
+
+# SCAN-ONLY: every Unicode Mark category (nonspacing Mn, spacing-combining
+# Mc, enclosing Me) is dropped by _normalize_with_map for PATTERN-MATCHING
+# purposes only. This is deliberately NOT the same policy as neutralize_text
+# (the DISPLAY-reveal function above), which keeps Mn/Mc/Me characters
+# visible (collapsing only excessive Zalgo runs) so a human reading a
+# rendered artifact still sees the server used deceptive marks. Stripping
+# here never touches what gets displayed or redacted-and-shown — only what
+# the scanner treats as "the same credential with decoration removed."
+# Round-3 finding: Mc (e.g. Devanagari visarga U+0903, Tamil vowel signs
+# U+0BC1/U+0BC2) and Me (e.g. combining enclosing circle U+20DD) are just as
+# usable for this obfuscation as Mn — none of the three carry meaningful
+# information for CREDENTIAL PATTERN MATCHING specifically (unlike display,
+# where an Mc vowel sign is script-essential), so all three are scan-dropped.
+_MARK_CATEGORIES = frozenset({"Mn", "Mc", "Me"})
 
 
 def _normalize_with_map(text: str) -> tuple[str, list[int]]:
     """Normalize like _normalize_for_scan, but char-by-char, recording for
     each emitted normalized char the index in the ORIGINAL string it came
-    from. invisible -> dropped (no entry); standalone combining mark (Mn) ->
+    from. invisible -> dropped (no entry); standalone mark char (Mn/Mc/Me) ->
     dropped (no entry, same treatment as invisible); confusable -> 1:1; NFKC
     per char -> 0..N chars, all tagged to that one origin index. The map lets
     a match found in normalized space be redacted back in the original bytes.
 
-    Dropping category-Mn marks (issue #64) defeats a secret with a synthetic
-    combining mark stapled to every character (e.g. U+0332 COMBINING LOW
-    LINE) — NFKC does not strip these (there is no compatibility mapping for
+    Dropping mark-category chars (issue #64) defeats a secret with a
+    synthetic mark stapled to every character (e.g. U+0332 COMBINING LOW
+    LINE, or a Tamil/Devanagari spacing-combining vowel sign used the same
+    way) — NFKC does not strip these (there is no compatibility mapping for
     an artificial base+mark pair that isn't a real precomposed character), so
     only an explicit drop, structured exactly like the invisible-char case,
-    closes it. Scoped to Mn (nonspacing marks — accents, tone marks) only,
-    not Mc (spacing combining marks that occupy visual width in scripts like
-    Devanagari, which are not zero-width and are not the demonstrated attack).
+    closes it.
 
     Per-char NFKC differs from whole-string NFKC only for cross-char
     combining sequences (irrelevant to ASCII-ish credentials); the
@@ -618,7 +798,7 @@ def _normalize_with_map(text: str) -> tuple[str, list[int]]:
     out: list[str] = []
     origin: list[int] = []
     for i, ch in enumerate(text):
-        if _INVISIBLE_RE.match(ch) or unicodedata.category(ch) == "Mn":
+        if _INVISIBLE_RE.match(ch) or unicodedata.category(ch) in _MARK_CATEGORIES:
             continue
         for nc in unicodedata.normalize("NFKC", ch.translate(_CONFUSABLES)):
             out.append(nc)
@@ -782,7 +962,7 @@ def _spanned_original_redactions(text: str) -> list[tuple[int, int, str, str]]:
         end = origin[b - 1] + 1
         while (end < len(capped)
                and (_INVISIBLE_RE.match(capped[end])
-                    or unicodedata.category(capped[end]) == "Mn")):
+                    or unicodedata.category(capped[end]) in _MARK_CATEGORIES)):
             end += 1
         spans.append((start, end, pat.category, value))
     return spans
