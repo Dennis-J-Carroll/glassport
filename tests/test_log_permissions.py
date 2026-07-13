@@ -76,8 +76,16 @@ class TestFileMode(unittest.TestCase):
 class TestOpenSessionLog(unittest.TestCase):
     def test_unwritable_dir_returns_none_not_raise(self):
         from glassport.tap import open_session_log
-        bad = Path("/proc/nonexistent/s.jsonl")   # unwritable on Linux CI runners
-        self.assertIsNone(open_session_log(bad))
+        # Cross-platform unwritable/uncreatable target: the log's parent
+        # directory component is an existing REGULAR FILE, not a directory.
+        # mkdir(parents=True) then raises OSError (FileExistsError /
+        # NotADirectoryError, both OSError subclasses) identically on POSIX
+        # and Windows -- no chmod, no /proc, no platform-specific path.
+        with tempfile.TemporaryDirectory() as d:
+            blocker = Path(d) / "blocker"
+            blocker.write_text("not a directory")
+            bad = blocker / "nested" / "s.jsonl"
+            self.assertIsNone(open_session_log(bad))
 
     @unittest.skipUnless(os.name == "posix", "POSIX modes only")
     def test_non_private_mode_degrades_to_none(self):
