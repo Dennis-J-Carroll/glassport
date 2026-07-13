@@ -69,11 +69,22 @@ Roughly in dependency order — earlier unlocks later.
 3. **Streaming detector path** *(large, architectural)* — detectors currently
    consume a *full in-memory trace* (batch). Streaming means processing frames as
    they arrive. This is the prerequisite for #4.
-4. **Remote streamable-HTTP interception** *(large)* — today glassport is
-   stdio-only. Remote MCP servers use a different transport (HTTP + SSE) that needs
-   a different interception model. Depends on #3.
+4. **Live/streaming detector path and HTTP enforcement parity** *(large)* —
+   passive interception over Streamable-HTTP already shipped (H2.01,
+   `adapters/mcp_http.py`; see Tier 1). What remains: `gate`'s active
+   enforcement (block `tools/call` outside the declared surface) has no HTTP
+   equivalent yet — it's stdio-only today. Depends on #3 for a detector path
+   that can evaluate a call in-flight rather than after a full batch trace.
 5. **Agent↔Agent (A2A) trace coverage** *(large)* — extend beyond Agent↔Tool to
    agent-to-agent protocols.
+6. **Performance-methodology redesign** *(small, bounded)* — `test_streaming.py`'s
+   single wall-clock `assertLess` (loosened 1.0s → 1.5s in PR #69 after 4 CI
+   flakes under the coverage job's instrumentation overhead) is a stopgap, not
+   a durable benchmark design. Replace with: repeated samples (not one
+   timing per run), a reported distribution (median/p95, not a single point),
+   a documented reference environment (the coverage job's line-trace overhead
+   is a known, unmodeled variable), and enough tolerance to absorb CI noise
+   without silently raising the bar past a real regression.
 
 ## Recently shipped
 
@@ -87,9 +98,11 @@ Roughly in dependency order — earlier unlocks later.
   ligatures, and uncovered Mc/Me marks. Round 3 replaced the ad hoc list with a
   **reviewed manifest** (`_PHONETIC_EXT_MANIFEST`) covering all 44 codepoints in
   U+1D00–U+1D2B — each with its Unicode name, ASCII fold target, and inclusion
-  rationale — from which the production `_CONFUSABLES` table and the
-  independent test oracle both mechanically derive (so they can no longer
-  silently drift apart); scan-only stripping extended from Mn to the full
+  rationale. Production mappings and manifest-completeness unit tests share
+  the reviewed manifest (so `_CONFUSABLES` and the completeness tests can no
+  longer silently drift apart); the adversarial red-team oracle is
+  independently maintained and does not derive its expected mappings from the
+  production manifest. Scan-only stripping extended from Mn to the full
   Mn/Mc/Me categories, with origin-map correctness preserved and `neutralize_text`
   (the *display* layer) deliberately left untouched — this fix is confined to
   scan/redaction normalization, never to what a human sees rendered. New
