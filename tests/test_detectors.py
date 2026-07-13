@@ -530,6 +530,31 @@ class TestRedactObfuscated(unittest.TestCase):
         self.assertNotIn(zwj, out)                 # obfuscation bytes gone too
         self.assertIn("redacted", out)
 
+    def test_combining_mark_split_key_is_removed(self):
+        # issue #64: a synthetic combining mark on every char (Zalgo-lite),
+        # not detected by NFKC (no compatibility mapping for an artificial
+        # base+mark pair). Confirmed reconstructable pre-fix via an
+        # independent oracle across report.html and provenance->SARIF/JSON/
+        # text before this fix.
+        mark = "̲"  # COMBINING LOW LINE
+        obf = "".join(c + mark for c in self._key())
+        out = detectors.redact_secrets_strict(obf)
+        self.assertNotIn(self._key(), out.replace(mark, ""))
+        self.assertNotIn(mark, out)
+        self.assertIn("redacted", out)
+
+    def test_small_capital_key_is_removed(self):
+        # issue #64: U+1D00 LATIN LETTER SMALL CAPITAL A has NO Unicode
+        # decomposition at all (confirmed via unicodedata.decomposition()) —
+        # it is a phonetic-extension letter, not a compatibility variant of
+        # 'A', so NFKC can never fold it; only the curated confusables table
+        # closes this.
+        obf = self._key().replace("A", "ᴀ")
+        out = detectors.redact_secrets_strict(obf)
+        self.assertNotIn(self._key(), out)
+        self.assertNotIn("ᴀ", out)
+        self.assertIn("redacted", out)
+
     def test_clean_key_still_redacted(self):
         out = detectors.redact_secrets_strict(self._key())
         self.assertNotIn(self._key(), out)

@@ -581,15 +581,36 @@ _CONFUSABLES = str.maketrans({
     "մ": "m", "յ": "y", "ն": "n", "շ": "w", "ո": "n", "չ": "q",
     "պ": "p", "ջ": "j", "ռ": "r", "ս": "u", "վ": "v", "տ": "t",
     "ր": "r", "ց": "u", "փ": "p", "ք": "q", "օ": "o", "ֆ": "f",
+    # Latin phonetic-extension small capitals (U+1D00 block) -> ASCII.
+    # Unlike the scripts above, Unicode assigns these NO decomposition at
+    # all (confirmed: unicodedata.decomposition() is empty for the whole
+    # block) — they are semantically distinct IPA/phonetic letters, so NFKC
+    # can never fold them; only a curated table closes this gap (issue #64).
+    # Curated to the letters that render as a plain small capital with no
+    # extra stroke/rotation (same-glyph rule); "TURNED"/"SIDEWAYS"/"BARRED"/
+    # ligature variants in this block are visually distinct and excluded.
+    "ᴀ": "A", "ᴄ": "C", "ᴅ": "D", "ᴇ": "E", "ᴊ": "J", "ᴋ": "K",
+    "ᴍ": "M", "ᴏ": "O", "ᴘ": "P", "ᴛ": "T", "ᴜ": "U", "ᴠ": "V",
+    "ᴡ": "W", "ᴢ": "Z",
 })
 
 
 def _normalize_with_map(text: str) -> tuple[str, list[int]]:
     """Normalize like _normalize_for_scan, but char-by-char, recording for
     each emitted normalized char the index in the ORIGINAL string it came
-    from. invisible -> dropped (no entry); confusable -> 1:1; NFKC per char
-    -> 0..N chars, all tagged to that one origin index. The map lets a match
-    found in normalized space be redacted back in the original bytes.
+    from. invisible -> dropped (no entry); standalone combining mark (Mn) ->
+    dropped (no entry, same treatment as invisible); confusable -> 1:1; NFKC
+    per char -> 0..N chars, all tagged to that one origin index. The map lets
+    a match found in normalized space be redacted back in the original bytes.
+
+    Dropping category-Mn marks (issue #64) defeats a secret with a synthetic
+    combining mark stapled to every character (e.g. U+0332 COMBINING LOW
+    LINE) — NFKC does not strip these (there is no compatibility mapping for
+    an artificial base+mark pair that isn't a real precomposed character), so
+    only an explicit drop, structured exactly like the invisible-char case,
+    closes it. Scoped to Mn (nonspacing marks — accents, tone marks) only,
+    not Mc (spacing combining marks that occupy visual width in scripts like
+    Devanagari, which are not zero-width and are not the demonstrated attack).
 
     Per-char NFKC differs from whole-string NFKC only for cross-char
     combining sequences (irrelevant to ASCII-ish credentials); the
@@ -597,7 +618,7 @@ def _normalize_with_map(text: str) -> tuple[str, list[int]]:
     out: list[str] = []
     origin: list[int] = []
     for i, ch in enumerate(text):
-        if _INVISIBLE_RE.match(ch):
+        if _INVISIBLE_RE.match(ch) or unicodedata.category(ch) == "Mn":
             continue
         for nc in unicodedata.normalize("NFKC", ch.translate(_CONFUSABLES)):
             out.append(nc)
@@ -739,16 +760,30 @@ def _apply_span_redactions(text: str, spans: list[tuple[int, int, str, str]]) ->
 
 def _spanned_original_redactions(text: str) -> list[tuple[int, int, str, str]]:
     """Map every normalized-space hit back to an ORIGINAL-text range so the
-    obfuscated bytes (zero-width joiners, homoglyphs) are redacted along with
-    the secret. origin[b-1]+1 covers the whole final source char (a safe
-    over-approximation when NFKC expanded one source char into several)."""
-    norm, origin = _normalize_with_map(text[:MAX_SCAN_BYTES])
+    obfuscated bytes (zero-width joiners, homoglyphs, combining marks) are
+    redacted along with the secret. origin[b-1]+1 covers the whole final
+    source char (a safe over-approximation when NFKC expanded one source
+    char into several).
+
+    A dropped char (invisible or combining-mark, per _normalize_with_map)
+    immediately TRAILING the match — e.g. a mark stapled after a secret's
+    last character — has no origin-map entry and so isn't covered by
+    origin[b-1]+1; extend `end` past any such run so no obfuscation byte
+    survives attached to the redaction placeholder. Carries zero secret
+    information either way (the match itself is already fully covered);
+    this only keeps the artifact clean of stray bytes."""
+    capped = text[:MAX_SCAN_BYTES]
+    norm, origin = _normalize_with_map(capped)
     spans: list[tuple[int, int, str, str]] = []
     for pat, value, a, b in _scan_normalized(norm):
         if not value or b <= a:
             continue
         start = origin[a]
         end = origin[b - 1] + 1
+        while (end < len(capped)
+               and (_INVISIBLE_RE.match(capped[end])
+                    or unicodedata.category(capped[end]) == "Mn")):
+            end += 1
         spans.append((start, end, pat.category, value))
     return spans
 

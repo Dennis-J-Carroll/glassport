@@ -10,9 +10,27 @@ Pure stdlib, run with:  python3 -m unittest tests.test_audit
 import json
 import tempfile
 import unittest
+import unicodedata
 from pathlib import Path
 
 from glassport import audit
+
+# issue #64: an INDEPENDENT reconstruction oracle — a separate implementation
+# from detectors._normalize_for_scan/_normalize_with_map (own category-strip,
+# own NFKD+NFKC, own confusable table). Using the production normalizer as
+# the oracle would silently agree with whatever blind spot the fix has.
+_ISSUE64_SMALLCAP = {0x1D00: 'A', 0x1D04: 'C', 0x1D05: 'D', 0x1D07: 'E',
+                     0x1D0A: 'J', 0x1D0B: 'K', 0x1D0D: 'M', 0x1D0F: 'O',
+                     0x1D18: 'P', 0x1D1B: 'T', 0x1D1C: 'U', 0x1D20: 'V',
+                     0x1D21: 'W', 0x1D22: 'Z'}
+
+
+def _issue64_independent_reconstruct(text: str, secret: str) -> bool:
+    cleaned = "".join(ch for ch in text
+                      if unicodedata.category(ch) not in ("Cf", "Cc", "Mn", "Me"))
+    norm = unicodedata.normalize("NFKC", unicodedata.normalize("NFKD", cleaned))
+    folded = "".join(_ISSUE64_SMALLCAP.get(ord(c), c) for c in norm)
+    return secret in folded
 
 
 def audit_files(files: dict[str, str]) -> "audit.Report":
@@ -324,6 +342,22 @@ class TestProvenanceRedactionInRenderers(unittest.TestCase):
         for name, obf in obfs.items():
             out = audit.render_json(self._report_with_prov(package=obf))
             self.assertNotIn(secret, self._det._normalize_for_scan(out), name)
+
+    def test_json_and_text_combining_mark_obfuscated_secret_absent(self):
+        # issue #64: uses an INDEPENDENT oracle (not detectors._normalize_for_scan,
+        # which shares the fix's own normalizer and would be blind to its own gap).
+        secret = "sk-ant-api03-" + "A" * 40 + "1234567890"
+        obf = "".join(c + "̲" for c in secret)
+        r = self._report_with_prov(package=obf)
+        self.assertFalse(_issue64_independent_reconstruct(audit.render_json(r), secret))
+        self.assertFalse(_issue64_independent_reconstruct(audit.render_text(r), secret))
+
+    def test_json_and_text_small_capital_obfuscated_secret_absent(self):
+        secret = "sk-ant-api03-" + "A" * 40 + "1234567890"
+        obf = secret.replace("A", "ᴀ")
+        r = self._report_with_prov(package=obf)
+        self.assertFalse(_issue64_independent_reconstruct(audit.render_json(r), secret))
+        self.assertFalse(_issue64_independent_reconstruct(audit.render_text(r), secret))
 
     def test_json_schema_keys_unchanged(self):
         data = json.loads(audit.render_json(self._report_with_prov()))
