@@ -69,9 +69,12 @@ Roughly in dependency order — earlier unlocks later.
 3. **Streaming detector path** *(large, architectural)* — detectors currently
    consume a *full in-memory trace* (batch). Streaming means processing frames as
    they arrive. This is the prerequisite for #4.
-4. **Remote streamable-HTTP interception** *(large)* — today glassport is
-   stdio-only. Remote MCP servers use a different transport (HTTP + SSE) that needs
-   a different interception model. Depends on #3.
+4. **Live/streaming detector path and HTTP enforcement parity** *(large)* —
+   passive interception over Streamable-HTTP already shipped (H2.01,
+   `adapters/mcp_http.py`; see Tier 1). What remains: `gate`'s active
+   enforcement (block `tools/call` outside the declared surface) has no HTTP
+   equivalent yet — it's stdio-only today. Depends on #3 for a detector path
+   that can evaluate a call in-flight rather than after a full batch trace.
 5. **Agent↔Agent (A2A) trace coverage** *(large)* — extend beyond Agent↔Tool to
    agent-to-agent protocols.
 6. **Performance-methodology redesign** *(small, bounded)* — `test_streaming.py`'s

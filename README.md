@@ -656,7 +656,7 @@ Request/response pairs are correlated by JSON-RPC `id`; responses with no matchi
 
 Stated here so nobody discovers them the hard way:
 
-- **stdio transport only.** Remote streamable-HTTP servers need a different interception model and are out of scope for now. Local stdio is where the highest-trust credentials live, so it's first.
+- **Passive interception covers both stdio and remote Streamable-HTTP servers** (`wrap --transport http`). **Active enforcement (`gate`) is stdio-only** — blocking `tools/call` outside the declared surface has no HTTP equivalent yet.
 - **Passive by default.** `wrap` observes and never blocks, rewrites, or delays — that contract is permanent. Enforcement exists only in the opt-in `gate` mode, shipped last on purpose: a blocking proxy that misfires destroys trust faster than no proxy at all.
 - **The gate can't block before declaration.** A client that fires `tools/call` before the `tools/list` response lands is forwarded — there is no declaration to enforce yet. The passive detectors flag these (`premature_call` / `call_before_declaration`), and enforcement kicks in the moment the handshake completes.
 - **The tap sees the wire, not the mind.** It cannot see the user's prompt, the model's reasoning, or the agent's plan. Every claim it makes is limited to what crossed the pipe.
@@ -680,8 +680,8 @@ M0 (tap) through M5 (gate) are built. The static `audit` is folded in. Observe f
 
 Still on the horizon:
 
-- Remote streamable-HTTP interception
-- Network-enriched audit mode: npm / PyPI / GitHub provenance lookups, as an explicit opt-in flag (kept off the default path so the core audit stays reproducible and offline)
+- Live/streaming detector path and HTTP enforcement parity: `gate`'s active enforcement is stdio-only today; passive interception over Streamable-HTTP already shipped (`wrap --transport http`)
+- Network-enriched audit mode: npm / PyPI / GitHub provenance lookups, as an explicit opt-in flag (kept off the default path so the core audit stays reproducible and offline)~~ ✅ Built (`audit --provenance`)
 - Agent↔Agent trace coverage for Google A2A protocol
 - TUI: terminal interface for live session inspection and drift review~~ ✅ Built (`glassport tui`)
 - CI integration: JSON + SARIF export and a GitHub Action that uploads audit findings to the Security tab~~ ✅ Built (`audit --sarif`, `.github/workflows/ci.yml`)
