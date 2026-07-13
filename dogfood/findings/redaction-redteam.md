@@ -343,3 +343,69 @@ tests were then rewritten against the independent oracle and re-verified.
 | PASS3-2b (small-capital in `package`) | not fixed — tracked | **FIXED** |
 
 Issue #64 closed. 0.6.9's gate on its explicit disposition is satisfied.
+
+---
+
+## Update 2026-07-13 (round 3): Kimi verification found real residual gaps — now closed
+
+A narrowly-scoped Kimi verification pass against PR #66's exact merged head
+(commit `c7cc0e5`) — attacking specifically the new small-capital table,
+combining-mark stripping, origin mapping, trailing-boundary repair,
+multilingual false positives, performance, and every rendered artifact path,
+using an oracle independent of `_normalize_for_scan` — found **3 confirmed
+RED** of 52 cases:
+
+1. **Excluded U+1D00 single-letter small capitals** — 18 glyphs the original
+   round-2 fix's ad hoc 14-entry list excluded (barred-B, eth-D, turned/
+   reversed/sideways/half forms of E/I/L/N/O/R/U/V/Z) reconstruct under the
+   independent oracle; production sees them as clean.
+2. **Excluded U+1D00 multi-letter (ligature) small capitals** — AE/OE/OU
+   glyphs, same story.
+3. **Mc/Me combining-mark categories** — the round-2 fix stripped only Mn
+   (nonspacing) marks for scanning. Mc (spacing-combining — Devanagari
+   visarga, Tamil vowel signs) and Me (enclosing marks) were left in place,
+   equally exploitable for the same obfuscation.
+
+**Root cause of the round-2 gap:** the 14-entry table and its exclusions
+were an ad hoc, undocumented judgment call — exactly the kind of policy that
+silently drifts from what an independent red-team re-derives. **Resolution:**
+replaced with `_PHONETIC_EXT_MANIFEST`, a reviewed, single-source-of-truth
+table covering all 44 codepoints in the U+1D00 block — each with its
+official Unicode name, ASCII fold target, and a written rationale (no live
+UTS#39 confusables.txt access; glassport's own visual-similarity judgment
+stated explicitly per entry). `_CONFUSABLES` is now *derived* from this
+manifest rather than hand-typed separately, and the regression tests read
+the manifest directly (`tests/test_hardening.py::TestNormalizeWithMap`)
+instead of an independently-typed pairs dict — closing the exact drift
+vector that caused this gap.
+
+**Decision:** every single-letter and ligature glyph in the block is now
+included (narrow, ~44-codepoint range; near-zero legitimate-use surface in
+ordinary MCP traffic; Kimi empirically demonstrated every one is
+exploitable). Multi-letter ligatures are folded via a *separate* dict
+(`_PHONETIC_EXT_MULTI`) with their own dedicated origin-map, boundary, and
+false-positive tests — a 1-source-char-to-2-normalized-char expansion is
+architecturally different and is verified, not assumed. The Greek/Cyrillic
+tail (U+1D26–U+1D2B) is explicitly out of scope — documented in the
+manifest, not silently dropped.
+
+Scan-only mark stripping extended from Mn to the full Mn+Mc+Me set, in both
+`_normalize_with_map` and the trailing-boundary repair in
+`_spanned_original_redactions`. `neutralize_text` (the display-reveal
+function) is untouched — it keeps its own independent Mn/Mc/Me handling for
+Zalgo-run collapse, so no displayed or redacted-and-shown text is ever
+globally altered by this change; only what the pattern *scanner* treats as
+"the same credential with decoration removed."
+
+**Coverage added:** false-positive fixtures for Devanagari, Tamil, Sinhala
+(real Mc-bearing script text), Arabic (plain and fully diacritized),
+enclosing marks (keycap emoji), and mixed-script text — zero false PII
+matches, zero unnecessary redaction, output byte-unchanged for all seven.
+Dedicated Mc/Me origin-map test. Dedicated multi-letter ligature tests
+(origin-map fan-out, redaction, false-positive). Manifest-completeness
+tests (every included entry folds correctly; every excluded entry stays
+untouched; `_CONFUSABLES` matches the manifest exactly, entry for entry).
+
+**Teeth-proofed:** reverting the fix reproduces Kimi's exact 49/52 result
+(the same 3 rows RED); restoring returns 52/52. 704 tests OK, all 9 dogfood
+grills green.
