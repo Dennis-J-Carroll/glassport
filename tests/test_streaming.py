@@ -239,9 +239,13 @@ class TestPerf(unittest.TestCase):
             print(f"\n[streaming perf] initial={initial * 1000:.0f}ms "
                   f"incremental={incremental * 1000:.0f}ms "
                   f"({len(s.trace.events)} events)")
-            # plan target: <100ms per new frame on 10k. CI-lenient bound;
-            # the printed number is the honest measurement.
-            self.assertLess(incremental, 1.0)
+            # plan target: <100ms per new frame on 10k. Observed incremental
+            # time sits right at ~1.0-1.1s under the coverage job's line-trace
+            # instrumentation overhead (flaked 4x across PRs #66/#67/#68 at
+            # 1.03-1.07s) - 1.5s keeps real margin under that overhead without
+            # masking an actual regression. The printed number is the honest
+            # measurement.
+            self.assertLess(incremental, 1.5)
 
 
 if __name__ == "__main__":
