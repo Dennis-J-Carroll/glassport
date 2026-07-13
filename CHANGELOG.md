@@ -7,6 +7,108 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versions follow 
 ## [Unreleased]
 
 ### Added
+- SessionLog.file_mode/close for permission verification
+- char-indexed normalization with origin map
+
+### Fixed
+- reviewed phonetic-extension manifest closes Kimi round-3 gaps
+- close issue #64 combining-mark + small-capital normalization gap
+- make unwritable-dir test cross-platform (Windows CI red)
+- remove duplicate close(), widen file_mode() exception guard
+- close renderer-boundary defensive gaps (Kimi pass 3)
+- redact provenance fields in json + text renderers (ADJ-1/2)
+- strict-redact + validate provenance fields (P0 evidence-safety)
+- merge overlapping spans before redaction splice
+- span-aware redaction removes obfuscated secrets
+
+### Changed
+- open_session_log verifies mode + degrades (HTTP like stdio)
+- Update README.md
+- reject empty/partial userinfo in remote URL
+- drop Connection-nominated hop-by-hop headers both ways
+- reject port 0 and whitespace hosts; accurate port error
+- strict remote-URL validation + userinfo-free Host
+- _scan_pii_spanned carries normalized spans
+
+### Documentation
+- 0.6.9 Security & Truthfulness implementation plan
+- 0.6.9 Security & Truthfulness design
+
+### Internal
+- PR #67 round-3 closure verification cases
+- document round-3 manifest resolution
+- preserve PR #66 provenance red-team findings
+- document issue #64 resolution + process note
+- grill closes issue #64 (combining-mark + small-capital)
+- byte-identical relay proof, logging on vs off
+- pass-3 grill cases + findings classification
+- mark ADJ-1/ADJ-2 fixed in findings
+- preserve provenance renderer red-team findings
+- permanent CI grill for redaction/artifact evidence-safety
+- grill Connection-nominated hop leak both directions
+- isolate redaction at report+SARIF boundary
+- grill report+SARIF against obfuscated secrets
+
+## [0.6.8] - 2026-07-10
+
+### Fixed
+- forward the upstream query string (H2)
+
+### Changed
+- refuse 101 upgrade; drop private stdlib symbols (H1)
+- redaction fails closed in shareable artifacts (S2)
+- create session log 0o600 / dir 0o700, umask-independent (S1)
+- 0.6.8 — relay round-5 (bundles unreleased 0.6.7 round-4)
+- SSE-log bound, all-1xx skip, CT/204/304/dup-CL framing
+- 0.6.7 — relay round-4 SSE framing
+- close-delimit SSE + match SSE media type, not substring
+
+### Internal
+- grill 101 upgrade refusal (H1)
+- round-5 grill cases + SPEC write-up
+- round-4 SSE grill cases + narrow the Kimi charge
+
+## [0.6.6] - 2026-07-10
+
+### Changed
+- 0.6.6 — relay round-3 framing (lying-short Content-Length)
+- close connection on lying-short response Content-Length
+
+### Internal
+- bump checkout@v5 + setup-python@v6 off the Node20 runtime
+- round-3 grill surfaces + Kimi brief
+
+## [0.6.5] - 2026-07-10
+
+### Added
+- GET SSE + DELETE + wrap --transport http CLI (H2.01 C+D)
+- streamable-HTTP MITM proxy — JSON + SSE (H2.01 A+B)
+
+### Changed
+- reject comma-folded / non-numeric response Content-Length
+- bound the relay path — R1 DoS, R2 smuggling, R3 slowloris
+- land Kimi red-team fixes + close 3 gaps
+
+### Documentation
+- record 0.6.5 relay hardening; H2.01 merged; round-3 next
+- H2.01 streamable-HTTP interception — phased TDD plan
+
+### Internal
+- grill the comma-folded Content-Length desync
+- trace parity + fail-open; docs (H2.01 E)
+
+## [0.6.4] - 2026-07-06
+
+### Added
+- render/sarif/CLI integration, byte-identical default
+- module — discovery, urllib client, cache, rubric, enrich
+- H1.08 — coverage gate + e2e integration test
+- add opt-in PII pattern for Azure service principal client secrets
+- differentiate severity-2 from severity-1 with 256-color palette
+- tap self-metrics line + `glassport health`
+- retention for the session log dir — dry-run by default
+- typed public API — py.typed + lazy re-exports
+- CHANGELOG.md generated from git history
 - ? help overlay; drain KEY_RESIZE storms
 - CRT frontend — single-file, air-gapped, hostile-data-safe
 - web console server — stdlib HTTP + RFC 6455 WebSocket
@@ -19,16 +121,32 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versions follow 
 - multi-session tabs — Ctrl+T cycle, Ctrl+W close, per-tab ingest cache
 
 ### Fixed
+- 3.10 fallback ignores env-marker literals; docs
+- improve error message when log directory is unwritable
+- skip e2e on Windows (npx.cmd needs a shell the tap avoids)
+- read files with explicit utf-8 so Windows cp1252 can't crash
+- use explicit file context managers in _cmd_advise
+- make Windows matrix jobs pass
+- 0.6.3 — match main's released version
 - surface tail_only everywhere + share the cap with batch
 - sync __version__ with pyproject — 0.5.0 -> 0.6.2
 - confine audit_server to allowed roots — default-deny cwd
 - q/esc could never dismiss an accepted search — quit was trapped
 
 ### Changed
+- v0.6.4 — bump __version__ + pyproject in lockstep
+- rename azure_client_secret to high_entropy_token_30_40, add to _GENERIC_SECRETS, add hex charset boundary suppression tests
 - glassport[tui] extra ships Windows curses shim
 
 ### Documentation
+- H2.03 network-enriched audit — 10 TDD tasks
+- H2.03 network-enriched audit design
+- survey engine, Used-By section, measured perf, Show-HN draft
+- SECURITY.md threat model + CONTRIBUTING.md doctrine clause
 - serve --http usage in USAGE
+
+### Internal
+- 3-OS matrix, analysis benchmark, hardened release path
 
 ## [0.6.3] - 2026-07-03
 

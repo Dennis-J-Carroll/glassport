@@ -1,7 +1,10 @@
 # glassport — project status
 
 Living snapshot of what's built, what's built-but-unshipped, and what's next.
-Update when a tier changes. Last updated: 2026-07-03 (0.6.3 — Kimi round-2 renderer hardening: shared `neutralize_text` folds NFKC/fullwidth + math-alphanumeric homoglyphs and exotic whitespace, two-pass Zalgo collapse survives ZWJ interleave, `stripe_key` credential, unit-locked. 0.6.2 was the initial report/sarif poisoning-resistance).
+Update when a tier changes. Last updated: 2026-07-13 (0.6.9 — issue #64 closed: a
+reviewed U+1D00–U+1D2B phonetic-extension manifest plus Mn/Mc/Me combining-mark
+scan stripping, closing a credential-obfuscation gap found by independent
+red-team verification. See "Recently shipped" below for the full round-3 story).
 
 ## Tier 1 — Built, tested, in the repo
 
@@ -29,17 +32,18 @@ Source is the truth; this is the index.
 
 ## Tier 2 — Built but NOT shipped to PyPI
 
-**Empty — `pip install glassport` serves 0.6.3** (published via tag-triggered
-trusted publishing, tag `v0.6.3`). 0.6.3 is the Kimi round-2 renderer hardening
-(PR #33): shared `detectors.neutralize_text` NFKC-folds fullwidth + math-
-alphanumeric homoglyphs, reveals exotic whitespace (Zs/Zl/Zp), collapses Zalgo
-runs in two passes so a ZWJ interleave can't reset the counter, plus a
-`stripe_key` credential pattern — all unit-locked. 0.6.2 was the initial
-report/sarif poisoning-resistance: `report.py` (`session.html`) neutralizes
-deceptive Unicode and redacts secrets; `sarif.py` redacts credentials from
-finding path/fingerprint/message; both bound output against DoS; the report and
-sarif grills join advise as CI merge gates (PRs #29, #30). 0.6.1 was the
-`run_tap` shutdown-abort patch (PR #26); 0.6.0 shipped `advise` (PR #20) + its
+**Empty — `pip install glassport` serves 0.6.9** (published via tag-triggered
+trusted publishing, tag `v0.6.9`). 0.6.9 closes issue #64 (see "Recently
+shipped"). 0.6.3 was the Kimi round-2 renderer hardening (PR #33): shared
+`detectors.neutralize_text` NFKC-folds fullwidth + math-alphanumeric
+homoglyphs, reveals exotic whitespace (Zs/Zl/Zp), collapses Zalgo runs in two
+passes so a ZWJ interleave can't reset the counter, plus a `stripe_key`
+credential pattern — all unit-locked. 0.6.2 was the initial report/sarif
+poisoning-resistance: `report.py` (`session.html`) neutralizes deceptive
+Unicode and redacts secrets; `sarif.py` redacts credentials from finding
+path/fingerprint/message; both bound output against DoS; the report and sarif
+grills join advise as CI merge gates (PRs #29, #30). 0.6.1 was the `run_tap`
+shutdown-abort patch (PR #26); 0.6.0 shipped `advise` (PR #20) + its
 quote-or-redact hardening (PR #21) + the P1–P11 grill (PR #22).
 
 ## Tier 3 — Roadmap (not built)
@@ -73,7 +77,33 @@ Roughly in dependency order — earlier unlocks later.
 
 ## Recently shipped
 
-- **HTTP-relay round-5 SSE residue + connection/header path** (0.6.8, this PR) —
+- **Issue #64 — reviewed phonetic-extension manifest + Mn/Mc/Me mark stripping**
+  (0.6.9, PR #67) — an independent Kimi red-team pass found that combining-mark
+  and U+1D00 (Latin Extended Additional / phonetic extensions) obfuscation could
+  slip a credential past `_normalize_for_scan` undetected. Fix, closed in three
+  rounds: round 1 added 14 hand-picked single-letter small-capital folds
+  (Mn-only stripping); round 2's independent-oracle Kimi pass found 3 residual
+  escapes — excluded single-letter small capitals, excluded multi-letter
+  ligatures, and uncovered Mc/Me marks. Round 3 replaced the ad hoc list with a
+  **reviewed manifest** (`_PHONETIC_EXT_MANIFEST`) covering all 44 codepoints in
+  U+1D00–U+1D2B — each with its Unicode name, ASCII fold target, and inclusion
+  rationale — from which the production `_CONFUSABLES` table and the
+  independent test oracle both mechanically derive (so they can no longer
+  silently drift apart); scan-only stripping extended from Mn to the full
+  Mn/Mc/Me categories, with origin-map correctness preserved and `neutralize_text`
+  (the *display* layer) deliberately left untouched — this fix is confined to
+  scan/redaction normalization, never to what a human sees rendered. New
+  false-positive fixtures (Devanagari, Tamil, Sinhala, Arabic, enclosing marks,
+  mixed-script) prove zero false PII and zero unnecessary redaction. A final
+  narrowly-scoped Kimi verification against the exact merged head, using an
+  oracle independent of the production manifest, confirmed all 19 excluded
+  single-letter glyphs, all 4 excluded ligatures, and 5 named Mc/Me repros
+  closed across all 6 real output surfaces (SARIF static + runtime, JSON audit,
+  text audit, HTML tool-call path, HTML tool-result path). **Coverage this
+  release: 704 unit tests, 58/58 redaction grill cases** (up from 52/52 at the
+  round-2 merge). Reviewed-and-curated, not exhaustive: the manifest covers the
+  obfuscation techniques it documents, not every possible Unicode substitution.
+- **HTTP-relay round-5 SSE residue + connection/header path** (0.6.8) —
   the Kimi loop's round against the residue round-4 handed off. Five fixes:
   a **terminated** oversized SSE event is now dropped from the log (round-4 only
   bounded the *unterminated* flood) so the log can't grow with the attacker;
