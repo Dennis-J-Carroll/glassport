@@ -263,3 +263,83 @@ errors across the two classes. Reachability locked separately in
 - All pass-3 renderer-boundary rows above (severity, non-string totality, hostile-dunder, split classification) are green locks in the live 34-case grill.
 
 These are tested-surface statements, not proofs of universal safety.
+
+---
+
+## Update 2026-07-13: issue #64 resolved — combining-mark + small-capital fixed
+
+Per user directive: time-boxed to an independent-oracle reachability
+determination across real attacker-controlled paths before deciding fix vs.
+narrow. **Disposition: fix.**
+
+**Reachability, established (not merely proof-read from source):** a genuinely
+independent reconstruction oracle — a separate implementation from
+`detectors._normalize_for_scan`/`_normalize_with_map` (own category-strip, own
+NFKD+NFKC, own confusable table) — was driven across two real
+attacker-controlled paths:
+
+1. `provenance.package`, via a real `package.json` through
+   `discover_deps()` → `evaluate()` (not a hand-built `ProvenanceFinding`).
+2. Ordinary MCP tool-call **arguments and results**, through the real adapter
+   (`from_mcp_session`) into `report.html` — the normalizer is shared beyond
+   provenance, exactly as flagged.
+
+Both combining-mark (a synthetic mark stapled to every character) and
+small-capital (U+1D00 block) obfuscation reconstructed in **both** surfaces.
+**`report.html` is a default, always-on artifact — not gated behind
+`--provenance`** — so this finding is broader than PASS3-2a/2b's original
+provenance-only framing.
+
+**Root cause:** confirmed via `unicodedata.decomposition()` — the entire
+U+1D00–U+1D2B block has **no decomposition at all** (these are phonetic
+IPA-extension letters, not Unicode compatibility variants), so NFKC can never
+fold them; a synthetic combining mark similarly has no compatibility mapping.
+Only a curated addition, matching the existing confusables-table pattern,
+closes this — the same shape as every prior confusables fix in this file.
+
+**Fix (`src/glassport/detectors.py`):**
+- `_CONFUSABLES` += 14 small-capital Latin letters that render as a plain
+  capital with no extra stroke/rotation (same-glyph curation rule); excludes
+  turned/sideways/barred/ligature variants in the block as visually distinct.
+- `_normalize_with_map` drops standalone combining marks (category **Mn**
+  only — not Mc, which is not the demonstrated attack and is load-bearing for
+  legitimate non-Latin orthography), same treatment as invisible chars.
+- `_spanned_original_redactions` extends a match's end boundary past a
+  **trailing** invisible/combining run — a cosmetic gap the fix's own tests
+  surfaced (no secret information either way, but keeps the redaction
+  placeholder free of stray obfuscation bytes, matching the bar the project's
+  pre-existing zwj test already set).
+
+**Verified:**
+- **False positives:** 5 real multilingual benign fixtures (IPA transcription,
+  decomposed "résumé"-style diacritics, Cyrillic stress marks, academic
+  phonetics) — zero false PII matches, zero unnecessary redactions.
+- **Performance:** linear to 2M chars (correctly capped at `MAX_SCAN_BYTES`);
+  a match-followed-by-500k-trailing-run pathological case stays under 3s — no
+  ReDoS reopened.
+- **Origin-map correctness:** dedicated test for combining-mark deletion
+  indices; all 14 confusable-table entries verified against the actual
+  committed source (not just a local snippet).
+- **Grill:** 4 new permanent rows (`ISSUE64:` prefix), using the same
+  independent oracle, across both surfaces — 38/38.
+
+**Process note — a mistake worth recording:** the first pass of every new
+artifact-boundary test (report/audit/provenance/grill) used
+`detectors._normalize_for_scan` as the "did it leak" check. That is the
+**production oracle** — the exact function this fix patches — so it was
+structurally blind to the gap it was meant to prove closed, and every one of
+those tests reported green even with the fix fully reverted. This is the
+precise trap the "independent oracle" directive exists to prevent. Caught by
+teeth-proofing every single new test (revert the fix → confirm it fails →
+restore → confirm it passes) rather than trusting the first green run; all
+tests were then rewritten against the independent oracle and re-verified.
+11 tests correctly fail with the fix reverted; all pass restored.
+
+**Disposition of every PASS3 Unicode-related row:**
+
+| ID | Prior status | Now |
+|---|---|---|
+| PASS3-2a (combining-mark in `package`) | not fixed — tracked | **FIXED** |
+| PASS3-2b (small-capital in `package`) | not fixed — tracked | **FIXED** |
+
+Issue #64 closed. 0.6.9's gate on its explicit disposition is satisfied.

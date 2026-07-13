@@ -173,6 +173,41 @@ class TestPrecisionAndEvasion(unittest.TestCase):
         prose = "Пример текста на русском языке без секретов и ключей"
         self.assertEqual(detectors._scan_pii(prose), [])
 
+    def test_combining_mark_strip_no_false_positive_on_real_multilingual_text(self):
+        # issue #64: dropping Mn marks must not manufacture a PII match out of
+        # ordinary text that legitimately carries combining diacritics —
+        # IPA transcription, decomposed (non-precomposed) accents, Cyrillic
+        # stress marks. Each of these is real-world benign content, not a
+        # synthetic worst case.
+        from glassport import detectors
+        e_acute_decomposed = "e" + "́"    # 'e' + COMBINING ACUTE ACCENT, not precomposed 'é'
+        samples = [
+            "ˈfɒː.n̩ɪtiks",                                    # IPA transcription
+            "The r" + e_acute_decomposed + "sum" + e_acute_decomposed
+                + " was excellent",                            # "résumé", decomposed
+            "приве́т мир",                                # Cyrillic + combining acute
+            "/'stɹʌ̄kt͡ʃɚ/ analysis",                # academic IPA, macron+tie-bar
+        ]
+        for text in samples:
+            self.assertEqual(detectors._scan_pii(text), [], text)
+            out = detectors.redact_secrets_strict(text)
+            self.assertEqual(out, text, text)   # unchanged: nothing to redact
+
+    def test_combining_mark_strip_is_linear_not_quadratic(self):
+        # issue #64: the trailing-run consumption added to
+        # _spanned_original_redactions must stay bounded even when a match
+        # is followed by a large invisible/combining run (the same DoS
+        # shape the PEM ReDoS fix guards against elsewhere).
+        import time
+        from glassport import detectors
+        secret = "sk-ant-api03-" + "A" * 40 + "1234567890"
+        hostile = secret + ("​" * 500_000)   # 500k trailing zero-width
+        t0 = time.perf_counter()
+        out = detectors.redact_secrets_strict(hostile)
+        elapsed = time.perf_counter() - t0
+        self.assertNotIn(secret, out)
+        self.assertLess(elapsed, 3.0, f"took {elapsed:.2f}s — possible regression")
+
 
 class TestSourceWalk(unittest.TestCase):
     def test_walk_is_a_lazy_generator(self):
@@ -218,6 +253,25 @@ class TestNormalizeWithMap(unittest.TestCase):
                   "аpple"):  # zwj-split, fullwidth, cyrillic-a
             self.assertEqual(detectors._normalize_with_map(s)[0],
                              detectors._normalize_for_scan(s))
+
+    def test_origin_map_tracks_combining_mark_deletions(self):
+        # issue #64: a standalone combining mark (Mn), like an invisible
+        # char, is dropped with no origin-map entry.
+        mark = "̲"  # COMBINING LOW LINE
+        text = "A" + mark + "B" + mark + "C"   # marks at indices 1, 3
+        norm, origin = detectors._normalize_with_map(text)
+        self.assertEqual(norm, "ABC")
+        self.assertEqual(origin, [0, 2, 4])
+
+    def test_small_capital_folds_via_confusables(self):
+        # issue #64: U+1D00 has no Unicode decomposition; only the curated
+        # table folds it. All 14 curated small capitals fold correctly.
+        pairs = {"ᴀ": "A", "ᴄ": "C", "ᴅ": "D", "ᴇ": "E", "ᴊ": "J", "ᴋ": "K",
+                "ᴍ": "M", "ᴏ": "O", "ᴘ": "P", "ᴛ": "T", "ᴜ": "U", "ᴠ": "V",
+                "ᴡ": "W", "ᴢ": "Z"}
+        for smallcap, ascii_letter in pairs.items():
+            self.assertEqual(detectors._normalize_for_scan(smallcap),
+                             ascii_letter)
 
 
 class TestScanSpanned(unittest.TestCase):

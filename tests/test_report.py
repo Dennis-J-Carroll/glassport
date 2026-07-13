@@ -253,5 +253,70 @@ class TestReportRedactsObfuscated(unittest.TestCase):
                 self.assertNotIn(_OBF_SECRET, detectors._normalize_for_scan(h), name)
 
 
+# issue #64: confirmed reconstructable pre-fix via an INDEPENDENT oracle in
+# an ordinary tool-call ARGUMENT and a tool RESULT — the normalizer glassport
+# scans with is shared beyond provenance, so this is the ordinary-MCP-traffic
+# regression lock (the reachability probe that motivated the fix).
+#
+# _issue64_independent_reconstruct is a SEPARATE implementation from
+# detectors._normalize_for_scan/_normalize_with_map (own category-strip, own
+# NFKD+NFKC, own confusable table). Using the production normalizer as the
+# oracle here would silently agree with whatever blind spot the fix has —
+# exactly the trap this helper exists to avoid.
+_ISSUE64_SECRET = "sk-ant-api03-" + "A" * 40 + "1234567890"
+_ISSUE64_SMALLCAP = {0x1D00: 'A', 0x1D04: 'C', 0x1D05: 'D', 0x1D07: 'E',
+                     0x1D0A: 'J', 0x1D0B: 'K', 0x1D0D: 'M', 0x1D0F: 'O',
+                     0x1D18: 'P', 0x1D1B: 'T', 0x1D1C: 'U', 0x1D20: 'V',
+                     0x1D21: 'W', 0x1D22: 'Z'}
+
+
+def _issue64_independent_reconstruct(text: str, secret: str) -> bool:
+    import unicodedata as ud
+    cleaned = "".join(ch for ch in text
+                      if ud.category(ch) not in ("Cf", "Cc", "Mn", "Me"))
+    norm = ud.normalize("NFKC", ud.normalize("NFKD", cleaned))
+    folded = "".join(_ISSUE64_SMALLCAP.get(ord(c), c) for c in norm)
+    return secret in folded
+
+
+class TestReportIssue64Obfuscation(unittest.TestCase):
+    def _combining(self, s):
+        return "".join(c + "̲" for c in s)   # COMBINING LOW LINE on every char
+
+    def _small_capital(self, s):
+        return s.replace("A", "ᴀ")           # U+1D00, no Unicode decomposition
+
+    def test_combining_mark_obfuscated_argument_not_reconstructable(self):
+        lines = handshake() + [
+            call(6, 3, "web_search", {"data": self._combining(_ISSUE64_SECRET)}),
+            result(7, 3, {"content": [{"type": "text", "text": "ok"}]})]
+        h = render(lines)
+        self.assertFalse(_issue64_independent_reconstruct(h, _ISSUE64_SECRET))
+
+    def test_small_capital_obfuscated_argument_not_reconstructable(self):
+        lines = handshake() + [
+            call(6, 3, "web_search", {"data": self._small_capital(_ISSUE64_SECRET)}),
+            result(7, 3, {"content": [{"type": "text", "text": "ok"}]})]
+        h = render(lines)
+        self.assertFalse(_issue64_independent_reconstruct(h, _ISSUE64_SECRET))
+
+    def test_combining_mark_obfuscated_result_not_reconstructable(self):
+        # the s2c (tool RESULT) path, a separate code path from tool args
+        lines = handshake() + [
+            call(6, 3, "web_search", {"query": "x"}),
+            result(7, 3, {"content": [{"type": "text",
+                                       "text": self._combining(_ISSUE64_SECRET)}]})]
+        h = render(lines)
+        self.assertFalse(_issue64_independent_reconstruct(h, _ISSUE64_SECRET))
+
+    def test_small_capital_obfuscated_result_not_reconstructable(self):
+        lines = handshake() + [
+            call(6, 3, "web_search", {"query": "x"}),
+            result(7, 3, {"content": [{"type": "text",
+                                       "text": self._small_capital(_ISSUE64_SECRET)}]})]
+        h = render(lines)
+        self.assertFalse(_issue64_independent_reconstruct(h, _ISSUE64_SECRET))
+
+
 if __name__ == "__main__":
     unittest.main()

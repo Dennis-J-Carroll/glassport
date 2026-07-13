@@ -473,6 +473,42 @@ class TestProvenanceFieldReachability(unittest.TestCase):
                          "declared dependency not found in the npm registry "
                          "(possible typosquat or private-name confusion)")
 
+    def test_obfuscated_package_from_real_manifest_not_reconstructable_end_to_end(self):
+        # issue #64, closed: the same reachable path as the test above, now
+        # driven all the way through to the SARIF artifact — a real hostile
+        # package.json, through discover_deps() -> evaluate() ->
+        # sarif.render_sarif(), with no reconstructable secret at the end.
+        #
+        # Uses an INDEPENDENT oracle (own category-strip, own NFKD+NFKC, own
+        # confusable table) — NOT detectors._normalize_for_scan, which shares
+        # the fix's own normalizer and would be blind to its own gap.
+        import unicodedata
+        from glassport import sarif as sarif_mod
+        from glassport.audit import Report
+        smallcap = {0x1D00: 'A', 0x1D04: 'C', 0x1D05: 'D', 0x1D07: 'E',
+                   0x1D0A: 'J', 0x1D0B: 'K', 0x1D0D: 'M', 0x1D0F: 'O',
+                   0x1D18: 'P', 0x1D1B: 'T', 0x1D1C: 'U', 0x1D20: 'V',
+                   0x1D21: 'W', 0x1D22: 'Z'}
+
+        def independent_reconstruct(text, secret):
+            cleaned = "".join(ch for ch in text if unicodedata.category(ch)
+                              not in ("Cf", "Cc", "Mn", "Me"))
+            norm = unicodedata.normalize(
+                "NFKC", unicodedata.normalize("NFKD", cleaned))
+            folded = "".join(smallcap.get(ord(c), c) for c in norm)
+            return secret in folded
+
+        secret = "sk-ant-api03-" + "A" * 40 + "1234567890"
+        for name, obf in (
+            ("combining", "".join(c + "̲" for c in secret)),
+            ("small_capital", secret.replace("A", "ᴀ")),
+        ):
+            findings = self._findings_from_manifest(obf)
+            report = Report(profile={"name": "demo"}, findings=[], deductions=[],
+                            score=50, grade="F", provenance=findings)
+            doc = sarif_mod.render_sarif(report)
+            self.assertFalse(independent_reconstruct(doc, secret), name)
+
 
 if __name__ == "__main__":
     unittest.main()

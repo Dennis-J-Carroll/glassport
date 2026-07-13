@@ -16,6 +16,8 @@ from glassport.audit import Finding, Report, render_json, render_text
 from glassport.provenance import ProvenanceFinding
 from glassport import sarif
 from glassport import detectors
+from glassport.adapters.mcp_session import from_mcp_session
+from glassport import report as report_mod
 
 
 CASES: list[tuple[str, Callable[[], tuple[bool, str]]]] = []
@@ -39,6 +41,59 @@ def _live_secret():
 
 def _leaks(artifact: str, secret: str) -> bool:
     return secret in detectors._normalize_for_scan(artifact)
+
+
+def _L(seq: int, direction: str, frame: dict) -> str:
+    return json.dumps({"schema_version": "0.1", "seq": seq, "ts": f"t{seq}",
+                       "dir": direction, "frame": frame, "raw": None})
+
+
+def _handshake() -> list[str]:
+    # Mirrors tests/test_detectors.py::handshake() exactly, including the
+    # tool's inputSchema — that schema is load-bearing: calling with an
+    # argument shape outside it (e.g. "data" when only "query"/"limit" are
+    # declared, additionalProperties: False) triggers a schema-violation
+    # annotation, and glassport's own report renders the flagged event's
+    # raw content into a <pre> block for the analyst to review. THAT
+    # rendering (via report.py's per-event content dump) is the real
+    # attacker-reachable surface issue #64 closes; a tool declared with no
+    # schema at all never reaches this render path, silently hiding the bug.
+    return [
+        _L(1, "c2s", {"jsonrpc": "2.0", "id": 1, "method": "initialize",
+                     "params": {"protocolVersion": "2025-03-26",
+                                "capabilities": {},
+                                "clientInfo": {"name": "grill"}}}),
+        _L(2, "s2c", {"jsonrpc": "2.0", "id": 1,
+                     "result": {"protocolVersion": "2025-03-26",
+                                "capabilities": {"tools": {}},
+                                "serverInfo": {"name": "grill-server"}}}),
+        _L(3, "c2s", {"jsonrpc": "2.0", "method": "notifications/initialized"}),
+        _L(4, "c2s", {"jsonrpc": "2.0", "id": 2, "method": "tools/list"}),
+        _L(5, "s2c", {"jsonrpc": "2.0", "id": 2,
+                     "result": {"tools": [{
+                         "name": "web_search",
+                         "inputSchema": {
+                             "type": "object",
+                             "properties": {"query": {"type": "string"},
+                                           "limit": {"type": "integer"}},
+                             "required": ["query"],
+                             "additionalProperties": False}}]}}),
+    ]
+
+
+def _call(seq: int, rid: int, name: str, arguments: dict) -> str:
+    return _L(seq, "c2s", {"jsonrpc": "2.0", "id": rid, "method": "tools/call",
+                          "params": {"name": name, "arguments": arguments}})
+
+
+def _result(seq: int, rid: int, payload: dict) -> str:
+    return _L(seq, "s2c", {"jsonrpc": "2.0", "id": rid, "result": payload})
+
+
+def _render_report(lines: list[str]) -> str:
+    trace = from_mcp_session(lines)
+    detectors.annotate(trace)
+    return report_mod.render_html(trace, source_name="grill.jsonl")
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -718,6 +773,125 @@ def pass3_split_package_detail_classified():
 
 CASES.append(("PASS3: package/detail split classified (not currently reachable)",
               pass3_split_package_detail_classified))
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# ISSUE #64 — combining-mark and small-capital (U+1D00) Unicode-normalization
+# gap, closed. Confirmed reconstructable pre-fix via an INDEPENDENT oracle
+# (deliberately not reusing glassport's own normalizer — a shared-normalizer
+# oracle would agree with a blind spot in the thing under test) across both
+# the provenance->SARIF/JSON/text path AND ordinary MCP tool-call arguments
+# AND results rendered into report.html — the normalizer is shared beyond
+# provenance, so both surfaces are locked here.
+#
+# _independent_reconstruct is a SEPARATE implementation from
+# detectors._normalize_for_scan/_normalize_with_map (own category-strip,
+# own NFKD+NFKC, own confusable table built from scratch) — using the
+# production normalizer as the oracle here would silently agree with
+# whatever blind spot the fix has, exactly the trap this section exists to
+# avoid. It matches the oracle already proven against these two glyph
+# classes during the fix's own investigation.
+# ═══════════════════════════════════════════════════════════════════════════
+import unicodedata as _unicodedata
+import re as _re
+
+_INDEP_SMALLCAP = {0x1D00: 'A', 0x1D04: 'C', 0x1D05: 'D', 0x1D07: 'E',
+                  0x1D0A: 'J', 0x1D0B: 'K', 0x1D0D: 'M', 0x1D0F: 'O',
+                  0x1D18: 'P', 0x1D1B: 'T', 0x1D1C: 'U', 0x1D20: 'V',
+                  0x1D21: 'W', 0x1D22: 'Z'}
+
+
+def _independent_reconstruct(text: str, secret: str) -> bool:
+    cleaned = "".join(ch for ch in text
+                      if _unicodedata.category(ch) not in ("Cf", "Cc", "Mn", "Me"))
+    norm = _unicodedata.normalize(
+        "NFKC", _unicodedata.normalize("NFKD", cleaned))
+    folded = "".join(_INDEP_SMALLCAP.get(ord(c), c) for c in norm)
+    if secret in folded:
+        return True
+    loose = _re.sub(r"[^A-Za-z0-9]", "", folded)
+    loose_secret = _re.sub(r"[^A-Za-z0-9]", "", secret)
+    return loose_secret in loose
+
+
+def issue64_combining_mark_in_tool_argument():
+    secret = _live_secret()
+    obf = "".join(c + "̲" for c in secret)   # COMBINING LOW LINE on every char
+    lines = _handshake() + [
+        _call(6, 3, "web_search", {"data": obf}),
+        _result(7, 3, {"content": [{"type": "text", "text": "ok"}]})]
+    html = _render_report(lines)
+    if _independent_reconstruct(html, secret):
+        return False, "issue #64 CONFIRMED: combining-mark tool argument leaks into report.html"
+    return True, "combining-mark tool argument green"
+
+
+CASES.append(("ISSUE64: combining-mark obfuscated tool argument in report.html",
+              issue64_combining_mark_in_tool_argument))
+
+
+def issue64_combining_mark_in_tool_result():
+    secret = _live_secret()
+    obf = "".join(c + "̲" for c in secret)
+    lines = _handshake() + [
+        _call(6, 3, "web_search", {"query": "x"}),
+        _result(7, 3, {"content": [{"type": "text", "text": obf}]})]
+    html = _render_report(lines)
+    if _independent_reconstruct(html, secret):
+        return False, "issue #64 CONFIRMED: combining-mark tool result leaks into report.html"
+    return True, "combining-mark tool result green"
+
+
+CASES.append(("ISSUE64: combining-mark obfuscated tool result in report.html",
+              issue64_combining_mark_in_tool_result))
+
+
+def issue64_small_capital_in_tool_argument():
+    secret = _live_secret()
+    obf = secret.replace("A", "ᴀ")   # U+1D00, no Unicode decomposition
+    lines = _handshake() + [
+        _call(6, 3, "web_search", {"data": obf}),
+        _result(7, 3, {"content": [{"type": "text", "text": "ok"}]})]
+    html = _render_report(lines)
+    if _independent_reconstruct(html, secret):
+        return False, "issue #64 CONFIRMED: small-capital tool argument leaks into report.html"
+    return True, "small-capital tool argument green"
+
+
+CASES.append(("ISSUE64: small-capital obfuscated tool argument in report.html",
+              issue64_small_capital_in_tool_argument))
+
+
+def issue64_provenance_combining_mark_end_to_end():
+    """Real manifest -> discover_deps() -> evaluate() -> SARIF, not a
+    hand-built ProvenanceFinding. Closes the loop from the reachability
+    proof to the actual artifact."""
+    import shutil
+    import tempfile
+    from datetime import datetime, timezone
+    from pathlib import Path
+    from glassport.provenance import discover_deps, evaluate, Fetched
+
+    secret = _live_secret()
+    obf = "".join(c + "̲" for c in secret)
+    d = Path(tempfile.mkdtemp())
+    try:
+        (d / "package.json").write_text(
+            json.dumps({"dependencies": {obf: "1.0.0"}}), encoding="utf-8")
+        deps = discover_deps(d)
+        findings = evaluate(deps[0], Fetched(status="not_found", payload={}),
+                            now=datetime.now(timezone.utc))
+        report = _report(provenance=findings)
+        doc = sarif.render_sarif(report)
+        if _independent_reconstruct(doc, secret):
+            return False, "issue #64 CONFIRMED: real-manifest combining-mark leaks into SARIF"
+        return True, "real-manifest combining-mark provenance green"
+    finally:
+        shutil.rmtree(d)
+
+
+CASES.append(("ISSUE64: real-manifest combining-mark obfuscated package -> SARIF",
+              issue64_provenance_combining_mark_end_to_end))
 
 
 # ═══════════════════════════════════════════════════════════════════════════
