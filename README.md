@@ -18,7 +18,7 @@
 </p>
 
 <p align="center">
-A passive stdio proxy and behavioral analysis toolkit for the <a href="https://modelcontextprotocol.io">Model Context Protocol</a> ecosystem.<br>
+A passive stdio and Streamable HTTP proxy and behavioral analysis toolkit for the <a href="https://modelcontextprotocol.io">Model Context Protocol</a> ecosystem.<br>
 See what an MCP server <em>actually does</em>, not just what it declares.
 </p>
 
