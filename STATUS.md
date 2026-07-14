@@ -185,17 +185,7 @@ Roughly in dependency order — earlier unlocks later.
 
 ## Next action
 
-**Released 0.6.5; 0.6.6 (relay round-3) in this PR.** `0.6.5` is live on PyPI
-(relay hardening R1–R3 + response Content-Length framing, PR #53); `0.6.4` shipped
-H1.08 coverage/e2e + H2.03 `audit --provenance`. **H2.01 streamable-HTTP tap**
-(`wrap --transport http --url`) is **merged to main** (PR #51) — passive MITM over
-Streamable-HTTP (POST/GET/SSE), trace-identical to stdio, fail-open — and now
-hardened by the round-2/round-3 relay work above.
-
-Next: the open relay surfaces are handed to the **Kimi loop** in
-`dogfood/SPEC-http-relay-redteam.md` (SSE stream abuse, connection/hop-by-hop).
-On the roadmap: **gate over HTTP**
-(active c2s blocking on the HTTP path — H2.01 shipped passive only), the
-**streaming-detector path** (frame-at-a-time analysis), **H2.06 property-based
-validator tests** (`hypothesis` dev-dep already merged), and GitHub provenance
-(follow-up to H2.03).
+- **0.6.9 released and stabilizing**
+- next RFC: streaming detector path
+- subsequent prototype: read-only observatory
+- later: HTTP enforcement parity
