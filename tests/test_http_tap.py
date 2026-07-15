@@ -19,6 +19,7 @@ from unittest import mock
 
 from glassport.adapters.mcp_http import run_http_tap
 from glassport.adapters.mcp_session import from_mcp_session_file
+from glassport.detectors import annotate
 from glassport.interaction_trace import EventKind
 
 
@@ -260,6 +261,99 @@ class TestHttpTapParity(unittest.TestCase):
         self.assertIn("search", [n for _, n in trace.called_tools()])
         self.assertEqual(trace.fabricated_tool_calls(), [])     # legit call, not fabricated
         self.assertTrue(any(e.kind == EventKind.TOOL_RESULT for e in trace.events))
+
+
+class _SseNamedRemote(BaseHTTPRequestHandler):
+    """Streamable-HTTP remote that frames every JSON-RPC response as an SSE
+    event carrying an ``event:`` field and an ``id:`` field — the default
+    framing emitted by the official Python MCP SDK's
+    ``FastMCP(...).run(transport='streamable-http')``."""
+
+    def log_message(self, *args, **kwargs):
+        pass
+
+    def do_POST(self):
+        n = int(self.headers.get("Content-Length", 0) or 0)
+        body = json.loads(self.rfile.read(n) or b"{}")
+        method, rid = body.get("method"), body.get("id")
+        if method == "initialize":
+            result = {"protocolVersion": "2025-06-18", "capabilities": {},
+                      "serverInfo": {"name": "mock"}}
+        elif method == "tools/list":
+            result = {"tools": [{"name": "search"}]}
+        elif method == "tools/call":
+            # Intentionally leak a credential-like string in the result so the
+            # pii_in_result detector can prove it sees the tool result.
+            result = {"content": [{"type": "text",
+                                   "text": "leaked sk-proj-"
+                                            "ABCDEFGHIJKLMNOPQRSTUVWXYZ123456"
+                                            "7890 secret"}]}
+        else:
+            result = {}
+        out = json.dumps({"jsonrpc": "2.0", "id": rid, "result": result}).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.end_headers()
+        self.wfile.write(
+            b"event: message\n"
+            b"id: " + str(rid).encode() + b"\n"
+            b"data: " + out + b"\n\n")
+        self.wfile.flush()
+
+
+class TestHttpTapNamedSse(unittest.TestCase):
+    """Named-event SSE framing must not degrade s2c JSON-RPC frames to raw
+    MESSAGE events: tools/list, tools/call, and detectors that rely on
+    parsed tool results must still work."""
+
+    def setUp(self):
+        self.logdir = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: shutil.rmtree(self.logdir))
+
+    def test_named_sse_frames_are_parsed_and_tool_results_visible(self):
+        remote = _serve(_SseNamedRemote)
+        rh, rp = remote.server_address
+        proxy = _start_proxy(f"http://{rh}:{rp}/mcp", self.logdir)
+        ph, pp = proxy.server_address
+        url = f"http://{ph}:{pp}/mcp"
+        try:
+            _post(url, {"jsonrpc": "2.0", "id": 0, "method": "initialize"})
+            _post(url, {"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+            _post(url, {"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                        "params": {"name": "search", "arguments": {}}})
+        finally:
+            proxy.shutdown(); proxy.server_close()
+            remote.shutdown(); remote.server_close()
+
+        logs = list(self.logdir.glob("*.jsonl"))
+        self.assertTrue(logs, "no session log written")
+        trace = from_mcp_session_file(str(logs[0]))
+
+        # The declared surface must be harvested even though the response was
+        # wrapped in ``event: message``.
+        self.assertIn("search", trace.declared_tools())
+        # The call must correlate with the declared surface, not be flagged as
+        # fabricated.
+        self.assertEqual(trace.fabricated_tool_calls(), [])
+        self.assertIn("search", [n for _, n in trace.called_tools()])
+        # The result must be visible as a real TOOL_RESULT event.
+        self.assertTrue(any(e.kind == EventKind.TOOL_RESULT for e in trace.events))
+
+        # Confirm the raw log entries are no longer ``frame: null``.
+        text = logs[0].read_text(encoding="utf-8")
+        s2c = [json.loads(ln) for ln in text.splitlines()
+               if '"dir": "s2c"' in ln]
+        for entry in s2c:
+            self.assertIsInstance(entry.get("frame"), dict,
+                                  "s2c entry was logged unparsed")
+
+        # Detectors that depend on parsed tool results must fire.
+        annotations = annotate(trace)
+        subs = {a.subcategory for a in annotations}
+        self.assertIn("pii_in_result_openai_key", subs,
+                      "pii_in_result detector missed a secret in a tool result")
+        self.assertNotIn("fabricated_tool_call", subs,
+                         "legitimate tool call was falsely flagged as fabricated")
 
 
 class TestHttpTapFailOpen(unittest.TestCase):
