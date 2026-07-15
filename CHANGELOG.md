@@ -6,6 +6,23 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versions follow 
 
 ## [Unreleased]
 
+### Fixed
+- preserve named-event SSE metadata without losing parseable JSON-RPC frame
+
+### Changed
+- HTTP tap loses tools/list + result correlation on named-event SSE
+
+### Documentation
+- HTTP-inclusive tagline + refresh STATUS 'Next action'
+- correct stale 'remote HTTP interception' future-work claims
+- clarify oracle independence + record perf-methodology follow-up
+
+### Internal
+- loosen incremental-poll wall-clock bound to 1.5s
+- loosen incremental-poll wall-clock bound to 1.5s
+
+## [0.6.9] - 2026-07-13
+
 ### Added
 - SessionLog.file_mode/close for permission verification
 - char-indexed normalization with origin map
@@ -22,6 +39,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versions follow 
 - span-aware redaction removes obfuscated secrets
 
 ### Changed
+- 0.6.9 — version bump + truthfulness pass
 - open_session_log verifies mode + degrades (HTTP like stdio)
 - Update README.md
 - reject empty/partial userinfo in remote URL

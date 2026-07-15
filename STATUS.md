@@ -1,10 +1,11 @@
 # glassport — project status
 
 Living snapshot of what's built, what's built-but-unshipped, and what's next.
-Update when a tier changes. Last updated: 2026-07-13 (0.6.9 — issue #64 closed: a
-reviewed U+1D00–U+1D2B phonetic-extension manifest plus Mn/Mc/Me combining-mark
-scan stripping, closing a credential-obfuscation gap found by independent
-red-team verification. See "Recently shipped" below for the full round-3 story).
+Update when a tier changes. Last updated: 2026-07-15 (0.6.10 — HTTP tap fix:
+named-event SSE framing no longer blinds declared-tools tracking or the
+pii_in_result_* detector on Streamable-HTTP servers, found by dogfooding
+glassport against real remote servers rather than synthetic fixtures. See
+"Recently shipped" below).
 
 ## Tier 1 — Built, tested, in the repo
 
@@ -32,9 +33,10 @@ Source is the truth; this is the index.
 
 ## Tier 2 — Built but NOT shipped to PyPI
 
-**Empty — `pip install glassport` serves 0.6.9** (published via tag-triggered
-trusted publishing, tag `v0.6.9`). 0.6.9 closes issue #64 (see "Recently
-shipped"). 0.6.3 was the Kimi round-2 renderer hardening (PR #33): shared
+**Empty — `pip install glassport` serves 0.6.10** (published via tag-triggered
+trusted publishing, tag `v0.6.10`). 0.6.10 fixes the HTTP tap's named-event
+SSE blind spot (see "Recently shipped"); 0.6.9 closed issue #64. 0.6.3 was the
+Kimi round-2 renderer hardening (PR #33): shared
 `detectors.neutralize_text` NFKC-folds fullwidth + math-alphanumeric
 homoglyphs, reveals exotic whitespace (Zs/Zl/Zp), collapses Zalgo runs in two
 passes so a ZWJ interleave can't reset the counter, plus a `stripe_key`
@@ -88,6 +90,27 @@ Roughly in dependency order — earlier unlocks later.
 
 ## Recently shipped
 
+- **HTTP tap named-event SSE framing fix** (0.6.10, PR #73) — found by
+  dogfooding glassport against five real MCP servers (three stdio, two
+  Streamable-HTTP) rather than only synthetic test fixtures. Any server
+  framing its SSE responses with a named `event:` field — the default for
+  `FastMCP(...).run(transport="streamable-http")` in the official Python
+  SDK — caused `_log_sse_event` to log the entire raw SSE event text instead
+  of just the JSON-RPC payload; that text fails `json.loads`, so every
+  s2c response degraded to an unparsed `MESSAGE` event. Blast radius,
+  confirmed independently: `declared_tools()` went blind, every `tools/call`
+  was flagged `fabricated_tool_call` (100% false-positive on affected
+  servers), `schema_violation`/`surface_change` went blind, and —
+  the one that actually matters — `pii_in_result_*` could not fire on a
+  secret leaked back in a tool result over this framing. `unexpected_egress_host`
+  and argument-side PII detection were unaffected (they read c2s frames, not
+  s2c). Fix: `_log_sse_event` now extracts and logs the JSON-RPC `data:`
+  payload as a structured frame even when SSE metadata is present; the
+  metadata itself (`event`/`id`/`retry`) is preserved separately via a new
+  `sse_meta` field rather than smashed into one unparseable raw string.
+  Independently teeth-proofed (not just self-reported): reverting the fix
+  reproduces the exact original bug (`declared_tools()` empty); restoring
+  returns it to populated + correlated. 705 tests OK.
 - **Issue #64 — reviewed phonetic-extension manifest + Mn/Mc/Me mark stripping**
   (0.6.9, PR #67) — an independent Kimi red-team pass found that combining-mark
   and U+1D00 (Latin Extended Additional / phonetic extensions) obfuscation could
