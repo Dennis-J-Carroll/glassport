@@ -115,13 +115,19 @@ class SessionLog:
             return None
 
     def record(self, direction: str, line: bytes,
-               gate: dict | None = None) -> None:
+               gate: dict | None = None,
+               metadata: dict | None = None) -> None:
         """Log one wire line. Never raises — relay must outlive logging.
 
         `gate` marks frames the gate acted on: {"action": "blocked"} on a
         c2s frame the server never received, {"action": "injected"} on an
         s2c frame the server never sent. Optional field — schema 0.1 logs
         without it stay readable, readers without it stay correct.
+
+        `metadata` carries transport-level annotations that must not be
+        smashed into the parseable frame. For SSE it holds fields such as
+        ``event``, ``id``, and ``retry`` so the JSON-RPC payload can still
+        be logged as a structured ``frame``.
         """
         try:
             text = line.decode("utf-8", errors="replace").rstrip("\r\n")
@@ -142,6 +148,8 @@ class SessionLog:
                 }
                 if gate is not None:
                     entry["gate"] = gate
+                if metadata is not None:
+                    entry["sse_meta"] = metadata
                 self._fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
         except Exception:
             pass  # logging is best-effort; the relay is sacred

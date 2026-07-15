@@ -193,15 +193,39 @@ _RELAY_CHUNK = 65536          # stream bodies in bounded chunks, never all at on
 _HANDLER_TIMEOUT = 30         # drop a stalled client so it can't pin a thread
 
 
+def _extract_sse_meta(event: bytes) -> dict[str, str]:
+    """Return the transport metadata fields of an SSE event.
+
+    Only ``event:``, ``id:``, and ``retry:`` are captured; values are
+    stripped of the optional leading space and returned as strings. Unknown
+    fields are ignored, matching the framing logic in `_log_sse_event`.
+    """
+    meta: dict[str, str] = {}
+    for raw in event.split(b"\n"):
+        if raw.endswith(b"\r"):
+            raw = raw[:-1]
+        if raw.startswith(b"event:"):
+            meta["event"] = raw[6:].lstrip(b" ").decode("utf-8", errors="replace")
+        elif raw.startswith(b"id:"):
+            meta["id"] = raw[3:].lstrip(b" ").decode("utf-8", errors="replace")
+        elif raw.startswith(b"retry:"):
+            meta["retry"] = raw[6:].lstrip(b" ").decode("utf-8", errors="replace")
+    return meta
+
+
 def _log_sse_event(event: bytes, log: SessionLog, *, partial: bool = False) -> None:
-    """Log one SSE event. data: lines are joined with \\n; if the event carries
-    event:/id:/retry: fields (or is an over-limit partial flush) the full event
-    text is logged as raw so transport metadata is not silently discarded."""
+    """Log one SSE event. data: lines are joined with \\n.
+
+    If the event carries event:/id:/retry: fields, the JSON-RPC payload in
+    the data: lines is still logged as a structured frame, and the SSE
+    metadata is preserved in a separate ``sse_meta`` field. Over-limit
+    partial flushes continue to be logged raw for forensics.
+    """
     if not event or event.strip() == b"":
         return
     lines = event.split(b"\n")
     data_lines: list[bytes] = []
-    has_meta = partial
+    has_meta = False
     for raw in lines:
         if raw.endswith(b"\r"):
             raw = raw[:-1]
@@ -215,9 +239,12 @@ def _log_sse_event(event: bytes, log: SessionLog, *, partial: bool = False) -> N
         log.record("s2c", event)
         return
     payload = b"\n".join(data_lines)
-    if has_meta:
-        # Preserve metadata by logging the full reconstructed event text.
+    if partial:
+        # Preserve the full raw text for an unterminated/overflow event.
         log.record("s2c", event)
+    elif has_meta:
+        # Preserve metadata separately so the data payload stays parseable.
+        log.record("s2c", payload, metadata=_extract_sse_meta(event))
     else:
         log.record("s2c", payload)
 
