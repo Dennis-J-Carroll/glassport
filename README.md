@@ -724,6 +724,3 @@ glassport/
 ```
 
 ---
-
-*Glassport — Dennis J. Carroll · 2026*  
-*"See what's inside before you open it."*
