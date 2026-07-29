@@ -1,0 +1,7 @@
+session: example.jsonl
+frames parsed:    7
+declared tools:   ['search']
+called tools:     ['search']
+unused declared:  —
+fabricated calls: none
+context violations: none

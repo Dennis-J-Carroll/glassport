@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
+  "version": "2.1.0",
+  "runs": [
+    {
+      "tool": {
+        "driver": {
+          "name": "glassport",
+          "version": "0.2.0",
+          "semanticVersion": "0.2.0",
+          "informationUri": "https://github.com/Dennis-J-Carroll/glassport",
+          "rules": []
+        }
+      },
+      "results": [],
+      "columnKind": "utf16CodeUnits",
+      "properties": {
+        "session": "example.jsonl",
+        "annotation_count": 0
+      }
+    }
+  ]
+}

@@ -1,0 +1,8 @@
+{
+  "task": "T04",
+  "status": "completed",
+  "timestamp": "2026-07-17T21:31:00Z",
+  "rows_appended": 11,
+  "matrix_file": "dogfood/stabilization/compatibility-0610.json",
+  "summary_file": "dogfood/stabilization/stdio-matrix-0610.json"
+}
