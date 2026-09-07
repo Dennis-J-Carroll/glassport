@@ -233,17 +233,9 @@ def context_violations(trace: InteractionTrace) -> list[Annotation]:
 
 
 def fabricated_calls(trace: InteractionTrace) -> list[Annotation]:
-    """trace.fabricated_tool_calls() lifted into annotations."""
-    events_by_id = {e.id: e for e in trace.events}
-    out = []
-    for event_id, name in trace.fabricated_tool_calls():
-        out.append(_ann(
-            events_by_id[event_id], AnnotationKind.HALLUCINATION,
-            "fabricated_tool_call",
-            f"tools/call '{name}' is outside the declared surface",
-            severity=3, category=HallucinationCategory.TOOL_USE,
-            no_declaration_seen=False, tool=name))
-    return out
+    """Batch compatibility wrapper over the incremental fabricated-call pass."""
+    from glassport.incremental import FabricatedCallsDetector, replay
+    return replay(trace, [FabricatedCallsDetector()])
 
 
 def gate_actions(trace: InteractionTrace) -> list[Annotation]:

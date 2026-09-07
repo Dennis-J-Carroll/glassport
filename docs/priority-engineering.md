@@ -134,3 +134,34 @@ use their existing batch semantics until their separate migration stages.
 
 **Next dependency.** One streaming fabricated-call detector can now consume
 the exact same session facts used by trace queries and batch replay.
+
+## Stage 4 — Streaming lifecycle and first detector
+
+**What / why.** `incremental.py` introduces session-scoped `StreamingDetector`
+instances, `DetectorEngine.on_event(event, state)`, and idempotent `finish(state)`.
+Only `FabricatedCallsDetector` is migrated in this stage. It returns a finding
+as soon as a call outside a known surface is observed. Batch `fabricated_calls()`
+replays the same implementation; `annotate(trace)` remains supported.
+
+**Files / tests.** `incremental.py` owns lifecycle and fault isolation;
+`detectors.py` keeps the batch entry point. Nine tests in
+`test_incremental_detectors.py` compare batch/event/live-frame results using
+every semantic annotation field, including explanation, metadata, annotator,
+severity, category, and event linkage. Only generated IDs and incidental result
+ordering are normalized. Correctness cases separately assert immediate output
+and the declaration sequence supporting it. Fault-isolation cases cover errors
+with unsafe `__str__`, finish failures, session identity, and repeated finish.
+
+**Validation.** Full suite: 752 tests, OK. Expanded core coverage gate passes.
+No context, schema, or PII detector was migrated before this slice passed.
+
+**Compatibility / risks.** Findings gain `declaration_seq` for replayable
+supporting evidence. Engine construction starts a session; it retains detector
+instances and a reference to bounded state, but no event/annotation history.
+Callers pass state after ingestion; the engine does not double-fold it.
+Detector failures are event-linked diagnostics with exception type, never raw
+exception text. The engine has no transport handle or block/forward operation.
+Existing file-poll UI analysis still reruns the remaining batch detectors.
+
+**Next dependency.** Context/schema migration can now use the same lifecycle
+and permanent parity harness, with chronological semantics explicitly tested.
