@@ -91,3 +91,46 @@ framing/programming exceptions still propagate as before, with deterministic
 cleanup; ordinary logger write failures remain fail-open. No HTTP gate was
 introduced. Both correctness fixes are now independently tested, unlocking
 the incremental session foundation.
+
+## Stage 3 — Incremental session foundation
+
+**What / why.** Public `MCPTraceBuilder.ingest_frame(entry)` extends the
+existing parser and returns each event immediately. `SessionState.observe()`
+folds normalized evidence into initialization, client/server capabilities,
+list-request state, current schemas/surface, and the first complete surface.
+Gate evidence is stamped immediately, rather than rescanning and rewriting
+historical events on every snapshot. There is no detection or policy here.
+
+**Files.** New `session.py` owns the bounded evidence projection;
+`adapters/mcp_session.py` owns direction-aware correlation and normalization;
+trace declaration queries replay the same state. `test_incremental_session.py`
+locks the contract; the coverage workflow now includes `session.py`.
+
+**Bounds.** Defaults: 4096 pending IDs per direction, 4096 tool definitions,
+1,000,000 serialized bytes per retained metadata/declaration value, and 1024
+characters per retained name/cursor/ID. Integer correlation IDs are capped at
+128 bits. Oldest pending entries are evicted and the triggering event records
+`correlation_limited`; later unmatched replies remain observable as orphaned.
+Oversized declarations become unknown, with a fixed `limit_reasons` code.
+Only current definitions, the first surface, and one bounded pagination chain
+are retained. Partial or mismatched pagination cannot prove exclusion.
+
+**Tests / validation.** Twelve new tests cover prefix-by-prefix batch/ingest
+equivalence, immediate gate evidence, evidence/state isolation, no-history
+mode over 1000 calls, directional eviction, hostile IDs, declaration/schema
+limits, pagination completion/mismatch, initialization order, and raw entries.
+Full suite: 743 tests, OK; core coverage 93% (`session.py`: 88%). Streaming
+adversarial grill passed.
+
+**Compatibility / risks.** `_TraceBuilder` remains an alias and `feed()`
+remains supported. Existing report/file callers retain complete history by
+default; this explicitly requested retention is not a constant-memory claim.
+Use `retain_events=False` for bounded live ingestion and persist wire entries
+separately. Its snapshot contains current state, not a forensic event archive.
+Custom limits are recorded in snapshot metadata and must be supplied when
+replaying original wire entries. Pagination and malformed/oversized declarations
+now use conservative unknown semantics. Context/schema and PII detectors still
+use their existing batch semantics until their separate migration stages.
+
+**Next dependency.** One streaming fabricated-call detector can now consume
+the exact same session facts used by trace queries and batch replay.

@@ -221,12 +221,14 @@ class InteractionTrace:
 
     def declared_surface(self) -> Optional[set[str]]:
         """None = unknown; set() = explicitly empty; nonempty = known names."""
-        surface = self._initial_surface()
+        from glassport.session import SessionState
+        if self.metadata.get("history_retained") is False:
+            surface = self.metadata.get("current_surface")
+            return set(surface) if surface is not None else None
+        state = SessionState.from_trace(self)
         for event in self.events:
-            tools = tool_declaration(event)
-            if tools is not None:
-                surface = {t["name"] for t in tools}
-        return surface
+            state.observe(event)
+        return set(state.surface) if state.surface is not None else None
 
     def called_tools(self) -> list[tuple[str, str]]:
         out = []
@@ -239,12 +241,12 @@ class InteractionTrace:
 
     def fabricated_tool_calls(self) -> list[tuple[str, str]]:
         """Calls excluded by the declaration observed *at the time of the call*."""
-        declared = self._initial_surface()
+        from glassport.session import SessionState
+        state = SessionState.from_trace(self)
         out = []
         for event in self.events:
-            tools = tool_declaration(event)
-            if tools is not None:
-                declared = {t["name"] for t in tools}
+            state.observe(event)
+            declared = state.surface
             if event.kind == EventKind.TOOL_CALL and declared is not None:
                 for part in event.parts:
                     if part.kind == PartKind.TOOL_USE and part.content["name"] not in declared:

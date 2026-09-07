@@ -15,9 +15,9 @@ mapping is deliberately modest and honest about its blind spots:
 
   * The CLIENT is modeled as an AGENT actor. It is the thing that emits
     tool calls, so for the purposes of called_tools() it plays the agent.
-  * The SERVER is modeled as a TOOL actor. Its declared surface comes
-    from the tools/list response, stored on the actor so declared_tools()
-    works with no AgentCard present.
+  * The SERVER is modeled as an EXTERNAL actor hosting tools. Its surface
+    comes from correlated tools/list results, published in actor metadata
+    and reconstructed in wire order by SessionState.
   * tools/call (c2s)      -> TOOL_CALL event
   * the matching result (s2c) -> TOOL_RESULT event, parent = the call
   * JSON-RPC errors (s2c) -> TOOL_RESULT event flagged is_error, OR a
@@ -40,14 +40,18 @@ run on top. Keep the ingest dumb and the analysis separate.
 from __future__ import annotations
 
 import json
+from collections import OrderedDict
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
 from glassport.interaction_trace import (
     Actor, Event, Part, InteractionTrace,
     ProtocolKind, ActorKind, EventKind, PartKind, TaskState,
-    _new_id, tool_declaration,
+    _new_id,
 )
+
+from glassport.session import SessionLimits, SessionState, bounded_copy
 
 
 def _iter_entries(source: Iterable[str]) -> Iterable[dict]:
@@ -71,17 +75,23 @@ def _iter_entries(source: Iterable[str]) -> Iterable[dict]:
         yield entry
 
 
-class _TraceBuilder:
-    """The from_mcp_session fold, with its accumulator state explicit so
-    it can be fed incrementally (adapters/streaming.py) or all at once
-    (from_mcp_session). feed() consumes one log entry; snapshot() makes
-    the current state visible as an InteractionTrace — the same trace
-    object every time, updated in place, so a live consumer can hold it."""
+class MCPTraceBuilder:
+    """Incremental MCP evidence normalization and bounded session facts.
+
+    ingest_frame() returns the newly observed event; snapshot() keeps the
+    same InteractionTrace object. History retention defaults on for existing
+    file/report consumers. Use retain_events=False for bounded live analysis.
+    """
 
     def __init__(self,
                  server_name: str = "mcp_server",
                  client_name: str = "mcp_client",
-                 user_intent: Optional[str] = None) -> None:
+                 user_intent: Optional[str] = None, *,
+                 retain_events: bool = True,
+                 limits: SessionLimits | None = None) -> None:
+        self.state = SessionState(limits)
+        self.retain_events = retain_events
+        self.correlation_evictions = 0
         self.client = Actor.agent(client_name)  # the caller == agent surface
         # The server HOSTS tools; it is not itself a callable tool. Modeling
         # it as TOOL would leak its name into declared_tools(). EXTERNAL is
@@ -95,27 +105,77 @@ class _TraceBuilder:
         # and id 1 from the server are different requests. Two pending maps,
         # one per direction, keep them from cross-pairing.
         # request id -> (event_id of the request event, tool/<method> name)
-        self.pending: dict[Any, tuple[str, str]] = {}      # client-initiated
-        self.pending_s2c: dict[Any, tuple[str, str]] = {}  # server-initiated
-        self.declared: Optional[list[dict]] = None  # unknown until a usable declaration
+        self.pending: OrderedDict = OrderedDict()      # client-initiated
+        self.pending_s2c: OrderedDict = OrderedDict()  # server-initiated
         self.error_seen = False
         self.last_event_id: Optional[str] = None    # rough causal spine
-        self.gate_by_seq: dict[Any, dict] = {}      # gate actions, by seq
         self._client_name = client_name
         self._user_intent = user_intent
         self._trace: Optional[InteractionTrace] = None
 
-    def feed(self, entry: dict) -> None:
+    def _remember(self, pending, rid, event, name, cursor=None):
+        if not self._valid_id(rid) or not isinstance(name, str) or len(name) > self.state.limits.max_name_chars:
+            event.metadata["correlation_limited"] = True
+            return
+        if cursor is not None and (not isinstance(cursor, str) or len(cursor) > self.state.limits.max_name_chars):
+            event.metadata["correlation_limited"] = True
+            return
+        key = (type(rid), rid)
+        pending.pop(key, None)
+        if len(pending) >= self.state.limits.max_pending:
+            pending.popitem(last=False)
+            self.correlation_evictions += 1
+            event.metadata["correlation_limited"] = True
+        pending[key] = (event.id, name, cursor)
+
+    def _valid_id(self, rid):
+        return ((type(rid) is int and rid.bit_length() <= 128)
+                or (type(rid) is str and len(rid) <= self.state.limits.max_name_chars))
+
+    def _reply(self, pending, rid):
+        return pending.pop((type(rid), rid), (None, None, None)) \
+            if self._valid_id(rid) else (None, None, None)
+
+    def ingest_frame(self, entry: dict) -> Optional[Event]:
+        """Normalize one tap entry, update session facts, return its event.
+
+        Set retain_events=False for a bounded live fold. Persist input entries
+        separately; snapshot() then contains current actors/state, not history.
+        """
+        if not isinstance(entry, dict):
+            raise ValueError("tap entry must be an object")
+        before = len(self.events)
+        self._feed_entry(entry)
+        if len(self.events) == before:
+            return None
+        event = self.events[-1]
+        if isinstance(entry.get("gate"), dict):
+            event.metadata["gate"] = entry["gate"]
+        self.state.observe(event)
+        # Actor metadata is a bounded materialized view; events remain faithful.
+        changed_actors = (self.client, self.server) if (
+            event.metadata.get("method") == "initialize"
+            or event.metadata.get("method_replied_to") == "<initialize>"
+        ) else ()
+        for actor in changed_actors:
+            for key, value in list(actor.metadata.items()):
+                copied = bounded_copy(value, self.state.limits.max_state_bytes)
+                if copied is None and value is not None:
+                    actor.metadata.pop(key, None)
+                    self.state.limit_reasons.add("session_metadata")
+        if not self.retain_events:
+            self.events.clear()
+        return event
+
+    def feed(self, entry: dict) -> Optional[Event]:
+        """Compatibility spelling for ingest_frame()."""
+        return self.ingest_frame(entry)
+
+    def _feed_entry(self, entry: dict) -> None:
         client, server = self.client, self.server
         events = self.events
         pending, pending_s2c = self.pending, self.pending_s2c
         last_event_id = self.last_event_id
-        # gate markers (M5) ride on the entry, not the frame: "blocked"
-        # frames never reached the server, "injected" ones never left it.
-        # Stamped onto the matching events in snapshot(), by seq.
-        if isinstance(entry.get("gate"), dict) and entry.get("seq") is not None:
-            self.gate_by_seq[entry["seq"]] = entry["gate"]
-
         frame = entry.get("frame")
         if not isinstance(frame, dict):
             # raw/unparseable wire line — preserve it as a MESSAGE so no
@@ -166,7 +226,7 @@ class _TraceBuilder:
                 events.append(ev)
                 self.last_event_id = ev.id
                 if rid is not None:
-                    pending[rid] = (ev.id, name)
+                    self._remember(pending, rid, ev, name)
 
             elif is_notification:
                 ev = Event(
@@ -182,8 +242,7 @@ class _TraceBuilder:
 
             elif method is None and ("result" in frame or "error" in frame):
                 # client's reply to a server-initiated request
-                parent_eid, req_method = pending_s2c.pop(rid, (None, None)) \
-                    if rid is not None else (None, None)
+                parent_eid, req_method, _ = self._reply(pending_s2c, rid)
                 ev = Event(
                     id=_new_id("evt"), timestamp=ts, actor_id=client.id,
                     kind=EventKind.MESSAGE, target_id=server.id,
@@ -209,7 +268,9 @@ class _TraceBuilder:
                 self.last_event_id = ev.id
                 if rid is not None and method:
                     # remember non-call requests so their results can pair too
-                    pending[rid] = (ev.id, f"<{method}>")
+                    params = frame.get("params")
+                    cursor = params.get("cursor") if isinstance(params, dict) else None
+                    self._remember(pending, rid, ev, f"<{method}>", cursor if method == "tools/list" else None)
 
         # ── server → client ─────────────────────────────────────────
         elif direction == "s2c":
@@ -230,14 +291,13 @@ class _TraceBuilder:
                 events.append(ev)
                 self.last_event_id = ev.id
                 if rid is not None:
-                    pending_s2c[rid] = (ev.id, f"<{method}>")
+                    self._remember(pending_s2c, rid, ev, f"<{method}>")
                 return
 
             result = frame.get("result")
             error = frame.get("error")
 
-            parent_eid, call_name = pending.pop(rid, (None, None)) \
-                if rid is not None else (None, None)
+            parent_eid, call_name, request_cursor = self._reply(pending, rid)
 
             # the initialize result carries the server's declared
             # capabilities and identity — stamp them on the server actor
@@ -304,34 +364,28 @@ class _TraceBuilder:
                 events.append(ev)
                 self.last_event_id = ev.id
 
-                tools = tool_declaration(ev)
-                if tools is not None:
-                    self.declared = tools
+                if call_name == "<tools/list>" and request_cursor is not None:
+                    ev.metadata["request_cursor"] = request_cursor
 
     def snapshot(self) -> InteractionTrace:
         """Materialize the current state. Re-runnable after more feed()
         calls: finalization is idempotent, and the same trace object is
         returned every time (events list shared, updated in place)."""
-        if self.gate_by_seq:
-            for ev in self.events:
-                g = self.gate_by_seq.get(ev.metadata.get("seq"))
-                if g is not None:
-                    ev.metadata["gate"] = g
-
-        # stamp the server's declared tool surface. declared_tools() reads
-        # the AGENT's agent_card.skills, so we expose the observed tools
-        # there. The server actor keeps the raw tool defs for inspection.
-        if self.declared is not None:
-            self.server.metadata["tools"] = self.declared
+        declared = list(self.state.tool_defs.values())
+        if self.state.surface is not None:
+            self.server.metadata["tools"] = declared
             self.client.metadata["agent_card"] = {
                 "name": self._client_name,
-                "skills": [{"name": t["name"]} for t in self.declared],
+                "skills": [{"name": name} for name in self.state.tool_defs],
             }
+        else:
+            self.server.metadata.pop("tools", None)
+            self.client.metadata.pop("agent_card", None)
 
         final_state: Optional[TaskState] = None
         if self.error_seen:
             final_state = TaskState.FAILED
-        elif self.events:
+        elif self.last_event_id is not None:
             final_state = TaskState.COMPLETED
 
         if self._trace is None:
@@ -343,14 +397,24 @@ class _TraceBuilder:
                 intent=self._user_intent,
                 final_state=final_state,
                 metadata={"source": "glassport_tap",
-                          "declared_tool_count": len(self.declared or []),
-                          "declaration_known": self.declared is not None},
+                          "declared_tool_count": len(declared),
+                          "declaration_known": self.state.surface is not None},
             )
         else:
             self._trace.final_state = final_state
-            self._trace.metadata["declared_tool_count"] = len(self.declared or [])
-            self._trace.metadata["declaration_known"] = self.declared is not None
+            self._trace.metadata["declared_tool_count"] = len(declared)
+            self._trace.metadata["declaration_known"] = self.state.surface is not None
+        self._trace.metadata["session_limits"] = asdict(self.state.limits)
+        self._trace.metadata["correlation_evictions"] = self.correlation_evictions
+        self._trace.metadata["history_retained"] = self.retain_events
+        if not self.retain_events:
+            self._trace.metadata["current_surface"] = (
+                sorted(self.state.surface) if self.state.surface is not None else None)
         return self._trace
+
+
+# Existing file-poll consumers keep their private import during migration.
+_TraceBuilder = MCPTraceBuilder
 
 
 def from_mcp_session(
