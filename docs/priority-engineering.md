@@ -62,3 +62,32 @@ can now prove removal in drift analysis. Low-severity context findings remain.
 need explicit treatment in the incremental foundation. This stage establishes
 the call-time semantics required by the first streaming detector. #77 remains
 independent and precedes that architectural work.
+
+## Stage 2 — Issue #77
+
+**What / why.** `_relay()` now closes every successfully created connection
+in `finally`, including failed requests, failed response parsing, and early
+502 returns. It also closes the response: a close-delimited response can own
+the socket after `http.client` detaches the connection. Nested cleanup ensures
+that a response-close exception cannot skip connection cleanup.
+
+**Files.** `adapters/mcp_http.py` contains the lifecycle correction;
+`test_http_connection_lifecycle.py` supplies deterministic response/connection
+doubles and direct `close()` assertions.
+
+**Tests added.** Fifteen tests cover normal JSON/SSE, disconnects and read
+errors, downstream write/header failures, malformed/rejected responses,
+request failures, failing 502 emission, SSE framing and logging exceptions,
+response cleanup failures, pre-connect rejection, and real `SessionLog` disk
+failure without interrupting SSE forwarding.
+
+**Validation.** Full suite under coverage: 731 tests, OK; core coverage 93%.
+Existing HTTP tap and relay adversarial grills pass. Stage 1's advisory,
+report, SARIF, streaming, and server grills also passed.
+
+**Compatibility / remaining risk.** Existing forwarding, bounded buffering,
+header hardening, timeouts, and response delimiting are preserved. Unexpected
+framing/programming exceptions still propagate as before, with deterministic
+cleanup; ordinary logger write failures remain fail-open. No HTTP gate was
+introduced. Both correctness fixes are now independently tested, unlocking
+the incremental session foundation.
