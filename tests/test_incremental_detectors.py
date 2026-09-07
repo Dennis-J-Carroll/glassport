@@ -5,7 +5,7 @@ import unittest
 
 from glassport import detectors
 from glassport.adapters.mcp_session import MCPTraceBuilder, from_mcp_session
-from glassport.incremental import DetectorEngine, FabricatedCallsDetector, StreamingDetector
+from glassport.incremental import DetectorEngine, FabricatedCallsDetector, ContextDetector, StreamingDetector
 from glassport.session import SessionState
 from tests.test_detectors import L, call, handshake
 
@@ -23,10 +23,10 @@ def semantic_findings(events, annotations):
 
 
 class TestFabricatedParity(unittest.TestCase):
-    def assert_parity(self, lines):
+    def assert_parity(self, lines, batch_fn=detectors.fabricated_calls, active_type=FabricatedCallsDetector):
         batch = from_mcp_session(lines)
-        expected = detectors.fabricated_calls(batch)
-        state, engine = SessionState.from_trace(batch), DetectorEngine()
+        expected = batch_fn(batch)
+        state, engine = SessionState.from_trace(batch), DetectorEngine([active_type()])
         observed = []
         for event in batch.events:
             state.observe(event)
@@ -34,7 +34,7 @@ class TestFabricatedParity(unittest.TestCase):
         observed.extend(engine.finish(state))
         self.assertEqual(semantic_findings(batch.events, expected),
                          semantic_findings(batch.events, observed))
-        builder, live = MCPTraceBuilder(retain_events=False), DetectorEngine()
+        builder, live = MCPTraceBuilder(retain_events=False), DetectorEngine([active_type()])
         events, findings = [], []
         for line in lines:
             event = builder.ingest_frame(json.loads(line))
@@ -133,3 +133,46 @@ class TestDetectorLifecycle(unittest.TestCase):
         event = from_mcp_session([call(1, 1, "foo", {})]).events[0]
         found = DetectorEngine([Broken()]).on_event(event, SessionState())
         self.assertEqual(found[0].metadata["error_type"], "HostileError")
+
+
+class TestContextParity(unittest.TestCase):
+    def check(self, lines):
+        return TestFabricatedParity.assert_parity(
+            self, lines, detectors.context_violations, ContextDetector)
+
+    def test_future_schema_cannot_reject_earlier_arguments(self):
+        h = handshake()
+        _, found = self.check(h[:4] + [call(6, 3, "web_search", {})] + [h[4]])
+        self.assertNotIn("schema_violation", [a.subcategory for a in found])
+
+    def test_future_capabilities_do_not_judge_earlier_request(self):
+        _, found = self.check([L(0, "s2c", {"id": 42, "method": "sampling/createMessage"})] + handshake())
+        self.assertNotIn("capability_violation", [a.subcategory for a in found])
+
+    def test_current_schema_replaces_old_schema(self):
+        lines = handshake(tools=[{"name": "foo", "inputSchema": {"required": ["old"]}}]) + [
+            call(6, 3, "foo", {"old": 1}),
+            L(7, "c2s", {"id": 4, "method": "tools/list"}),
+            L(8, "s2c", {"id": 4, "result": {"tools": [{"name": "foo", "inputSchema": {"required": ["new"]}}]}}),
+            call(9, 5, "foo", {"old": 1}), call(10, 6, "foo", {"new": 1})]
+        _, found = self.check(lines)
+        self.assertEqual([(a.subcategory, a.metadata["seq"]) for a in found], [("schema_violation", 9)])
+
+    def test_server_notification_cannot_initialize_client(self):
+        _, found = self.check([L(1, "s2c", {"method": "notifications/initialized"}), call(2, 2, "foo", {})])
+        self.assertIn("premature_call", [a.subcategory for a in found])
+
+    def test_context_categories_and_surface_changes(self):
+        _, found = self.check(handshake() + [call(6, 3, "web_search", {}),
+            L(7, "s2c", {"id": 4, "method": "sampling/createMessage"}),
+            L(8, "s2c", {"id": 5, "method": "secrets/dump"}),
+            L(9, "s2c", {"id": 999, "result": {}}),
+            L(10, "c2s", {"id": 6, "method": "tools/list"}),
+            L(11, "s2c", {"id": 6, "result": {"tools": []}})])
+        self.assertEqual({a.subcategory for a in found}, {"schema_violation", "capability_violation",
+                         "unknown_server_request", "orphaned_response", "surface_change"})
+
+    def test_faulty_schema_does_not_blind_next_event(self):
+        _, found = self.check(handshake(tools=[{"name": "foo", "inputSchema": {"required": 7}}]) +
+                              [call(6, 3, "foo", {}), L(7, "s2c", {"id": 99, "result": {}})])
+        self.assertEqual([a.subcategory for a in found], ["detector_error", "orphaned_response"])

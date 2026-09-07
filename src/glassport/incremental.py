@@ -39,6 +39,55 @@ class FabricatedCallsDetector(StreamingDetector):
         ) for name, _ in detectors._tool_call_parts(event) if name not in state.surface]
 
 
+class ContextDetector(StreamingDetector):
+    name = "context_violations"
+
+    def on_event(self, event: Event, state: SessionState) -> list[Annotation]:
+        out = []
+        md = event.metadata
+        if state.surface_delta:
+            out.append(detectors._ann(
+                event, detectors.AnnotationKind.DIVERGENCE, "surface_change",
+                f"tools/list surface changed mid-session; delta: {state.surface_delta}",
+                severity=2, delta=state.surface_delta))
+        if event.kind == EventKind.TOOL_CALL:
+            for name, args in detectors._tool_call_parts(event):
+                if not state.initialized:
+                    out.append(detectors._ann(
+                        event, detectors.AnnotationKind.ANOMALY, "premature_call",
+                        f"tools/call '{name}' before notifications/initialized", severity=2))
+                elif state.first_surface is None and not state.tools_list_requested:
+                    out.append(detectors._ann(
+                        event, detectors.AnnotationKind.ANOMALY, "call_before_declaration",
+                        f"tools/call '{name}' and no tools/list request was ever sent", severity=1))
+                schema = (state.tool_defs.get(name) or {}).get("inputSchema")
+                for problem in detectors._schema_problems(args, schema):
+                    out.append(detectors._ann(
+                        event, detectors.AnnotationKind.DIVERGENCE, "schema_violation",
+                        f"'{name}': {problem}", severity=2,
+                        category=detectors.HallucinationCategory.TOOL_USE))
+        if md.get("server_initiated") and not md.get("notification"):
+            method = md.get("method")
+            if method in detectors.ALWAYS_ALLOWED_SERVER_REQUESTS:
+                pass
+            elif method in detectors.SERVER_REQUEST_CAPABILITY:
+                needed = detectors.SERVER_REQUEST_CAPABILITY[method]
+                if state.client_capabilities is not None and needed not in state.client_capabilities:
+                    out.append(detectors._ann(
+                        event, detectors.AnnotationKind.ANOMALY, "capability_violation",
+                        f"server requested '{method}' but the client never granted the '{needed}' capability",
+                        severity=3))
+            else:
+                out.append(detectors._ann(
+                    event, detectors.AnnotationKind.ANOMALY, "unknown_server_request",
+                    f"server-initiated request '{method}' is not a known MCP client capability", severity=2))
+        if md.get("orphaned"):
+            out.append(detectors._ann(
+                event, detectors.AnnotationKind.ANOMALY, "orphaned_response",
+                f"response id={md.get('jsonrpc_id')} matched no request", severity=1))
+        return out
+
+
 class DetectorEngine:
     """Fault-isolated detector lifecycle; findings are returned, never accumulated.
 
@@ -48,7 +97,8 @@ class DetectorEngine:
     """
 
     def __init__(self, active: Iterable[StreamingDetector] | None = None):
-        self.active = tuple(active) if active is not None else (FabricatedCallsDetector(),)
+        self.active = tuple(active) if active is not None else (
+            FabricatedCallsDetector(), ContextDetector())
         self._state: SessionState | None = None
         self._finished = False
 

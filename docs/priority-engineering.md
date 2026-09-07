@@ -165,3 +165,29 @@ Existing file-poll UI analysis still reruns the remaining batch detectors.
 
 **Next dependency.** Context/schema migration can now use the same lifecycle
 and permanent parity harness, with chronological semantics explicitly tested.
+
+## Stage 5 — Context and schema detectors
+
+**What / why.** `ContextDetector` consumes session facts for initialization
+ordering, call-before-declaration, schema checks, capability violations,
+unknown server requests, orphaned replies, and first-vs-current surface changes.
+`context_violations(trace)` is now a replay wrapper. No detector rescans history
+to recover these facts during live processing.
+
+**Files / tests.** `incremental.py` owns the per-event checks; `detectors.py`
+retains the public batch entry point and schema primitives. Six new parity
+tests cover future schemas/capabilities, changed schemas, server-originated
+initialization spoofing, every migrated category, and recovery after a malformed
+schema causes one event's detector pass to fail.
+
+**Validation.** Full suite: 758 tests, OK; expanded core coverage gate passes.
+
+**Compatibility / remaining risk.** Schema/capability judgments now require
+facts observed at the event, rather than final actor metadata. Updated schemas
+replace older ones. Only client-originated initialized notifications satisfy
+the client ordering check. Schema validation remains the existing top-level
+JSON Schema subset. Drift/fingerprints stay retrospective. PII/egress still
+awaits its own migration and chronological host-declaration tests.
+
+**Next dependency.** PII and exfiltration can reuse the lifecycle without
+duplicating schema/declaration tracking or introducing transport decisions.
