@@ -159,6 +159,28 @@ class Annotation:
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
+def tool_declaration(event: Event) -> Optional[list[dict]]:
+    """A usable, correlated tools/list result; None is unknown, [] is known.
+
+    A malformed member invalidates the declaration, rather than silently
+    turning a partially parsed surface into evidence of exclusion.
+    """
+    if event.metadata.get("method_replied_to") != "<tools/list>":
+        return None
+    for part in event.parts:
+        frame = part.content
+        if part.kind != PartKind.JSON or not isinstance(frame, dict) or "error" in frame:
+            continue
+        result = frame.get("result")
+        tools = result.get("tools") if isinstance(result, dict) else None
+        if isinstance(tools, list) and all(
+            isinstance(t, dict) and isinstance(t.get("name"), str) and t["name"]
+            for t in tools
+        ):
+            return tools
+    return None
+
+
 @dataclass
 class InteractionTrace:
     id: str
@@ -174,16 +196,37 @@ class InteractionTrace:
         return next((a for a in self.actors if a.id == actor_id), None)
 
     def declared_tools(self) -> set[str]:
+        """Current names for collection consumers; use declared_surface() for knowledge."""
+        surface = self.declared_surface()
+        return surface if surface is not None else set()
+
+    def _initial_surface(self) -> Optional[set[str]]:
+        # MCP actor metadata is a final snapshot, not prior knowledge. Replay
+        # declarations from the evidence instead of applying future facts.
+        if self.metadata.get("source") == "glassport_tap":
+            return None
         names: set[str] = set()
+        known = False
         for a in self.actors:
             if a.kind == ActorKind.AGENT:
                 card = a.metadata.get("agent_card") or {}
+                known |= isinstance(card.get("skills"), list)
                 for skill in card.get("skills", []):
                     if "name" in skill:
                         names.add(skill["name"])
             if a.kind == ActorKind.TOOL:
+                known = True
                 names.add(a.name)
-        return names
+        return names if known else None
+
+    def declared_surface(self) -> Optional[set[str]]:
+        """None = unknown; set() = explicitly empty; nonempty = known names."""
+        surface = self._initial_surface()
+        for event in self.events:
+            tools = tool_declaration(event)
+            if tools is not None:
+                surface = {t["name"] for t in tools}
+        return surface
 
     def called_tools(self) -> list[tuple[str, str]]:
         out = []
@@ -195,9 +238,18 @@ class InteractionTrace:
         return out
 
     def fabricated_tool_calls(self) -> list[tuple[str, str]]:
-        declared = self.declared_tools()
-        return [(eid, name) for eid, name in self.called_tools()
-                if name not in declared]
+        """Calls excluded by the declaration observed *at the time of the call*."""
+        declared = self._initial_surface()
+        out = []
+        for event in self.events:
+            tools = tool_declaration(event)
+            if tools is not None:
+                declared = {t["name"] for t in tools}
+            if event.kind == EventKind.TOOL_CALL and declared is not None:
+                for part in event.parts:
+                    if part.kind == PartKind.TOOL_USE and part.content["name"] not in declared:
+                        out.append((event.id, part.content["name"]))
+        return out
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), indent=2, default=str)

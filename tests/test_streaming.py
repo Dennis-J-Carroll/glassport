@@ -116,10 +116,8 @@ class TestEquivalence(StreamingCase):
             self.assertIs(s.trace, t0)              # same object, updated
             self.assertGreater(len(s.trace.events), n0)
 
-    def test_retroactive_unfabrication_across_polls(self):
-        # a call before any declaration is fabricated; when the
-        # handshake lands in a LATER poll the annotation must vanish,
-        # exactly as a batch re-read would conclude
+    def test_unknown_surface_never_fabricates_across_polls(self):
+        # Issue #76: future declarations cannot prove earlier exclusion.
         with tempfile.TemporaryDirectory() as tmp:
             p = Path(tmp) / "s.jsonl"
             pre = [call(1, 1, "web_search", {"q": "x"}), result(2, 1)]
@@ -127,7 +125,7 @@ class TestEquivalence(StreamingCase):
             s = StreamingSession(p)
             s.poll()
             subs = [a.subcategory for a in s.trace.annotations]
-            self.assertIn("fabricated_tool_call", subs)
+            self.assertNotIn("fabricated_tool_call", subs)
             with open(p, "a", encoding="utf-8") as fh:
                 fh.write("\n".join(handshake(start_seq=3)) + "\n")
             s.poll()

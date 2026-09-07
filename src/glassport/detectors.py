@@ -34,7 +34,7 @@ from typing import Any, Iterator, NamedTuple, Optional, Callable
 from glassport.interaction_trace import (
     Annotation, AnnotationKind, HallucinationCategory,
     ActorKind, EventKind, Event, InteractionTrace, PartKind,
-    _new_id,
+    _new_id, tool_declaration,
 )
 
 ANNOTATOR = "glassport.detectors"
@@ -128,15 +128,8 @@ def _tool_call_parts(event: Event):
 
 def _list_result_names(event: Event) -> Optional[set[str]]:
     """Tool names in a tools/list response event, or None if not one."""
-    if event.metadata.get("method_replied_to") != "<tools/list>":
-        return None
-    for p in event.parts:
-        frame = p.content if isinstance(p.content, dict) else {}
-        tools = (frame.get("result") or {}).get("tools")
-        if isinstance(tools, list):
-            return {t["name"] for t in tools
-                    if isinstance(t, dict) and "name" in t}
-    return None
+    tools = tool_declaration(event)
+    return {t["name"] for t in tools} if tools is not None else None
 
 
 def context_violations(trace: InteractionTrace) -> list[Annotation]:
@@ -242,7 +235,6 @@ def context_violations(trace: InteractionTrace) -> list[Annotation]:
 def fabricated_calls(trace: InteractionTrace) -> list[Annotation]:
     """trace.fabricated_tool_calls() lifted into annotations."""
     events_by_id = {e.id: e for e in trace.events}
-    declared = trace.declared_tools()
     out = []
     for event_id, name in trace.fabricated_tool_calls():
         out.append(_ann(
@@ -250,7 +242,7 @@ def fabricated_calls(trace: InteractionTrace) -> list[Annotation]:
             "fabricated_tool_call",
             f"tools/call '{name}' is outside the declared surface",
             severity=3, category=HallucinationCategory.TOOL_USE,
-            no_declaration_seen=not declared))
+            no_declaration_seen=False, tool=name))
     return out
 
 

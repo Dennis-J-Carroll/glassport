@@ -56,6 +56,7 @@ class ViewModel:
     gate_on: bool
     rows: list["TimelineRow"] = field(default_factory=list)
     findings: list["FindingRow"] = field(default_factory=list)
+    declaration_known: bool = False
 
 
 @dataclass
@@ -152,6 +153,7 @@ def build_view_model(trace: InteractionTrace, live: bool) -> ViewModel:
 
     return ViewModel(
         title=title, live=live, declared=declared,
+        declaration_known=trace.declared_surface() is not None,
         counters={"frames": len(trace.events),
                   "fabricated": fabricated,
                   "violations": violations,
@@ -716,7 +718,7 @@ def _draw_dashboard(curses, scr, vm, state, tabs=None, drift_lines=None,
     ind = "LIVE ▮" if vm.live else "IDLE"
     c = vm.counters
     _put(scr, 0, 0, f" {vm.title} · {ind} · declared: "
-                    f"{', '.join(vm.declared) or '—'} · frames {c['frames']}"
+                    f"{', '.join(vm.declared) or ('empty' if vm.declaration_known else 'unknown')} · frames {c['frames']}"
                     .ljust(w - 1), bar)
     override = "" if gate_override is None else \
         f" · override: {'enforce' if gate_override else 'DISABLED'}"

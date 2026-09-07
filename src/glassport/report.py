@@ -186,9 +186,11 @@ def render_html(trace: InteractionTrace, source_name: str = "") -> str:
       + "</div>")
 
     w("<h2>surface</h2>")
+    surface_label = ("unknown: no usable tools/list seen"
+                     if trace.declared_surface() is None else "explicitly empty")
     w('<div class="chips">declared: '
       + ("".join(f"<span>{_esc(n)}</span>" for n in declared)
-         or '<span class="dim">— no tools/list seen</span>')
+         or f'<span class="dim">— {surface_label}</span>')
       + "</div>")
     w('<div class="chips">called: '
       + ("".join(

@@ -586,6 +586,7 @@ def summarize(log_path: Path, as_json: bool = False, as_sarif: bool = False) -> 
             "completeness": "partial_tail_only" if partial else "complete",
             "frames_parsed": frames,
             "declared_tools": sorted(declared),
+            "declaration_known": trace.declared_surface() is not None,
             "called_tools": [n for _, n in called],
             "unused_declared": unused,
             "fabricated_calls": [{"seq": s, "tool": n}
@@ -605,7 +606,9 @@ def summarize(log_path: Path, as_json: bool = False, as_sarif: bool = False) -> 
     if partial:
         print("completeness:     PARTIAL (tail-only — head not analyzed)")
     print(f"frames parsed:    {frames}")
-    print(f"declared tools:   {sorted(declared) or '— (no tools/list seen)'}")
+    surface_label = ("— (unknown: no usable tools/list seen)"
+                     if trace.declared_surface() is None else "— (explicitly empty)")
+    print(f"declared tools:   {sorted(declared) or surface_label}")
     print(f"called tools:     {[n for _, n in called] or '—'}")
     print(f"unused declared:  {unused or '—'}")
     if fabricated:

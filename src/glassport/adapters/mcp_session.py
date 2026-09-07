@@ -46,7 +46,7 @@ from typing import Any, Iterable, Optional
 from glassport.interaction_trace import (
     Actor, Event, Part, InteractionTrace,
     ProtocolKind, ActorKind, EventKind, PartKind, TaskState,
-    _new_id,
+    _new_id, tool_declaration,
 )
 
 
@@ -97,7 +97,7 @@ class _TraceBuilder:
         # request id -> (event_id of the request event, tool/<method> name)
         self.pending: dict[Any, tuple[str, str]] = {}      # client-initiated
         self.pending_s2c: dict[Any, tuple[str, str]] = {}  # server-initiated
-        self.declared: list[dict] = []          # accumulates tools/list tools
+        self.declared: Optional[list[dict]] = None  # unknown until a usable declaration
         self.error_seen = False
         self.last_event_id: Optional[str] = None    # rough causal spine
         self.gate_by_seq: dict[Any, dict] = {}      # gate actions, by seq
@@ -109,7 +109,6 @@ class _TraceBuilder:
         client, server = self.client, self.server
         events = self.events
         pending, pending_s2c = self.pending, self.pending_s2c
-        declared = self.declared
         last_event_id = self.last_event_id
         # gate markers (M5) ride on the entry, not the frame: "blocked"
         # frames never reached the server, "injected" ones never left it.
@@ -237,12 +236,6 @@ class _TraceBuilder:
             result = frame.get("result")
             error = frame.get("error")
 
-            # capture declared surface from any tools/list result
-            if isinstance(result, dict) and isinstance(result.get("tools"), list):
-                for t in result["tools"]:
-                    if isinstance(t, dict) and "name" in t:
-                        declared.append(t)
-
             parent_eid, call_name = pending.pop(rid, (None, None)) \
                 if rid is not None else (None, None)
 
@@ -311,6 +304,10 @@ class _TraceBuilder:
                 events.append(ev)
                 self.last_event_id = ev.id
 
+                tools = tool_declaration(ev)
+                if tools is not None:
+                    self.declared = tools
+
     def snapshot(self) -> InteractionTrace:
         """Materialize the current state. Re-runnable after more feed()
         calls: finalization is idempotent, and the same trace object is
@@ -324,12 +321,12 @@ class _TraceBuilder:
         # stamp the server's declared tool surface. declared_tools() reads
         # the AGENT's agent_card.skills, so we expose the observed tools
         # there. The server actor keeps the raw tool defs for inspection.
-        self.server.metadata["tools"] = self.declared
-        self.client.metadata["agent_card"] = {
-            "name": self._client_name,
-            "skills": [{"name": t["name"]}
-                       for t in self.declared if "name" in t],
-        }
+        if self.declared is not None:
+            self.server.metadata["tools"] = self.declared
+            self.client.metadata["agent_card"] = {
+                "name": self._client_name,
+                "skills": [{"name": t["name"]} for t in self.declared],
+            }
 
         final_state: Optional[TaskState] = None
         if self.error_seen:
@@ -346,11 +343,13 @@ class _TraceBuilder:
                 intent=self._user_intent,
                 final_state=final_state,
                 metadata={"source": "glassport_tap",
-                          "declared_tool_count": len(self.declared)},
+                          "declared_tool_count": len(self.declared or []),
+                          "declaration_known": self.declared is not None},
             )
         else:
             self._trace.final_state = final_state
-            self._trace.metadata["declared_tool_count"] = len(self.declared)
+            self._trace.metadata["declared_tool_count"] = len(self.declared or [])
+            self._trace.metadata["declaration_known"] = self.declared is not None
         return self._trace
 
 
