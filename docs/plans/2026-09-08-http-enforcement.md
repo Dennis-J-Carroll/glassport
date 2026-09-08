@@ -77,6 +77,44 @@ sessions, malformed identifiers, binding collisions, expiry, reconnect, and
 SSE/POST overlap. Keep passive HTTP unchanged at the byte boundary and rerun
 existing HTTP lifecycle/grill tests. No blocking in this task.
 
+Design rulings for this task:
+- Keep the ordinary run_http_tap path compatible. Routing/analysis is explicitly
+  enabled through an optional integration object/API; Task 3 exposes observation
+  mode and Task 4 exposes enforcement. Neither detector code nor registry code
+  receives a transport send/block operation.
+- Use opaque local session/epoch IDs in logs and decisions, not raw upstream
+  session headers or authorization values. A proxy instance scopes one upstream.
+  Partition by an opaque credential-context fingerprint when credentials differ;
+  this prevents accidental state reuse, but is not authentication or identity
+  verification. Upstream authentication remains upstream-owned.
+- Never feed a multiplexed HTTP capture into a single-session builder. Prefer
+  one replayable wire stream/file per observed session epoch, including isolated
+  request-scoped captures when identity cannot be established. Keep existing
+  stdio/file consumers safe without a broad UI redesign. A reset or lost session
+  starts a new epoch rather than inheriting an old declaration in replay.
+- Session IDs must be bounded visible ASCII and unambiguous single headers.
+  Bind only a successful correlated initialization result to its response's
+  proposed session ID. Missing/unknown IDs never discover state by JSON-RPC ID,
+  source IP, or a global fallback context. Binding collisions invalidate trust
+  rather than merge unrelated contexts.
+- Do not hold a registry lock while acquiring a context lock or performing I/O.
+  Serialize each context's evidence and state fold; lease release is idempotent.
+  Capacity counts retired contexts until active leases finish. Only idle
+  contexts can be selected for eviction; all-active capacity pressure produces
+  incomplete observation for new traffic.
+- Deduplicate repeated SSE event IDs only within bounded per-session history,
+  and preserve every received wire frame. A repeated ID with different content
+  or a resumption cursor outside retained evidence must not restore stale
+  declarations. Never infer cancellation from a disconnect.
+- In the explicitly analyzed mode, observe complete server frames before their
+  completing bytes reach the client, so a client's follow-up cannot outrun the
+  declaration fold. Ordinary passive SSE keeps its existing forwarding order.
+
+Protocol references checked for this design:
+[MCP Streamable HTTP](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports)
+and [session security](https://modelcontextprotocol.io/docs/2025-11-25/tutorials/security/security_best_practices).
+These describe transport mechanics; they do not authorize any external action.
+
 ## Task 3: Record decisions and delivery in observation mode
 
 Own versioned decision/configuration recording and replay validation modules,
@@ -133,3 +171,63 @@ review-ready commits preserving #76/#77 isolation and the staged implementation.
 Capture exact CI head and results. Merging and publishing remain explicit final
 actions after a concrete reviewable result exists; do not invent a release
 version or claim a release occurred.
+
+## Task 6: Repair declaration evidence before HTTP integration
+
+Inserted after Task 1 and before Task 2 by independent foundation review.
+Own src/glassport/adapters/mcp_session.py, src/glassport/session.py,
+src/glassport/incremental.py for declaration-uncertainty diagnostics,
+src/glassport/interaction_trace.py only if needed, and focused declaration,
+incremental-state/parity/policy regression tests. Update the implementation
+record with intentional compatibility changes. Do not modify HTTP transport,
+PII scanners, coverage settings, or unrelated consumers.
+
+Four Important findings must be fixed as one coherent correlation correction:
+
+1. Pending entries encode both tool names and RPC method tags in one string.
+   A tools/call named `<tools/list>` followed by result {tools: []} establishes
+   exclusion despite no tools/list request. A `<initialize>` tool name can
+   similarly impersonate protocol initialization. Separate request kind/method
+   from the untrusted tool name; legitimate angle-bracket tool names must remain
+   ordinary calls/results.
+2. An invalid/oversized replacement request returns before removing the prior
+   same-ID pending record. Remove stale associations when a replacement is
+   rejected; ambiguous duplicate IDs must not establish declaration evidence.
+   Preserve per-direction ID isolation and bounds.
+3. Pagination currently associates continuations by cursor string alone.
+   A pending continuation from chain A can complete a newer chain B when both
+   reuse the cursor. Bind each continuation to the generation observed when it
+   was requested. Interrupted, superseded, or ambiguous chains stay unknown;
+   never assemble a surface from different list operations. Keep retained state
+   bounded and reconstructed identically from normalized events and raw wire.
+4. Evicting a pending tools/list refresh leaves stale exclusion active.
+   Lost or ambiguous declaration correlation must invalidate relevant surface
+   knowledge through replayable evidence. Do not invalidate a healthy surface
+  merely because an unrelated ping/result is evicted. A pending refresh must
+  not become false exclusion when its response cannot be correlated.
+
+When a tools/call cannot be evaluated because declaration evidence is pending,
+malformed, superseded, or lost, preserve a severity-1 declaration-unavailable
+observation through the shared ContextDetector. Avoid duplicate low observations
+when call_before_declaration already explains the same missing evidence. This
+supports the agreed forward-plus-warning behavior in later explicit HTTP mode.
+
+Required negative examples (frames in wire order):
+- tools/call `<tools/list>` id=1; result id=1 {tools: []}; call real id=2:
+  no fabricated block. Also test `<initialize>` and ordinary angle-bracket names.
+- max_name_chars=12: root tools/list id=1; tools/list id=1 cursor of 20 x's;
+  result id=1 {tools: []}; call real id=2: no fabricated block.
+- A root id=1 -> [a1], nextCursor=page2; A continuation id=2 cursor=page2;
+  B root id=3 -> [b1], nextCursor=page2; A continuation reply id=2 -> [a2]:
+  never declare the synthetic set {b1,a2}; a1 must not be blocked by that set.
+- max_pending=1: root id=1 -> []; refresh tools/list id=2; ping id=3 evicts
+  refresh; reply id=2 -> [real]; call real id=4: no fabricated block.
+
+Prove positives too: valid root/complete pagination, known-empty exclusion,
+ordinary current-schema validation, unrelated correlation pressure, restoration
+after a fresh valid listing, and no-history bounded retention. Use the permanent
+semantic parity oracle including policy outcomes for every hostile case.
+Generated chain identity must not create raw-wire replay divergence.
+Add failing regressions first, then fix; retain full covering-test output.
+Run focused tests during iteration and the full suite once under the supported
+coverage core before committing. Report any adjacent concerns separately.
