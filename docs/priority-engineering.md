@@ -363,3 +363,57 @@ growth after correlation-map saturation. It asserts structural retention bounds,
 not host-dependent elapsed-time ceilings. Existing CI timing tests were left
 unchanged; their coverage-instrumentation sensitivity remains documented in
 STATUS.md.
+
+## Agreed follow-up sequence — 2026-09-08
+
+Keep each step independently reviewable. The current implementation lives on
+`fix/priority-streaming-foundation`; committing/pushing this branch does not
+release the package or enable enforcement.
+
+1. **Review and land the current stack.** Review #76 and #77 as independent
+   correctness fixes, followed by the session, detector, parity, and policy
+   commits. Preserve the existing commit boundaries when preparing PRs. Run PR
+   CI against the exact proposed merge head, including real stdio/HTTP captures,
+   nine security grills, and the unchanged 85% core coverage gate. Address the
+   default-tracer timing sensitivity in a separate, bounded follow-up with
+   repeated measurements and an explicit instrumentation strategy; do not
+   silently raise timing limits or exclude scanner coverage.
+   **Done when:** the reviewed code passes required CI, any timing-methodology
+   change has its own evidence, and release notes distinguish changed semantics
+   from future enforcement. Choose a release version during release preparation.
+
+2. **Add bounded HTTP session routing.** Give each MCP session its own builder,
+   detector engine, and lifecycle. Specify initialization before a session ID
+   exists, session binding, concurrent POST/GET/SSE traffic, reconnects, expiry,
+   and unknown session IDs before coding forwarding decisions. Bound active
+   sessions and idle retention in addition to the existing per-session limits.
+   **Done when:** tests interleave two sessions with reused JSON-RPC IDs and
+   different tool surfaces without cross-correlation or declaration leakage;
+   teardown frees state; captured session replay matches live annotations.
+
+3. **Persist decision evidence and run HTTP policy in observation mode.** Keep
+   raw wire evidence separate from interpretation. Add a versioned record
+   connecting session identity, wire sequence/event mapping, detector and policy
+   versions, limits, reproducible PII configuration, supporting annotations,
+   selected action, and actual delivery outcome. Record a candidate block as
+   “would block” while forwarding remains observational. Do not duplicate secret
+   payloads into decision records.
+   **Done when:** replay reconstructs candidate decisions from saved evidence
+   and configuration; concurrent streams, disconnects, detector errors, and
+   persistence failures have explicit tested behavior. Passive `wrap` continues
+   forwarding when interpretation or logging fails.
+
+4. **Add one explicit HTTP enforcement rule.** Integrate the shared policy for
+   severity-3 fabricated calls outside an observed surface. Keep severity-1
+   warnings visible. Unknown or incomplete declarations and detector failures
+   must not become fabricated-call blocks; explicitly empty declarations remain
+   valid exclusion evidence. Define protocol-correct blocked responses and
+   verify that blocked requests never reach upstream. Keep passive `wrap`
+   unchanged and avoid a general policy language.
+   **Done when:** allow/warn/block outcomes, upstream delivery, decision logs,
+   and replay agree across JSON and SSE fixtures; adversarial tests cover
+   concurrent sessions, declaration changes, cancellation, and disconnects.
+
+Migrating the existing stdio `Gate` to the shared engine is a later separate
+compatibility task. A2A support, observatory UI work, additional blocking rules,
+and release automation remain outside this sequence.

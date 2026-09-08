@@ -224,6 +224,12 @@ Roughly in dependency order — earlier unlocks later.
 
 ## Next action
 
-- Review and release the isolated #76/#77 and incremental-analysis commits.
-- Design HTTP session routing and persist policy/delivery decisions before
-  enabling active enforcement. Reuse the shared engine; validate against replay.
+1. Review and land the isolated #76/#77 and incremental-analysis commits; verify
+   PR CI and address coverage/timing sensitivity as a separate bounded change.
+2. Add bounded HTTP session routing with concurrent-session isolation tests.
+3. Persist replayable policy/delivery records and evaluate HTTP policy in
+   observation mode.
+4. Add narrow, explicit HTTP enforcement for observed fabricated calls.
+
+Deliverables and acceptance checks are fixed in the
+[follow-up sequence](docs/priority-engineering.md#agreed-follow-up-sequence--2026-09-08).
