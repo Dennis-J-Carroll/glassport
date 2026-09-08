@@ -2,11 +2,12 @@
 from dataclasses import asdict
 import json
 import unittest
+from pathlib import Path
 
 from glassport import detectors
-from glassport.adapters.mcp_session import MCPTraceBuilder, from_mcp_session
-from glassport.incremental import DetectorEngine, FabricatedCallsDetector, ContextDetector, StreamingDetector
-from glassport.session import SessionState
+from glassport.adapters.mcp_session import MCPTraceBuilder, from_mcp_session, _iter_entries
+from glassport.incremental import DetectorEngine, FabricatedCallsDetector, ContextDetector, DataExfiltrationDetector, StreamingDetector
+from glassport.session import SessionLimits, SessionState
 from tests.test_detectors import L, call, handshake
 
 
@@ -26,7 +27,8 @@ class TestFabricatedParity(unittest.TestCase):
     def assert_parity(self, lines, batch_fn=detectors.fabricated_calls, active_type=FabricatedCallsDetector):
         batch = from_mcp_session(lines)
         expected = batch_fn(batch)
-        state, engine = SessionState.from_trace(batch), DetectorEngine([active_type()])
+        state = SessionState.from_trace(batch)
+        engine = DetectorEngine([active_type()]) if active_type else DetectorEngine()
         observed = []
         for event in batch.events:
             state.observe(event)
@@ -34,10 +36,11 @@ class TestFabricatedParity(unittest.TestCase):
         observed.extend(engine.finish(state))
         self.assertEqual(semantic_findings(batch.events, expected),
                          semantic_findings(batch.events, observed))
-        builder, live = MCPTraceBuilder(retain_events=False), DetectorEngine([active_type()])
+        builder = MCPTraceBuilder(retain_events=False)
+        live = DetectorEngine([active_type()]) if active_type else DetectorEngine()
         events, findings = [], []
-        for line in lines:
-            event = builder.ingest_frame(json.loads(line))
+        for entry in _iter_entries(lines):
+            event = builder.ingest_frame(entry)
             if event:
                 events.append(event)
                 findings.extend(live.on_event(event, builder.state))
@@ -176,3 +179,79 @@ class TestContextParity(unittest.TestCase):
         _, found = self.check(handshake(tools=[{"name": "foo", "inputSchema": {"required": 7}}]) +
                               [call(6, 3, "foo", {}), L(7, "s2c", {"id": 99, "result": {}})])
         self.assertEqual([a.subcategory for a in found], ["detector_error", "orphaned_response"])
+
+
+class TestExfiltrationParity(unittest.TestCase):
+    def check(self, lines):
+        return TestFabricatedParity.assert_parity(
+            self, lines, detectors.data_exfiltration, DataExfiltrationDetector)
+
+    def test_argument_and_result_credentials_remain_redacted(self):
+        secret = "sk-ant-api03-" + "A" * 90
+        _, found = self.check(handshake() + [call(6, 3, "web_search", {"key": secret}),
+            L(7, "s2c", {"id": 3, "result": {"content": [{"type": "text", "text": secret}]}})])
+        self.assertIn("pii_anthropic_key", [a.subcategory for a in found])
+        self.assertIn("pii_in_result_anthropic_key", [a.subcategory for a in found])
+        self.assertNotIn(secret, json.dumps([asdict(a) for a in found]))
+
+    def test_future_host_declaration_cannot_erase_egress(self):
+        h = handshake(tools=[{"name": "foo", "description": "https://api.example.test"}])
+        _, found = self.check(h[:4] + [call(6, 3, "foo", {"url": "https://api.example.test/x"})]
+                             + [h[4], call(7, 4, "foo", {"url": "https://api.example.test/x"})])
+        self.assertEqual([(a.subcategory, a.metadata["seq"]) for a in found], [("unexpected_egress_host", 6)])
+
+    def test_removed_host_declaration_applies_to_later_calls(self):
+        h = handshake(tools=[{"name": "foo", "description": "https://api.example.test"}])
+        _, found = self.check(h + [
+            L(6, "c2s", {"id": 3, "method": "tools/list"}),
+            L(7, "s2c", {"id": 3, "result": {"tools": [{"name": "foo"}]}}),
+            call(8, 4, "foo", {"url": "https://api.example.test/x"})])
+        self.assertEqual([a.metadata["seq"] for a in found], [8])
+
+    def test_trusted_cloud_cannot_suppress_sensitive_egress(self):
+        _, found = self.check(handshake() + [call(6, 3, "web_search", {
+            "url": "https://bucket.s3.amazonaws.com/x", "key": "sk-ant-api03-" + "A" * 90})])
+        egress = next(a for a in found if a.subcategory == "unexpected_egress_host")
+        self.assertEqual(egress.severity, 2)
+        self.assertTrue(egress.metadata["has_pii"])
+
+
+class TestFullSemanticParity(unittest.TestCase):
+    def test_all_builtin_detectors_and_raw_evidence(self):
+        from tests.test_streaming import HOSTILE
+        TestFabricatedParity.assert_parity(self, HOSTILE, detectors.annotate, None)
+
+    def test_committed_wire_fixture(self):
+        path = Path(__file__).resolve().parents[1] / "examples/20260609T183929Z_python3_538.jsonl"
+        TestFabricatedParity.assert_parity(self, path.read_text().splitlines(), detectors.annotate, None)
+
+    def test_gate_evidence_survives_full_replay(self):
+        entry = json.loads(call(6, 3, "shadow", {}))
+        entry["gate"] = {"action": "blocked", "tool": "shadow"}
+        _, found = TestFabricatedParity.assert_parity(
+            self, handshake() + [json.dumps(entry)], detectors.annotate, None)
+        self.assertIn("gate_blocked", [a.subcategory for a in found])
+
+    def test_limits_report_once_and_do_not_accumulate_findings(self):
+        builder = MCPTraceBuilder(retain_events=False, limits=SessionLimits(max_pending=1))
+        engine = DetectorEngine()
+        limit_count = 0
+        for i in range(100):
+            event = builder.feed(json.loads(call(i, i, "foo", {})))
+            found = engine.on_event(event, builder.state)
+            limit_count += sum(a.subcategory == "analysis_limit" for a in found)
+        self.assertEqual(limit_count, 1)
+        self.assertEqual(len(builder.pending), 1)
+        self.assertEqual(builder.events, [])
+        self.assertEqual(builder.snapshot().annotations, [])
+
+    def test_declared_state_limit_notice_replays_identically(self):
+        b = MCPTraceBuilder(limits=SessionLimits(max_tools=1))
+        engine, found = DetectorEngine(), []
+        for line in handshake(tools=[{"name": "one"}, {"name": "two"}]):
+            event = b.feed(json.loads(line))
+            found.extend(engine.on_event(event, b.state))
+        trace = b.snapshot()
+        self.assertEqual(semantic_findings(trace.events, found),
+                         semantic_findings(trace.events, detectors.annotate(trace)))
+        self.assertIn("analysis_limit", [a.subcategory for a in found])

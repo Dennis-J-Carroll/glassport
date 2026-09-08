@@ -191,3 +191,53 @@ awaits its own migration and chronological host-declaration tests.
 
 **Next dependency.** PII and exfiltration can reuse the lifecycle without
 duplicating schema/declaration tracking or introducing transport decisions.
+
+## Stage 6 — PII, exfiltration, and live file analysis
+
+**What / why.** `DataExfiltrationDetector` reuses the existing per-event PII
+scanner, validators, normalization, redaction, and egress rules. Declared hosts
+come from bounded current server metadata and tool definitions, cached until
+those facts change. Gate-record interpretation also uses a shared per-event
+helper. Default batch `annotate()` now replays all four built-in passes through
+one state fold; live analysis never rescans earlier events for these passes.
+
+**Files.** `detectors.py` retains public batch functions and scan primitives;
+`incremental.py` owns lifecycle adapters and fixed-code `analysis_limit`
+diagnostics. `adapters/streaming.py` consumes newly parsed events immediately.
+`test_incremental_detectors.py`, `test_streaming.py`, and the real stdio/HTTP
+integration tests lock parity. `scripts/bench_incremental.py` measures repeated
+throughput, latency, and long-session retained memory without timing gates.
+
+**Tests / validation.** Added credential/redaction, future/removed host,
+trusted-cloud PII, all-detector replay, committed-session replay, gate evidence,
+state-limit reporting, bounded growing tails, partial-line bounds, and custom
+registry transition cases. The real filesystem-server stdio capture and named
+SSE HTTP capture now pass through the same parity oracle. Full suite: 772 tests,
+OK; core coverage 92%, incremental module 100%, streaming adapter 97%. All nine
+existing grills passed: advise, report, SARIF, redaction, server, streaming,
+provenance, HTTP tap, and HTTP relay. The existing 2-second adversarial scanner
+test exceeded its threshold by 21 ms while benchmarks ran concurrently; an
+isolated recheck and the complete isolated suite passed. No threshold changed.
+
+**Performance evidence.** Python 3.13.5 on this Linux host, five samples of
+2000 events: median 18,922 events/sec, median event latency 48.06 microseconds,
+p95 74.29 microseconds. After warming through 8192 events, retained allocations
+grew 332 bytes through 32,768 events. Pending correlation stayed at 4096;
+retained events and annotations stayed at zero. These numbers measure the
+builder plus detectors, excluding transport, disk persistence, and rendering;
+they are observations, not portable guarantees. Existing batch benchmark also
+passed its ceilings.
+
+**Compatibility / remaining risk.** Future host declarations no longer erase
+earlier egress findings; removed hosts affect later calls. Custom modifications
+to the batch `DETECTORS` registry retain fault-isolated batch execution, and a
+registry change rebuilds the file view. `StreamingSession` bounds retained
+events, findings, and partial input by its byte window (50 MB default); once a
+file exceeds that window, each change replays its bounded tail and explicitly
+marks `tail_only`. It can therefore lose early declarations, as batch tail
+ingestion does. Continuous analysis should use the no-history builder/engine
+pair and persist wire evidence independently. Detector errors and state-limit
+diagnostics are returned to callers without an internal annotation archive.
+
+**Next dependency.** A small pure policy interface can consume these findings
+without adding security judgments or forwarding decisions to transport code.

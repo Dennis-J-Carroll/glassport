@@ -145,35 +145,34 @@ def fabricated_calls(trace: InteractionTrace) -> list[Annotation]:
 
 
 def gate_actions(trace: InteractionTrace) -> list[Annotation]:
-    """
-    Gate enforcement (M5) surfaced as INFO annotations — the record that
-    a frame was stopped at the glass, not a judgment about it (the call
-    itself is still judged by fabricated_calls / context_violations).
-    """
+    """Observed gate records; classification remains separate from enforcement."""
+    return [a for e in trace.events for a in _gate_actions_for_event(e)]
+
+
+def _gate_actions_for_event(e: Event) -> list[Annotation]:
     out: list[Annotation] = []
-    for e in trace.events:
-        g = e.metadata.get("gate")
-        if not isinstance(g, dict):
-            continue
-        if g.get("action") == "blocked":
-            out.append(_ann(
-                e, AnnotationKind.INFO, "gate_blocked",
-                f"gate blocked tools/call '{g.get('tool')}' — outside the "
-                f"declared surface; the server never saw this frame",
-                severity=1, tool=g.get("tool")))
-        elif g.get("action") == "injected":
-            out.append(_ann(
-                e, AnnotationKind.INFO, "gate_injected_response",
-                f"error response synthesized by the gate for blocked call "
-                f"'{g.get('tool')}'; the server never sent this frame",
-                severity=1, tool=g.get("tool")))
-        elif g.get("action") == "gate_skipped":
-            out.append(_ann(
-                e, AnnotationKind.INFO, "gate_skipped",
-                f"gate failed open for tools/call '{g.get('tool')}' — "
-                f"no tools/list response arrived within the hold window, "
-                f"so this call was forwarded unenforced",
-                severity=1, tool=g.get("tool"), reason=g.get("reason")))
+    g = e.metadata.get("gate")
+    if not isinstance(g, dict):
+        return []
+    if g.get("action") == "blocked":
+        out.append(_ann(
+            e, AnnotationKind.INFO, "gate_blocked",
+            f"gate blocked tools/call '{g.get('tool')}' — outside the "
+            f"declared surface; the server never saw this frame",
+            severity=1, tool=g.get("tool")))
+    elif g.get("action") == "injected":
+        out.append(_ann(
+            e, AnnotationKind.INFO, "gate_injected_response",
+            f"error response synthesized by the gate for blocked call "
+            f"'{g.get('tool')}'; the server never sent this frame",
+            severity=1, tool=g.get("tool")))
+    elif g.get("action") == "gate_skipped":
+        out.append(_ann(
+            e, AnnotationKind.INFO, "gate_skipped",
+            f"gate failed open for tools/call '{g.get('tool')}' — "
+            f"no tools/list response arrived within the hold window, "
+            f"so this call was forwarded unenforced",
+            severity=1, tool=g.get("tool"), reason=g.get("reason")))
     return out
 
 
@@ -1194,58 +1193,60 @@ def _is_trusted_host(hostname: str) -> bool:
 
 
 def data_exfiltration(trace: InteractionTrace) -> list[Annotation]:
-    """PII/credentials in tool-call arguments, sensitive egress to
-    undeclared or merely-trusted hosts, and secrets leaked back in tool
-    results. Severity: 3 hostile, 2 should-not-happen, 1 worth a look."""
+    """PII and egress findings using declarations observed before each event."""
+    from glassport.incremental import DataExfiltrationDetector, replay
+    return replay(trace, [DataExfiltrationDetector()])
+
+
+def _exfiltration_for_event(e: Event, declared: set[str]) -> list[Annotation]:
+    """Shared payload checks; declared hosts come from bounded session state."""
     out: list[Annotation] = []
-    declared = _extract_declared_hosts(trace)
-
-    for e in trace.events:
-        if e.kind == EventKind.TOOL_CALL:
-            for name, args in _tool_call_parts(e):
-                blob = json.dumps(args, ensure_ascii=False, default=str)
-                hits = _scan_pii(blob)
-                for pat, value in hits:
-                    out.append(_ann(
-                        e, AnnotationKind.DIVERGENCE, f"pii_{pat.category}",
-                        f"tools/call '{name}' argument contains {pat.description}: "
-                        f"{_redact(value, pat.category)}",
-                        severity=pat.severity,
-                        category=HallucinationCategory.TOOL_USE,
-                        pii_category=pat.category, tool=name))
-
-                has_pii = any(p.severity >= 2 for p, _ in hits)
-                for host in _extract_hosts_from_args(args):
-                    if host in declared:
-                        continue
-                    trusted = _is_trusted_host(host)
-                    if trusted and not has_pii:
-                        continue            # ordinary cloud traffic, no secret
-                    severity = 3 if (has_pii and not trusted) else 2
-                    out.append(_ann(
-                        e, AnnotationKind.ANOMALY, "unexpected_egress_host",
-                        f"tools/call '{name}' reaches {host}"
-                        + (" (allowlisted)" if trusted else " (undeclared)")
-                        + (" CARRYING SENSITIVE DATA" if has_pii else ""),
-                        severity=severity,
-                        host=host, has_pii=has_pii, trusted=trusted, tool=name))
-
-        elif e.kind == EventKind.TOOL_RESULT:
-            blob = json.dumps([p.content for p in e.parts],
-                              ensure_ascii=False, default=str)
-            for pat, _ in _scan_pii(blob):
-                if pat.severity < 3:
-                    continue
+    if e.kind == EventKind.TOOL_CALL:
+        for name, args in _tool_call_parts(e):
+            blob = json.dumps(args, ensure_ascii=False, default=str)
+            hits = _scan_pii(blob)
+            for pat, value in hits:
                 out.append(_ann(
-                    e, AnnotationKind.DIVERGENCE, f"pii_in_result_{pat.category}",
-                    f"tool result leaks {pat.description}",
-                    severity=3, category=HallucinationCategory.TOOL_USE,
-                    pii_category=pat.category))
+                    e, AnnotationKind.DIVERGENCE, f"pii_{pat.category}",
+                    f"tools/call '{name}' argument contains {pat.description}: "
+                    f"{_redact(value, pat.category)}",
+                    severity=pat.severity,
+                    category=HallucinationCategory.TOOL_USE,
+                    pii_category=pat.category, tool=name))
+
+            has_pii = any(p.severity >= 2 for p, _ in hits)
+            for host in _extract_hosts_from_args(args):
+                if host in declared:
+                    continue
+                trusted = _is_trusted_host(host)
+                if trusted and not has_pii:
+                    continue            # ordinary cloud traffic, no secret
+                severity = 3 if (has_pii and not trusted) else 2
+                out.append(_ann(
+                    e, AnnotationKind.ANOMALY, "unexpected_egress_host",
+                    f"tools/call '{name}' reaches {host}"
+                    + (" (allowlisted)" if trusted else " (undeclared)")
+                    + (" CARRYING SENSITIVE DATA" if has_pii else ""),
+                    severity=severity,
+                    host=host, has_pii=has_pii, trusted=trusted, tool=name))
+
+    elif e.kind == EventKind.TOOL_RESULT:
+        blob = json.dumps([p.content for p in e.parts],
+                          ensure_ascii=False, default=str)
+        for pat, _ in _scan_pii(blob):
+            if pat.severity < 3:
+                continue
+            out.append(_ann(
+                e, AnnotationKind.DIVERGENCE, f"pii_in_result_{pat.category}",
+                f"tool result leaks {pat.description}",
+                severity=3, category=HallucinationCategory.TOOL_USE,
+                pii_category=pat.category))
     return out
 
 
 DETECTORS = [fabricated_calls, context_violations, gate_actions,
              data_exfiltration]
+_DEFAULT_DETECTORS = tuple(DETECTORS)
 
 
 def _detector_error(detector_name: str, exc: BaseException) -> Annotation:
@@ -1269,6 +1270,12 @@ def annotate(trace: InteractionTrace) -> list[Annotation]:
     Each detector is isolated: if one raises, its failure is captured as
     a 'detector_error' annotation and the remaining detectors still run,
     so a single bad pass can't blind the whole overwatch."""
+    if tuple(DETECTORS) == _DEFAULT_DETECTORS:
+        from glassport.incremental import replay
+        found = replay(trace)
+        trace.annotations.extend(found)
+        return found
+    # Preserve the existing extension point for explicitly installed batch passes.
     found: list[Annotation] = []
     for detector in DETECTORS:
         try:

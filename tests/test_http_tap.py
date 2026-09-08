@@ -341,6 +341,8 @@ class TestHttpTapNamedSse(unittest.TestCase):
 
         # Confirm the raw log entries are no longer ``frame: null``.
         text = logs[0].read_text(encoding="utf-8")
+        from tests.test_incremental_detectors import TestFabricatedParity
+        TestFabricatedParity.assert_parity(self, text.splitlines(), annotate, None)
         s2c = [json.loads(ln) for ln in text.splitlines()
                if '"dir": "s2c"' in ln]
         for entry in s2c:

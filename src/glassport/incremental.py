@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+from dataclasses import asdict
 
 from glassport import detectors
 from glassport.interaction_trace import Annotation, Event, EventKind, InteractionTrace, _new_id
@@ -88,6 +89,33 @@ class ContextDetector(StreamingDetector):
         return out
 
 
+class GateRecordsDetector(StreamingDetector):
+    name = "gate_actions"
+
+    def on_event(self, event: Event, state: SessionState) -> list[Annotation]:
+        return detectors._gate_actions_for_event(event)
+
+
+class DataExfiltrationDetector(StreamingDetector):
+    name = "data_exfiltration"
+
+    def __init__(self):
+        self._tool_defs = self._server_info = None
+        self._declared_hosts: set[str] = set()
+
+    def on_event(self, event: Event, state: SessionState) -> list[Annotation]:
+        if state.tool_defs is not self._tool_defs or state.server_info is not self._server_info:
+            hosts: set[str] = set()
+            detectors._extract_hosts_from_value(state.server_info, hosts)
+            for tool in state.tool_defs.values():
+                detectors._extract_hosts_from_value(tool.get("description", ""), hosts)
+                detectors._extract_hosts_from_value(tool.get("inputSchema", {}), hosts)
+            # Commit the cache only after successful extraction.
+            self._tool_defs, self._server_info = state.tool_defs, state.server_info
+            self._declared_hosts = hosts
+        return detectors._exfiltration_for_event(event, self._declared_hosts)
+
+
 class DetectorEngine:
     """Fault-isolated detector lifecycle; findings are returned, never accumulated.
 
@@ -98,9 +126,11 @@ class DetectorEngine:
 
     def __init__(self, active: Iterable[StreamingDetector] | None = None):
         self.active = tuple(active) if active is not None else (
-            FabricatedCallsDetector(), ContextDetector())
+            FabricatedCallsDetector(), ContextDetector(), GateRecordsDetector(),
+            DataExfiltrationDetector())
         self._state: SessionState | None = None
         self._finished = False
+        self._reported_limits: set[str] = set()
 
     def _bind(self, state: SessionState):
         if self._state is None:
@@ -136,7 +166,16 @@ class DetectorEngine:
         if self._finished:
             raise ValueError("detector engine is finished")
         self._bind(state)
-        return self._run("on_event", state, event)
+        found = self._run("on_event", state, event)
+        reasons = state.limit_reasons | ({"request_correlation"}
+                  if event.metadata.get("correlation_limited") else set())
+        for reason in sorted(reasons - self._reported_limits):
+            found.append(detectors._ann(
+                event, detectors.AnnotationKind.ANOMALY, "analysis_limit",
+                f"session state limit reached ({reason}); analysis may be incomplete",
+                severity=1, reason=reason, limits=asdict(state.limits)))
+            self._reported_limits.add(reason)
+        return found
 
     def finish(self, state: SessionState) -> list[Annotation]:
         self._bind(state)
