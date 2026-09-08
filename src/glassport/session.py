@@ -125,6 +125,8 @@ class SessionState:
         self.surface_updated = False
         self.surface_delta = []
         md = event.metadata
+        if md.get("session_metadata_limited"):
+            self.limit_reasons.add("session_metadata")
         frame = event_frame(event)
         if event.kind == EventKind.MESSAGE and not md.get("server_initiated"):
             method = md.get("method")

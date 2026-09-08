@@ -241,3 +241,12 @@ diagnostics are returned to callers without an internal annotation archive.
 
 **Next dependency.** A small pure policy interface can consume these findings
 without adding security judgments or forwarding decisions to transport code.
+
+**Parity follow-up.** Final review found that an oversized `clientInfo` or
+`protocolVersion` produced a live metadata-limit warning that normalized-event
+replay lost: the builder recorded truncation only in mutable session state.
+Truncation now marks the triggering event with `session_metadata_limited`, and
+the shared state fold consumes that fact. Raw payloads remain unchanged. A new
+regression first reproduced the failure for client identity and both protocol
+version directions, then passed in retained, no-history, and batch replay modes.
+The focused session/engine/policy/file-streaming suite passed all 62 tests.

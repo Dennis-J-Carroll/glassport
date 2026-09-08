@@ -255,3 +255,30 @@ class TestFullSemanticParity(unittest.TestCase):
         self.assertEqual(semantic_findings(trace.events, found),
                          semantic_findings(trace.events, detectors.annotate(trace)))
         self.assertIn("analysis_limit", [a.subcategory for a in found])
+
+    def test_identity_metadata_limit_notice_survives_event_and_wire_replay(self):
+        for index, container, field in ((0, "params", "clientInfo"),
+                                        (0, "params", "protocolVersion"),
+                                        (1, "result", "protocolVersion")):
+            with self.subTest(field=field, index=index):
+                entries = [json.loads(line) for line in handshake(tools=[])]
+                entries[index]["frame"][container][field] = "x" * 200
+                limits = SessionLimits(max_state_bytes=100)
+                retained = MCPTraceBuilder(limits=limits)
+                bounded = MCPTraceBuilder(limits=limits, retain_events=False)
+                live_engine, bounded_engine = DetectorEngine(), DetectorEngine()
+                live, bounded_found, bounded_events = [], [], []
+                for entry in entries:
+                    event = retained.feed(entry)
+                    live.extend(live_engine.on_event(event, retained.state))
+                    event = bounded.feed(entry)
+                    bounded_events.append(event)
+                    bounded_found.extend(bounded_engine.on_event(event, bounded.state))
+                trace = retained.snapshot()
+                expected = semantic_findings(trace.events, live)
+                self.assertEqual(expected, semantic_findings(trace.events, detectors.annotate(trace)))
+                self.assertEqual(expected, semantic_findings(bounded_events, bounded_found))
+                limits_found = [a for a in live if a.subcategory == "analysis_limit"]
+                self.assertEqual(len(limits_found), 1)
+                self.assertEqual(limits_found[0].metadata["reason"], "session_metadata")
+                self.assertEqual(limits_found[0].event_id, trace.events[index].id)

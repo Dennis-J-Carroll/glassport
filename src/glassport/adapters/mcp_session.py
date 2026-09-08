@@ -151,7 +151,6 @@ class MCPTraceBuilder:
         event = self.events[-1]
         if isinstance(entry.get("gate"), dict):
             event.metadata["gate"] = entry["gate"]
-        self.state.observe(event)
         # Actor metadata is a bounded materialized view; events remain faithful.
         changed_actors = (self.client, self.server) if (
             event.metadata.get("method") == "initialize"
@@ -162,7 +161,8 @@ class MCPTraceBuilder:
                 copied = bounded_copy(value, self.state.limits.max_state_bytes)
                 if copied is None and value is not None:
                     actor.metadata.pop(key, None)
-                    self.state.limit_reasons.add("session_metadata")
+                    event.metadata["session_metadata_limited"] = True
+        self.state.observe(event)
         if not self.retain_events:
             self.events.clear()
         return event
