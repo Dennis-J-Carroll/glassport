@@ -138,6 +138,8 @@ class SessionState:
         md = event.metadata
         if md.get("session_metadata_limited"):
             self.limit_reasons.add("session_metadata")
+        if md.get("correlation_saturated"):
+            self.limit_reasons.add("request_correlation_saturated")
         frame = event_frame(event)
         if md.get("declaration_correlation_lost"):
             self._invalidate_declaration()

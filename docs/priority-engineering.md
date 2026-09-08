@@ -310,7 +310,16 @@ reused its cursor; and eviction of a refresh left stale exclusion active.
 
 Pending records now keep RPC methods separate from tool names. Replacing an
 outstanding ID removes its old association before validation and retains a
-bounded ambiguous-ID tombstone, so a response cannot stand for either request.
+bounded ambiguous-ID quarantine, so a response cannot stand for either request.
+Evicted outstanding IDs enter the same quarantine and remain ambiguous even
+after a reply; immediate reuse cannot attach a delayed response. Each direction
+retains at most `max_pending` quarantined IDs beside its bounded pending map.
+If that quarantine fills, an additional fixed `analysis_limit` reason,
+`request_correlation_saturated`, records that new correlation in that direction
+is disabled for the rest of the session. This conservative fallback preserves
+existing healthy declarations under unrelated pressure; a later listing cannot
+establish new evidence after saturation. Before saturation, a fresh different
+ID can recover declaration knowledge. After saturation, start a fresh session.
 Each root listing starts a new declaration generation immediately and makes
 exclusion unknown while its response is pending. Continuations bind to that
 generation when requested; duplicate, unmatched, malformed, and lost chains
@@ -339,12 +348,13 @@ metadata conservatively remain unknown; reimport their original wire logs to
 recover correlated declarations. The adapter's protocol-reply display tags
 remain available for existing renderers.
 
-The four independent repros failed before the change. Fifteen focused tests in
+The four independent repros failed before the change. Twenty focused tests in
 `tests/test_declaration_correlation.py` cover the hostile cases, recovery,
 positive declarations, direction isolation, retention, and complete event,
 finding, and policy parity. The focused declaration/session/detector/policy/
-streaming suite passed 145 tests; full-suite coverage validation remains owned
-by the integrating controller. No HTTP forwarding behavior changes here.
+streaming suite passed 150 tests. The integrating controller recorded 799
+passing tests under sysmon coverage at the first correction commit; the final
+quarantine correction awaits full integration validation. No HTTP forwarding behavior changes here.
 
 ## Library integration
 

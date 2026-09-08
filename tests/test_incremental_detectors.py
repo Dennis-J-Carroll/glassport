@@ -235,12 +235,14 @@ class TestFullSemanticParity(unittest.TestCase):
     def test_limits_report_once_and_do_not_accumulate_findings(self):
         builder = MCPTraceBuilder(retain_events=False, limits=SessionLimits(max_pending=1))
         engine = DetectorEngine()
-        limit_count = 0
+        limit_reasons = []
         for i in range(100):
             event = builder.feed(json.loads(call(i, i, "foo", {})))
             found = engine.on_event(event, builder.state)
-            limit_count += sum(a.subcategory == "analysis_limit" for a in found)
-        self.assertEqual(limit_count, 1)
+            limit_reasons.extend(a.metadata["reason"] for a in found
+                                 if a.subcategory == "analysis_limit")
+        self.assertCountEqual(limit_reasons,
+                              ["request_correlation", "request_correlation_saturated"])
         self.assertEqual(len(builder.pending), 1)
         self.assertEqual(builder.events, [])
         self.assertEqual(builder.snapshot().annotations, [])

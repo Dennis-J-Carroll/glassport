@@ -100,6 +100,26 @@ class TestDeclarationCorrelation(unittest.TestCase):
     def test_duplicate_valid_ids_do_not_establish_evidence(self):
         self.check([req(1), req(1), reply(1, []), call(2)])
 
+    def test_duplicate_id_quarantine_survives_first_reply_and_immediate_reuse(self):
+        self.check([req(1), req(1), reply(1, []), req(1), reply(1, []), call(2)])
+
+    def test_evicted_id_reuse_cannot_attach_delayed_old_reply(self):
+        self.check([req(1), req(2, "ping"), req(1), reply(1, []), call(3)],
+                   limits=SessionLimits(max_pending=1))
+
+    def test_quarantine_saturation_cannot_forget_ambiguous_ids(self):
+        self.check([req(1), req(2, "ping"), req(3, "ping"), req(1),
+                    reply(1, []), call(4)], limits=SessionLimits(max_pending=1))
+
+    def test_fresh_id_recovers_while_ambiguous_id_remains_quarantined(self):
+        self.check([req(1), req(1), reply(1, []), req(2), reply(2, ["real"]), call(3)],
+                   limits=SessionLimits(max_pending=3), action=Action.ALLOW)
+
+    def test_server_quarantine_saturation_does_not_disable_client_listing(self):
+        self.check([("s2c", {"id": i, "method": "ping"}) for i in range(3)] +
+                   [req(1), reply(1, ["real"]), call(2)],
+                   limits=SessionLimits(max_pending=1), action=Action.ALLOW)
+
     def test_duplicate_continuations_are_ambiguous(self):
         self.check([req(1), reply(1, ["a"], nextCursor="next"),
             req(2, cursor="next"), req(3, cursor="next"), reply(2, []),
@@ -124,13 +144,13 @@ class TestDeclarationCorrelation(unittest.TestCase):
 
     def test_fresh_listing_restores_evidence_after_loss(self):
         self.check([req(1), reply(1, []), req(2), req(3, "ping"),
-            reply(2, ["real"]), req(4), reply(4, ["real"]), call(5)],
+            reply(2, ["real"]), reply(3, []), req(4), reply(4, ["real"]), call(5)],
             limits=SessionLimits(max_pending=1), action=Action.ALLOW)
 
     def test_unrelated_evictions_and_opposite_direction_preserve_surface(self):
         self.check([req(1), reply(1, ["real"]), req(2, "ping"),
             req(3, "ping"), ("s2c", {"id": 3, "method": "tools/list"}),
-            ("s2c", {"id": 4, "method": "ping"}), call(5)],
+            ("s2c", {"id": 4, "method": "ping"}), req(6, "ping"), call(5)],
             limits=SessionLimits(max_pending=1), action=Action.ALLOW)
 
     def test_superseded_root_reply_cannot_replace_new_surface(self):
@@ -161,10 +181,13 @@ class TestDeclarationCorrelation(unittest.TestCase):
             event = b.ingest_frame({"seq": i, "dir": "c2s", "frame": req(i)[1]})
             engine.on_event(event, b.state)
         self.assertEqual(len(b.pending), 3)
+        self.assertEqual(len(b._quarantined["c2s"]), 3)
+        self.assertEqual(b._correlation_saturated, {"c2s"})
         self.assertEqual(b.events, [])
         self.assertEqual(b.snapshot().annotations, [])
         self.assertIsNone(b.state._pages)
         self.assertLessEqual(b._generation_counter.bit_length(), 128)
+        b = MCPTraceBuilder(retain_events=False)
         b._generation_counter = (1 << 128) - 1
         b.ingest_frame({"dir": "c2s", "frame": req(1001)[1]})
         b.ingest_frame({"dir": "s2c", "frame": reply(1001, [])[1]})

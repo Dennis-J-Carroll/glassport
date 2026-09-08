@@ -116,6 +116,8 @@ class MCPTraceBuilder:
         # request id -> typed request facts (None method marks ambiguous reuse)
         self.pending: OrderedDict = OrderedDict()      # client-initiated
         self.pending_s2c: OrderedDict = OrderedDict()  # server-initiated
+        self._quarantined = {"c2s": set(), "s2c": set()}
+        self._correlation_saturated: set[str] = set()
         self._generation_counter = 0
         self.error_seen = False
         self.last_event_id: Optional[str] = None    # rough causal spine
@@ -129,22 +131,46 @@ class MCPTraceBuilder:
                 and request.generation == self.state.declaration_generation):
             event.metadata["declaration_correlation_lost"] = True
 
+    def _quarantine(self, direction, key, event):
+        quarantine = self._quarantined[direction]
+        if key in quarantine:
+            return
+        if len(quarantine) < self.state.limits.max_pending:
+            quarantine.add(key)
+        else:
+            # Forgetting ambiguous IDs would permit a delayed old response to
+            # impersonate a new request. Once this bounded set fills, stop
+            # establishing new correlations in this direction for this session.
+            self._correlation_saturated.add(direction)
+            event.metadata["correlation_saturated"] = direction
+
     def _remember(self, pending, rid, event, method, tool_name=None, cursor=None):
-        # Remove an existing association before validating its replacement.
-        # Keep one bounded tombstone on duplicate IDs: neither request can
-        # identify the eventual response unambiguously.
+        direction = "c2s" if pending is self.pending else "s2c"
         key = (type(rid), rid) if self._valid_id(rid) else None
         prior = pending.pop(key, None) if key is not None else None
+        if prior is not None:
+            self._quarantine(direction, key, event)
         if pending is self.pending:
             self._lost(prior, event)
+        if key is not None and len(pending) >= self.state.limits.max_pending:
+            evicted_key, evicted = pending.popitem(last=False)
+            self._quarantine(direction, evicted_key, event)
+            if pending is self.pending:
+                self._lost(evicted, event)
+            self.correlation_evictions += 1
+            event.metadata["correlation_limited"] = True
         valid = (key is not None and prior is None
+                 and key not in self._quarantined[direction]
+                 and direction not in self._correlation_saturated
                  and isinstance(method, str) and bool(method)
-                 and not event.metadata.get("correlation_limited")
                  and len(method) <= self.state.limits.max_name_chars
                  and (method != "tools/call" or (isinstance(tool_name, str)
                       and len(tool_name) <= self.state.limits.max_name_chars))
                  and (cursor is None or (isinstance(cursor, str)
                       and 0 < len(cursor) <= self.state.limits.max_name_chars)))
+        if method == "tools/list":
+            params = event.parts[0].content.get("params")
+            valid = valid and (params is None or isinstance(params, dict))
         generation = None
         if pending is self.pending and method == "tools/list":
             if cursor is None:
@@ -160,14 +186,10 @@ class MCPTraceBuilder:
             event.metadata["declaration_generation"] = generation
         if not valid:
             event.metadata["correlation_limited"] = True
+            if key is not None:
+                self._quarantine(direction, key, event)
         if key is None:
             return
-        if len(pending) >= self.state.limits.max_pending:
-            _, evicted = pending.popitem(last=False)
-            if pending is self.pending:
-                self._lost(evicted, event)
-            self.correlation_evictions += 1
-            event.metadata["correlation_limited"] = True
         pending[key] = (_PendingRequest(event.id, method, tool_name, cursor, generation)
                         if valid else _PendingRequest(None, None))
 
@@ -315,8 +337,6 @@ class MCPTraceBuilder:
                     # remember non-call requests so their results can pair too
                     params = frame.get("params")
                     cursor = params.get("cursor") if isinstance(params, dict) else None
-                    if method == "tools/list" and params is not None and not isinstance(params, dict):
-                        ev.metadata["correlation_limited"] = True
                     self._remember(pending, rid, ev, method, cursor=cursor if method == "tools/list" else None)
 
         # ── server → client ─────────────────────────────────────────
