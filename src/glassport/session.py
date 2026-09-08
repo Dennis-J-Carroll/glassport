@@ -69,6 +69,8 @@ class SessionState:
         self.limit_reasons: set[str] = set()
         self._pages: list[dict] | None = None
         self._next_cursor: str | None = None
+        self.declaration_generation: int | None = None
+        self._page_pending = False
 
     @classmethod
     def from_trace(cls, trace):
@@ -120,6 +122,15 @@ class SessionState:
         self.tool_defs = {}
         self.surface_event_id = self.surface_seq = None
 
+    def can_continue(self, cursor) -> bool:
+        return (self.declaration_generation is not None and self._pages is not None
+                and not self._page_pending and cursor == self._next_cursor)
+
+    def _invalidate_declaration(self):
+        self._unknown_surface()
+        self._pages = self._next_cursor = self.declaration_generation = None
+        self._page_pending = False
+
     def observe(self, event: Event) -> None:
         """Fold one normalized event in wire order, without modifying evidence."""
         self.surface_updated = False
@@ -128,6 +139,8 @@ class SessionState:
         if md.get("session_metadata_limited"):
             self.limit_reasons.add("session_metadata")
         frame = event_frame(event)
+        if md.get("declaration_correlation_lost"):
+            self._invalidate_declaration()
         if event.kind == EventKind.MESSAGE and not md.get("server_initiated"):
             method = md.get("method")
             if method == "notifications/initialized":
@@ -139,6 +152,19 @@ class SessionState:
                     if isinstance(params, dict) else None
             elif method == "tools/list":
                 self.tools_list_requested = True
+                params = frame.get("params")
+                cursor = params.get("cursor") if isinstance(params, dict) else None
+                generation = md.get("declaration_generation")
+                if cursor is None:
+                    self._invalidate_declaration()
+                    self.declaration_generation = generation
+                    self._page_pending = generation is not None
+                elif (generation is not None
+                      and generation == self.declaration_generation
+                      and self.can_continue(cursor)):
+                    self._page_pending = True
+                else:
+                    self._invalidate_declaration()
         if md.get("method_replied_to") == "<initialize>":
             result = frame.get("result")
             if isinstance(result, dict) and "error" not in frame:
@@ -147,7 +173,11 @@ class SessionState:
 
         if md.get("method_replied_to") != "<tools/list>":
             return
+        generation = md.get("declaration_generation")
+        if generation is None or generation != self.declaration_generation:
+            return  # Superseded or ambiguous responses cannot establish facts.
         self.surface_updated = True
+        self._page_pending = False
         tools = tool_declaration(event)
         request_cursor = md.get("request_cursor")
         result = frame.get("result")
@@ -155,8 +185,7 @@ class SessionState:
         if tools is None or (request_cursor is not None and (
             self._pages is None or request_cursor != self._next_cursor
         )):
-            self._pages = self._next_cursor = None
-            self._unknown_surface()
+            self._invalidate_declaration()
             return
         if request_cursor is None:
             self._pages = []
@@ -166,8 +195,7 @@ class SessionState:
             not isinstance(next_cursor, str) or not next_cursor
             or len(next_cursor) > self.limits.max_name_chars or next_cursor == request_cursor
         )):
-            self._pages = self._next_cursor = None
-            self._unknown_surface()
+            self._invalidate_declaration()
             return
         if next_cursor is not None:
             self._pages, self._next_cursor = tools, next_cursor

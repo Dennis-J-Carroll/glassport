@@ -61,6 +61,14 @@ class ContextDetector(StreamingDetector):
                     out.append(detectors._ann(
                         event, detectors.AnnotationKind.ANOMALY, "call_before_declaration",
                         f"tools/call '{name}' and no tools/list request was ever sent", severity=1))
+                if state.surface is None and not (
+                    state.initialized and state.first_surface is None
+                    and not state.tools_list_requested
+                ):
+                    out.append(detectors._ann(
+                        event, detectors.AnnotationKind.ANOMALY, "declaration_unavailable",
+                        f"tools/call '{name}' cannot be checked against an available complete declaration",
+                        severity=1))
                 schema = (state.tool_defs.get(name) or {}).get("inputSchema")
                 for problem in detectors._schema_problems(args, schema):
                     out.append(detectors._ann(

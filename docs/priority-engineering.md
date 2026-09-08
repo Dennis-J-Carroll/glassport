@@ -301,6 +301,51 @@ session/engine/policy pipeline after defining those delivery and session
 contracts. No broad HTTP gate, approval workflow, policy DSL, dependency,
 package-version change, push, or release was added here.
 
+## Declaration correlation correction — before HTTP routing
+
+Independent review reproduced four paths to false fabricated-call blocks:
+angle-bracket tool names impersonated protocol requests; rejected duplicate
+IDs reused stale requests; an old continuation completed a newer listing that
+reused its cursor; and eviction of a refresh left stale exclusion active.
+
+Pending records now keep RPC methods separate from tool names. Replacing an
+outstanding ID removes its old association before validation and retains a
+bounded ambiguous-ID tombstone, so a response cannot stand for either request.
+Each root listing starts a new declaration generation immediately and makes
+exclusion unknown while its response is pending. Continuations bind to that
+generation when requested; duplicate, unmatched, malformed, and lost chains
+remain unknown. Superseded responses never replace newer evidence. Relevant
+correlation losses are recorded on the triggering normalized event; unrelated
+or opposite-direction evictions preserve healthy declarations.
+
+Generation identities are deterministic 128-bit counters, with saturation
+leaving declarations unknown instead of reusing an old identity. Only the current
+chain and the existing bounded pending maps retain generation data. No event
+or finding history is added. Normalized-event and raw-wire replay reconstruct
+the same evidence, findings, and policy actions with identical limits.
+
+Calls without a complete available declaration now receive a severity-1
+`declaration_unavailable` observation, unless `call_before_declaration` already
+explains the missing evidence. Explicit fabricated-call policy consequently
+warns while declarations are unknown. Valid complete listings, known-empty
+exclusion, completed pagination, and current-schema validation retain their
+existing behavior; a fresh valid listing restores declaration knowledge.
+Angle-bracket tool results, including errors, are now ordinary tool results.
+
+These are intentional compatibility corrections: pending refreshes suspend
+old schema and host declarations as well as exclusion, and new low-severity
+observations can appear in analysis. Older normalized events without generation
+metadata conservatively remain unknown; reimport their original wire logs to
+recover correlated declarations. The adapter's protocol-reply display tags
+remain available for existing renderers.
+
+The four independent repros failed before the change. Fifteen focused tests in
+`tests/test_declaration_correlation.py` cover the hostile cases, recovery,
+positive declarations, direction isolation, retention, and complete event,
+finding, and policy parity. The focused declaration/session/detector/policy/
+streaming suite passed 145 tests; full-suite coverage validation remains owned
+by the integrating controller. No HTTP forwarding behavior changes here.
+
 ## Library integration
 
 The caller must persist original tap entries separately and pass one session's

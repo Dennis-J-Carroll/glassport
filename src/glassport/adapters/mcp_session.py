@@ -41,7 +41,7 @@ from __future__ import annotations
 
 import json
 from collections import OrderedDict
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
@@ -75,6 +75,15 @@ def _iter_entries(source: Iterable[str]) -> Iterable[dict]:
         yield entry
 
 
+@dataclass(frozen=True)
+class _PendingRequest:
+    event_id: str | None
+    method: str | None
+    tool_name: str | None = None
+    cursor: str | None = None
+    generation: int | None = None
+
+
 class MCPTraceBuilder:
     """Incremental MCP evidence normalization and bounded session facts.
 
@@ -104,37 +113,71 @@ class MCPTraceBuilder:
         # their own id sequence over the same pipe, so id 1 from the client
         # and id 1 from the server are different requests. Two pending maps,
         # one per direction, keep them from cross-pairing.
-        # request id -> (event_id of the request event, tool/<method> name)
+        # request id -> typed request facts (None method marks ambiguous reuse)
         self.pending: OrderedDict = OrderedDict()      # client-initiated
         self.pending_s2c: OrderedDict = OrderedDict()  # server-initiated
+        self._generation_counter = 0
         self.error_seen = False
         self.last_event_id: Optional[str] = None    # rough causal spine
         self._client_name = client_name
         self._user_intent = user_intent
         self._trace: Optional[InteractionTrace] = None
 
-    def _remember(self, pending, rid, event, name, cursor=None):
-        if not self._valid_id(rid) or not isinstance(name, str) or len(name) > self.state.limits.max_name_chars:
+    def _lost(self, request, event):
+        if (request is not None and request.method == "tools/list"
+                and request.generation is not None
+                and request.generation == self.state.declaration_generation):
+            event.metadata["declaration_correlation_lost"] = True
+
+    def _remember(self, pending, rid, event, method, tool_name=None, cursor=None):
+        # Remove an existing association before validating its replacement.
+        # Keep one bounded tombstone on duplicate IDs: neither request can
+        # identify the eventual response unambiguously.
+        key = (type(rid), rid) if self._valid_id(rid) else None
+        prior = pending.pop(key, None) if key is not None else None
+        if pending is self.pending:
+            self._lost(prior, event)
+        valid = (key is not None and prior is None
+                 and isinstance(method, str) and bool(method)
+                 and not event.metadata.get("correlation_limited")
+                 and len(method) <= self.state.limits.max_name_chars
+                 and (method != "tools/call" or (isinstance(tool_name, str)
+                      and len(tool_name) <= self.state.limits.max_name_chars))
+                 and (cursor is None or (isinstance(cursor, str)
+                      and 0 < len(cursor) <= self.state.limits.max_name_chars)))
+        generation = None
+        if pending is self.pending and method == "tools/list":
+            if cursor is None:
+                # Fixed-size, deterministic identity also survives raw replay.
+                # Exhaustion fails to unknown instead of wrapping into old IDs.
+                if self._generation_counter < (1 << 128) - 1:
+                    self._generation_counter += 1
+                    generation = self._generation_counter
+            elif self.state.can_continue(cursor):
+                generation = self.state.declaration_generation
+            if not valid:
+                generation = None
+            event.metadata["declaration_generation"] = generation
+        if not valid:
             event.metadata["correlation_limited"] = True
+        if key is None:
             return
-        if cursor is not None and (not isinstance(cursor, str) or len(cursor) > self.state.limits.max_name_chars):
-            event.metadata["correlation_limited"] = True
-            return
-        key = (type(rid), rid)
-        pending.pop(key, None)
         if len(pending) >= self.state.limits.max_pending:
-            pending.popitem(last=False)
+            _, evicted = pending.popitem(last=False)
+            if pending is self.pending:
+                self._lost(evicted, event)
             self.correlation_evictions += 1
             event.metadata["correlation_limited"] = True
-        pending[key] = (event.id, name, cursor)
+        pending[key] = (_PendingRequest(event.id, method, tool_name, cursor, generation)
+                        if valid else _PendingRequest(None, None))
 
     def _valid_id(self, rid):
         return ((type(rid) is int and rid.bit_length() <= 128)
                 or (type(rid) is str and len(rid) <= self.state.limits.max_name_chars))
 
     def _reply(self, pending, rid):
-        return pending.pop((type(rid), rid), (None, None, None)) \
-            if self._valid_id(rid) else (None, None, None)
+        return pending.pop((type(rid), rid), _PendingRequest(None, None)) \
+            if self._valid_id(rid) else _PendingRequest(None, None)
 
     def ingest_frame(self, entry: dict) -> Optional[Event]:
         """Normalize one tap entry, update session facts, return its event.
@@ -226,7 +269,7 @@ class MCPTraceBuilder:
                 events.append(ev)
                 self.last_event_id = ev.id
                 if rid is not None:
-                    self._remember(pending, rid, ev, name)
+                    self._remember(pending, rid, ev, "tools/call", tool_name=name)
 
             elif is_notification:
                 ev = Event(
@@ -242,7 +285,9 @@ class MCPTraceBuilder:
 
             elif method is None and ("result" in frame or "error" in frame):
                 # client's reply to a server-initiated request
-                parent_eid, req_method, _ = self._reply(pending_s2c, rid)
+                request = self._reply(pending_s2c, rid)
+                parent_eid = request.event_id
+                req_method = f"<{request.method}>" if request.method else None
                 ev = Event(
                     id=_new_id("evt"), timestamp=ts, actor_id=client.id,
                     kind=EventKind.MESSAGE, target_id=server.id,
@@ -266,11 +311,13 @@ class MCPTraceBuilder:
                 )
                 events.append(ev)
                 self.last_event_id = ev.id
-                if rid is not None and method:
+                if rid is not None and "method" in frame:
                     # remember non-call requests so their results can pair too
                     params = frame.get("params")
                     cursor = params.get("cursor") if isinstance(params, dict) else None
-                    self._remember(pending, rid, ev, f"<{method}>", cursor if method == "tools/list" else None)
+                    if method == "tools/list" and params is not None and not isinstance(params, dict):
+                        ev.metadata["correlation_limited"] = True
+                    self._remember(pending, rid, ev, method, cursor=cursor if method == "tools/list" else None)
 
         # ── server → client ─────────────────────────────────────────
         elif direction == "s2c":
@@ -291,25 +338,26 @@ class MCPTraceBuilder:
                 events.append(ev)
                 self.last_event_id = ev.id
                 if rid is not None:
-                    self._remember(pending_s2c, rid, ev, f"<{method}>")
+                    self._remember(pending_s2c, rid, ev, method)
                 return
 
             result = frame.get("result")
             error = frame.get("error")
 
-            parent_eid, call_name, request_cursor = self._reply(pending, rid)
+            request = self._reply(pending, rid)
+            parent_eid, call_name = request.event_id, request.tool_name
+            reply_method = f"<{request.method}>" if request.method else None
 
             # the initialize result carries the server's declared
             # capabilities and identity — stamp them on the server actor
-            if call_name == "<initialize>" and isinstance(result, dict):
+            if request.method == "initialize" and isinstance(result, dict):
                 server.metadata["capabilities"] = result.get("capabilities") or {}
                 server.metadata["server_info"] = result.get("serverInfo")
                 server.metadata["protocol_version"] = result.get("protocolVersion")
 
             if error is not None:
                 msg = (error or {}).get("message", str(error))
-                if parent_eid is not None and call_name and \
-                        not call_name.startswith("<"):
+                if parent_eid is not None and request.method == "tools/call":
                     # error responding to a real tools/call
                     ev = Event.tool_result(
                         server.id, tool_use_id=str(rid), output=error,
@@ -334,8 +382,7 @@ class MCPTraceBuilder:
                 self.last_event_id = ev.id
                 self.error_seen = True
 
-            elif parent_eid is not None and call_name and \
-                    not call_name.startswith("<"):
+            elif parent_eid is not None and request.method == "tools/call":
                 # successful result to a tools/call
                 ev = Event.tool_result(
                     server.id, tool_use_id=str(rid), output=result,
@@ -358,14 +405,17 @@ class MCPTraceBuilder:
                     parts=[Part(kind=PartKind.JSON, content=frame)],
                     parent_event_id=parent_eid or last_event_id,
                     metadata={"seq": seq, "jsonrpc_id": rid,
-                              "method_replied_to": call_name,
+                              "method_replied_to": reply_method,
                               "orphaned": parent_eid is None and rid is not None},
                 )
                 events.append(ev)
                 self.last_event_id = ev.id
 
-                if call_name == "<tools/list>" and request_cursor is not None:
-                    ev.metadata["request_cursor"] = request_cursor
+            if request.method == "tools/list":
+                ev.metadata["method_replied_to"] = "<tools/list>"
+                ev.metadata["declaration_generation"] = request.generation
+                if request.cursor is not None:
+                    ev.metadata["request_cursor"] = request.cursor
 
     def snapshot(self) -> InteractionTrace:
         """Materialize the current state. Re-runnable after more feed()
