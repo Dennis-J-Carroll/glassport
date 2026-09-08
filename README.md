@@ -170,7 +170,7 @@ glassport wrap --transport http --url https://some-mcp-server.example/mcp
 # [glassport] http tap on http://127.0.0.1:PORT -> https://some-mcp-server.example/mcp
 ```
 
-Set your client's server URL to the printed `http://127.0.0.1:PORT`. glassport forwards every request/response — POST bodies, `application/json` replies, and `text/event-stream` (SSE) streams (server→client `GET` too) — logging each JSON-RPC message to the **same JSONL** as the stdio tap, so `summarize` / `detect` / `report` / `advise` all work identically. The HTTP tap is passive and fail-open: SSE bytes reach your client as they arrive, and a logging or upstream failure never alters or kills the session (an unreachable remote returns a plain `502`, never a fabricated reply). Active gating over HTTP is not yet supported — this is the passive tap only.
+Set your client's server URL to the printed `http://127.0.0.1:PORT`. glassport forwards every request/response — POST bodies, `application/json` replies, and `text/event-stream` (SSE) streams (server→client `GET` too) — logging each JSON-RPC message to the **same JSONL** as the stdio tap, so `summarize` / `detect` / `report` / `advise` all work identically. The HTTP tap is passive and fail-open: SSE bytes reach your client as they arrive, and logging write failures do not block forwarding. An unreachable remote returns a plain `502`; upstream disconnects can end the response. Active gating over HTTP is not yet supported — this is the passive tap only.
 
 ### 2. Read the delta
 
@@ -650,6 +650,26 @@ annotate(trace)   # fabricated calls, schema violations, capability violations,
 
 Request/response pairs are correlated by JSON-RPC `id`; responses with no matching request are kept and flagged `orphaned` — an orphaned response is itself a signal. The `summarize` command routes through this same adapter internally, so the CLI report and the Understanding Layer read the wire through one code path and can never disagree about what a session contained.
 
+### Incremental analysis (source checkout; unreleased)
+
+`MCPTraceBuilder.ingest_frame()` updates bounded session facts, and
+`DetectorEngine.on_event()` returns findings immediately. All built-in event
+detectors share this path with batch `annotate()`: fabricated calls,
+context/schema checks, gate-record interpretation, and PII/egress analysis.
+Drift comparisons and aggregate reports remain retrospective.
+
+An unobserved tool declaration is **unknown**; an observed empty declaration is
+**known empty**. Only a known surface can establish a fabricated call. Schema,
+capability, and host judgments use facts observed at the event; later evidence
+does not rewrite earlier findings.
+
+For continuous bounded analysis, use `retain_events=False` and persist the
+original wire entries separately. The file-based `StreamingSession` retains a
+bounded tail (50 MB default), so early declarations may be unavailable. Pure
+`policy.decide()` produces `allow`, `warn`, or explicitly selected `block`
+decisions; it is not wired into either transport. HTTP enforcement remains
+future work. See [the API, bounds, validation, and implementation record](docs/priority-engineering.md).
+
 ---
 
 ## Known boundaries
@@ -680,7 +700,7 @@ M0 (tap) through M5 (gate) are built. The static `audit` is folded in. Observe f
 
 Still on the horizon:
 
-- Live/streaming detector path and HTTP enforcement parity: `gate`'s active enforcement is stdio-only today; passive interception over Streamable-HTTP already shipped (`wrap --transport http`)
+- HTTP enforcement parity: incremental built-in detectors and a separate policy interface are implemented in this source checkout, with batch/live parity tests. HTTP session routing, delivery/action recording, and enforcement integration remain. Existing `gate` is stdio-only and has not been migrated to the new engine.
 - Network-enriched audit mode: npm / PyPI / GitHub provenance lookups, as an explicit opt-in flag (kept off the default path so the core audit stays reproducible and offline)~~ ✅ Built (`audit --provenance`)
 - Agent↔Agent trace coverage for Google A2A protocol
 - TUI: terminal interface for live session inspection and drift review~~ ✅ Built (`glassport tui`)
@@ -699,6 +719,9 @@ glassport/
 ├── src/glassport/
 │   ├── tap.py                # M0: stdio proxy — the tap, gate, and CLI
 │   ├── interaction_trace.py  # protocol-spanning data model
+│   ├── session.py            # bounded evidence-derived session facts
+│   ├── incremental.py        # shared live/batch detector lifecycle
+│   ├── policy.py             # pure optional decisions; no transport wiring
 │   ├── detectors.py          # M2: analysis passes (incl. data exfiltration)
 │   ├── report.py             # M3: HTML session renderer
 │   ├── watch.py              # M4: behavioral drift

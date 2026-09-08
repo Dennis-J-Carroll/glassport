@@ -250,3 +250,116 @@ the shared state fold consumes that fact. Raw payloads remain unchanged. A new
 regression first reproduced the failure for client identity and both protocol
 version directions, then passed in retained, no-history, and batch replay modes.
 The focused session/engine/policy/file-streaming suite passed all 62 tests.
+
+## Stage 7 — Policy boundary and HTTP preparation
+
+**What / why.** New `policy.py` defines immutable `Decision` records and three
+actions: allow, warn, and block. `decide()` reads only trusted detector output
+linked to the requested event. It ignores informational gate records, zero
+severity, earlier events, and session-final diagnostics. Severity-1 observations
+remain warnings, as selected by the user. Default policy never blocks. Explicit
+`block_fabricated=True` selects only severity-3 hallucination findings with
+subcategory `fabricated_tool_call` and `no_declaration_seen is False`.
+
+**Files / tests.** `policy.py` contains the pure decision function; no transport
+module imports it. Nine tests in `test_policy.py` cover opt-in and declaration
+requirements, PII/other high-severity findings, stale/global findings, gate INFO
+records, severity-1 visibility, boolean option validation, immutable decisions,
+payload-free reasons, and reconstruction from persisted wire. The core coverage
+workflow now includes the policy module. README and STATUS describe implemented
+source behavior separately from the unchanged 0.6.10 release baseline.
+
+**Final validation.** All 782 tests passed, including real stdio and HTTP
+integration, under coverage.py 7.13 on Python 3.13.5 using its supported
+`sys.monitoring` core (42.620 seconds). Core coverage is 93%, above the unchanged
+85% gate; incremental and policy modules are each 100%. All nine security
+grills passed again against the final source. `git diff --check` is clean.
+Default-tracer coverage runs intermittently exceeded the existing scanner
+wall-clock assertions (3.036 seconds against 3.0; 2.138 against 2.0).
+Lower-overhead monitoring passed the same assertions and collected coverage;
+no test, timing threshold, or CI tracer setting was weakened or skipped.
+Default-tracer timing sensitivity remains a CI risk, not a functional failure
+hidden by the new tests. The successful coverage command was:
+
+```bash
+COVERAGE_CORE=sysmon COVERAGE_FILE=/tmp/glassport-priority-sysmon.coverage \
+  python -m coverage run --source=src/glassport \
+  -m unittest discover -s tests -t .
+```
+
+**Compatibility / remaining risk.** No forwarding behavior changes. Existing
+stdio `Gate` retains its implementation; active parity is not claimed. HTTP
+enforcement still needs one builder/engine per MCP session, routing across
+concurrent HTTP requests/SSE streams, explicit behavior for incomplete evidence
+and detector failure, and persisted records tying wire sequence, policy version,
+decision, and actual delivery together. A pure `ALLOW` means this policy found
+no actionable event finding; it is not a safety certification. Session-final
+diagnostics belong in reporting and cannot retroactively block completed calls.
+
+**Next dependency.** A later transport integration can consume this shared
+session/engine/policy pipeline after defining those delivery and session
+contracts. No broad HTTP gate, approval workflow, policy DSL, dependency,
+package-version change, push, or release was added here.
+
+## Library integration
+
+The caller must persist original tap entries separately and pass one session's
+entries in wire order. This example emits each result through a caller-owned
+callback without accumulating history:
+
+```python
+from glassport.adapters.mcp_session import MCPTraceBuilder
+from glassport.incremental import DetectorEngine
+from glassport.policy import decide
+from glassport.session import SessionLimits
+
+
+def analyze(entries, emit, emit_final, *, limits=None, block_fabricated=False):
+    builder = MCPTraceBuilder(
+        retain_events=False, limits=limits or SessionLimits()
+    )
+    engine = DetectorEngine()
+    for entry in entries:  # already persisted {seq, dir, frame/raw, ...} entries
+        event = builder.ingest_frame(entry)
+        if event is None:
+            continue
+        findings = engine.on_event(event, builder.state)
+        decision = decide(event.id, findings, block_fabricated=block_fabricated)
+        emit(entry.get("seq"), event, findings, decision)
+    emit_final(engine.finish(builder.state))
+```
+
+`emit` controls persistence/rendering; it does not have to enforce decisions.
+The engine consumes state **after** ingestion. With pre-normalized events,
+construct `SessionState`, call `state.observe(event)`, then call
+`engine.on_event(event, state)`. Construction starts a detector session;
+`finish()` is idempotent, and processing after finish or with another state
+raises `ValueError`. Create a fresh builder and engine for each session.
+
+Default batch `annotate(trace)` collects replayed findings for existing report,
+SARIF, advisory, and UI consumers. Generated event/annotation IDs differ between
+separate raw-wire imports; sequence/order plus finding semantics establish
+replay equivalence. Persist identifiers and sequence mappings if recording
+live decisions. Reuse the same session limits and PII pattern configuration
+when replaying original wire: normalized snapshots record limits, but a raw
+wire log alone does not record arbitrary caller options or custom validators.
+
+The builder defaults to retaining events for compatibility. Only explicit
+`retain_events=False` provides no-history ingestion. In that mode, `snapshot()`
+is a current-state view and must not be treated as a forensic archive. Neither
+the detector engine nor policy accumulates findings internally. Input-frame
+size still belongs to framing: retained session bounds do not make decoding
+one arbitrarily large caller-supplied frame constant-memory.
+
+Repeatable local checks (from the repository root):
+
+```bash
+python -m unittest discover -s tests -t .
+PYTHONPATH=src python scripts/bench_incremental.py
+```
+
+The benchmark reports repeated throughput/latency samples and retained-memory
+growth after correlation-map saturation. It asserts structural retention bounds,
+not host-dependent elapsed-time ceilings. Existing CI timing tests were left
+unchanged; their coverage-instrumentation sensitivity remains documented in
+STATUS.md.
