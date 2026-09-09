@@ -116,8 +116,15 @@ class SessionLog:
 
     def record(self, direction: str, line: bytes,
                gate: dict | None = None,
-               metadata: dict | None = None) -> None:
-        """Log one wire line. Never raises — relay must outlive logging.
+               metadata: dict | None = None, *,
+               observation: dict | None = None,
+               wire_bytes: bytes | None = None) -> dict | None:
+        """Log one wire line; return its envelope on write success, else None.
+
+        Never raises — relay must outlive logging. The receipt proves only a
+        successful write call, not fsync durability or transport delivery.
+        HTTP observation metadata is trusted outer evidence, never peer JSON.
+        wire_bytes optionally preserves exact HTTP frame bytes as base64.
 
         `gate` marks frames the gate acted on: {"action": "blocked"} on a
         c2s frame the server never received, {"action": "injected"} on an
@@ -150,9 +157,15 @@ class SessionLog:
                     entry["gate"] = gate
                 if metadata is not None:
                     entry["sse_meta"] = metadata
+                if observation is not None:
+                    entry["http_observation"] = observation
+                if wire_bytes is not None:
+                    import base64
+                    entry["wire_b64"] = base64.b64encode(wire_bytes).decode("ascii")
                 self._fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
+                return entry
         except Exception:
-            pass  # logging is best-effort; the relay is sacred
+            return None  # logging is best-effort; the relay is sacred
 
     def write_metrics(self, **fields) -> None:
         """One self-observation line at session end (H1.09): what the tap

@@ -46,6 +46,11 @@ class ContextDetector(StreamingDetector):
     def on_event(self, event: Event, state: SessionState) -> list[Annotation]:
         out = []
         md = event.metadata
+        if md.get("http_uninterpreted"):
+            out.append(detectors._ann(
+                event, detectors.AnnotationKind.ANOMALY, "http_observation_unavailable",
+                "HTTP session evidence is incomplete; reinitialize for a fresh observation epoch",
+                severity=1))
         if state.surface_delta:
             out.append(detectors._ann(
                 event, detectors.AnnotationKind.DIVERGENCE, "surface_change",

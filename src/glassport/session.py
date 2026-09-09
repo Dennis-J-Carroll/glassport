@@ -136,6 +136,9 @@ class SessionState:
         self.surface_updated = False
         self.surface_delta = []
         md = event.metadata
+        if md.get("http_observation_loss") is True:
+            self.__init__(self.limits)
+            return
         if md.get("session_metadata_limited"):
             self.limit_reasons.add("session_metadata")
         if md.get("correlation_saturated"):

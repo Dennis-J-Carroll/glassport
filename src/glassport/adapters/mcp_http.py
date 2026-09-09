@@ -8,8 +8,9 @@ but never interprets method/id/params — and fail-open: SSE bytes reach the
 client as they arrive, independent of framing/logging. A logging failure never
 alters, delays, or kills a live session.
 
-Passive tap only: gate-over-HTTP and the streaming *detector* path are separate
-later increments. Detectors still consume the full JSONL after the session.
+The optional observer API isolates live analysis and wire captures per HTTP
+session epoch. It folds complete frames before completing client delivery;
+analysis failures still fail open. No enforcement is enabled here.
 """
 
 from __future__ import annotations
@@ -310,7 +311,115 @@ def _stream_sse(resp, wfile, log: SessionLog) -> None:
             buf = b""
 
 
-def _make_handler(remote, log: SessionLog):
+def _observe_call(lease, method, *args, **kwargs):
+    """Optional analysis must never acquire control over passive delivery."""
+    try:
+        return getattr(lease, method)(*args, **kwargs)
+    except Exception:
+        try:
+            lease.loss('http_analysis_failed')
+        except Exception:
+            pass
+        return None
+
+
+def _observe_json_response(resp, wfile, lease, cap, *, expected=None, interpret=True):
+    """Bounded lookahead: fold a complete JSON body before completing delivery."""
+    head = bytearray()
+    complete = False
+    read_error = None
+    try:
+        while len(head) <= cap:
+            chunk = resp.read(min(_RELAY_CHUNK, cap + 1 - len(head)))
+            if not chunk:
+                complete = expected is None or len(head) == expected
+                break
+            head.extend(chunk)
+    except Exception as exc:
+        read_error = exc
+        head.extend(getattr(exc, 'partial', b''))
+    if head or not complete:
+        _observe_call(lease, "record", "s2c", bytes(head[:cap]),
+                      incomplete=not complete or not interpret)
+    # Even a failed upstream read may have provided bytes before failure.
+    # Flush that prefix before surfacing the read error and closing transport.
+    wfile.write(head)
+    total = len(head)
+    if read_error is not None:
+        raise read_error
+    if not complete:
+        while True:
+            chunk = resp.read(_RELAY_CHUNK)
+            if not chunk:
+                break
+            total += len(chunk)
+            wfile.write(chunk)
+    return total
+
+
+def _observe_sse(resp, wfile, lease, cap):
+    """Observe frames before forwarding their completing chunk; bound lookahead.
+
+    Every normal event has exact raw bytes in wire_b64. Oversize events retain
+    a bounded prefix, then discard interpretation through their terminator.
+    """
+    buf = b""
+    overflow = False
+    first = True
+    try:
+        while True:
+            chunk = resp.read1(4096)
+            if not chunk:
+                if buf and not overflow:
+                    _observe_call(lease, "record", "s2c", buf, incomplete=True, wire_bytes=buf)
+                return
+            buf += chunk
+            while True:
+                terms = [(i, t) for t in (b"\r\n\r\n", b"\n\n", b"\r\r")
+                         if (i := buf.find(t)) >= 0]
+                if not terms:
+                    break
+                i, term = min(terms, key=lambda item: item[0])
+                raw, buf = buf[:i + len(term)], buf[i + len(term):]
+                if overflow:
+                    overflow = False
+                    continue
+                event = raw[:-len(term)]
+                if first and event.startswith(b"\xef\xbb\xbf"):
+                    event = event[3:]
+                first = False
+                if len(raw) > cap:
+                    _observe_call(lease, "record", "s2c", raw[:cap], incomplete=True, wire_bytes=raw[:cap])
+                    continue
+                data, meta = [], {}
+                for line in event.replace(b"\r\n", b"\n").replace(b"\r", b"\n").split(b"\n"):
+                    field, colon, value = line.partition(b":")
+                    if value.startswith(b" "):
+                        value = value[1:]
+                    if field == b"data":
+                        data.append(value)
+                    elif field in (b"id", b"event", b"retry"):
+                        meta[field.decode()] = value.decode("utf-8", errors="replace")
+                _observe_call(lease, "record", "s2c", b"\n".join(data) if data else event,
+                             event_id=meta.get("id") if data else None,
+                             metadata=meta or None, wire_bytes=raw,
+                             transport_only=not data or meta.get("event", "message") != "message")
+            if len(buf) > cap:
+                if not overflow:
+                    _observe_call(lease, "record", "s2c", buf[:cap], incomplete=True, wire_bytes=buf[:cap])
+                    overflow = True
+                    first = False
+                # Preserve a possible terminator crossing the next chunk.
+                buf = buf[-3:]
+            wfile.write(chunk)
+            wfile.flush()
+    except Exception:
+        if buf and not overflow:
+            _observe_call(lease, "record", "s2c", buf[:cap], incomplete=True, wire_bytes=buf[:cap])
+        raise
+
+
+def _make_handler(remote, log: SessionLog, observer=None):
     class _ProxyHandler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
         # A stalled client (slowloris) must not pin a ThreadingHTTPServer thread
@@ -354,6 +463,8 @@ def _make_handler(remote, log: SessionLog):
             length = int(cls[0]) if cls else 0
             head = self.rfile.read(min(length, _MAX_LOGGED_BODY)) if length else b""
             rest = length - len(head)
+            if getattr(self, "_observation_lease", None) is not None and head:
+                _observe_call(self._observation_lease, "record", "c2s", head, incomplete=rest > 0)
             if head:
                 log.record("c2s", head)   # one request body = one frame (bounded)
                 if rest > 0:
@@ -373,11 +484,17 @@ def _make_handler(remote, log: SessionLog):
             return _stream(), True
 
         def _relay(self, method: str) -> None:
-            body, ok = self._read_client_body()
-            if not ok:
-                return
+            self._observation_lease = None
+            if observer is not None:
+                try:
+                    self._observation_lease = observer.begin(method, list(self.headers.items()))
+                except Exception:
+                    pass  # optional analysis cannot break passive transport
             conn = resp = None
             try:
+                body, ok = self._read_client_body()
+                if not ok:
+                    return
                 try:
                     conn = _connect(remote)
                     conn.request(method, _upstream_target(remote), body=body or None,
@@ -398,6 +515,8 @@ def _make_handler(remote, log: SessionLog):
                         pass
                     return
 
+                if self._observation_lease is not None:
+                    _observe_call(self._observation_lease, "response", resp.status, resp.getheaders())
                 ctype = resp.getheader("Content-Type", "")
                 all_ct = [v for k, v in resp.getheaders() if k.lower() == "content-type"]
                 self.send_response(resp.status)
@@ -426,7 +545,11 @@ def _make_handler(remote, log: SessionLog):
                     self.send_header("Connection", "close")
                     self.close_connection = True
                     self.end_headers()
-                    _stream_sse(resp, self.wfile, log)
+                    if self._observation_lease is None:
+                        _stream_sse(resp, self.wfile, log)
+                    else:
+                        _observe_sse(resp, self.wfile, self._observation_lease,
+                                     min(_MAX_SSE_BUF, observer.limits.max_frame_bytes))
                 else:
                     # Non-SSE response: stream to the client in bounded chunks so a
                     # hostile upstream cannot balloon memory, and log at most
@@ -451,18 +574,25 @@ def _make_handler(remote, log: SessionLog):
                         self.send_header("Connection", "close")
                         self.close_connection = True
                     self.end_headers()
-                    head, total = b"", 0
-                    while True:
-                        chunk = resp.read(_RELAY_CHUNK)
-                        if not chunk:
-                            break
-                        total += len(chunk)
-                        try:
-                            self.wfile.write(chunk)
-                        except Exception:
-                            break  # client hung up; stop copying
-                        if len(head) < _MAX_LOGGED_BODY:
-                            head += chunk[: _MAX_LOGGED_BODY - len(head)]
+                    if self._observation_lease is not None:
+                        total = _observe_json_response(resp, self.wfile, self._observation_lease,
+                            min(_MAX_LOGGED_BODY, observer.limits.max_frame_bytes), expected=declared,
+                            interpret=(len(all_ct) == 1 and ctype.split(';', 1)[0].strip().lower()
+                                       == 'application/json'))
+                        head = b""
+                    else:
+                        head, total = b"", 0
+                        while True:
+                            chunk = resp.read(_RELAY_CHUNK)
+                            if not chunk:
+                                break
+                            total += len(chunk)
+                            try:
+                                self.wfile.write(chunk)
+                            except Exception:
+                                break  # client hung up; stop copying
+                            if len(head) < _MAX_LOGGED_BODY:
+                                head += chunk[: _MAX_LOGGED_BODY - len(head)]
                     # A hostile upstream can declare a Content-Length larger than the
                     # body it actually sends, then close. We can't verify the length
                     # before sending headers without buffering the whole body (that
@@ -484,8 +614,12 @@ def _make_handler(remote, log: SessionLog):
                     if resp is not None:
                         resp.close()
                 finally:
-                    if conn is not None:
-                        conn.close()
+                    try:
+                        if conn is not None:
+                            conn.close()
+                    finally:
+                        if self._observation_lease is not None:
+                            _observe_call(self._observation_lease, "release")
 
         def do_POST(self):
             self._relay("POST")
@@ -516,7 +650,7 @@ class _NullLog:
 
 def run_http_tap(remote_url: str, log_dir: Path, bind: str = "127.0.0.1",
                  port: int = 0, *, ready: "threading.Event | None" = None,
-                 server_box: "list | None" = None) -> None:
+                 server_box: "list | None" = None, observer=None) -> None:
     """Start the local Streamable-HTTP MITM proxy and serve until shut down.
 
     `ready` is set once the server is bound; `server_box` (if given) receives
@@ -526,16 +660,27 @@ def run_http_tap(remote_url: str, log_dir: Path, bind: str = "127.0.0.1",
     log_dir = Path(log_dir)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     log_path = log_dir / f"{stamp}_http_{os.getpid()}.jsonl"
-    log = open_session_log(log_path) or _NullLog()
-    httpd = ThreadingHTTPServer((bind, port), _make_handler(remote, log))
+    # An explicitly observed proxy has one capture per opaque epoch. Never
+    # create a second multiplexed capture that a single-session reader could
+    # accidentally interpret as a combined declaration surface.
+    log = (open_session_log(log_path) or _NullLog()) if observer is None else _NullLog()
+    httpd = ThreadingHTTPServer((bind, port), _make_handler(remote, log, observer))
     if server_box is not None:
         server_box.append(httpd)
     print(f"[glassport] http tap on http://{bind}:{httpd.server_address[1]} "
           f"-> {remote_url}", file=sys.stderr)
-    print(f"[glassport] session log: {log_path}", file=sys.stderr)
+    if observer is None:
+        print(f"[glassport] session log: {log_path}", file=sys.stderr)
+    else:
+        print(f"[glassport] session logs: {observer.log_dir} (one per epoch)", file=sys.stderr)
     if ready is not None:
         ready.set()
     try:
         httpd.serve_forever()
     finally:
-        log.close()
+        try:
+            httpd.server_close()
+        finally:
+            log.close()
+            if observer is not None:
+                observer.close()
