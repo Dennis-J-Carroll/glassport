@@ -166,46 +166,86 @@ def _sample_command(mode: str, data_file: Path, args: argparse.Namespace) -> tup
     ], env
 
 
+def _instrumentation_unavailable(mode: str, diagnostic: str) -> bool:
+    """Recognize failures caused by an unavailable coverage instrument."""
+    if mode == "normal":
+        return False
+    text = diagnostic.lower()
+    return any(marker in text for marker in (
+        "no module named coverage",
+        "no module named 'coverage'",
+        "coverage: command not found",
+        "unknown coverage core",
+        "sys.monitoring is not available",
+    )) or ("coverage core" in text and "not available" in text)
+
+
+def _failed_sample(mode: str, reason: str, samples_completed: int) -> dict[str, Any]:
+    status = "unsupported" if _instrumentation_unavailable(mode, reason) else "error"
+    return {
+        "status": status,
+        "reason": reason[-1000:] or "worker failed",
+        "requested_core": mode,
+        "samples_completed": samples_completed,
+    }
+
+
 def _run_mode(mode: str, args: argparse.Namespace, temp_dir: Path) -> dict[str, Any]:
     samples: list[dict[str, Any]] = []
     for sample_number in range(args.samples):
         command, env = _sample_command(
             mode, temp_dir / f"{mode}-{sample_number}.coverage", args,
         )
-        completed = subprocess.run(
-            command,
-            cwd=REPO_ROOT,
-            env=env,
-            text=True,
-            capture_output=True,
-            timeout=args.timeout,
-            check=False,
-        )
-        if completed.returncode:
-            reason = completed.stderr.strip() or completed.stdout.strip()
+        try:
+            completed = subprocess.run(
+                command,
+                cwd=REPO_ROOT,
+                env=env,
+                text=True,
+                capture_output=True,
+                timeout=args.timeout,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as exc:
             return {
-                "status": "unsupported",
-                "reason": reason[-1000:] or f"worker exited {completed.returncode}",
+                "status": "error",
+                "reason": f"worker timed out after {args.timeout:g}s: {exc}",
                 "requested_core": mode,
                 "samples_completed": len(samples),
             }
+        if completed.returncode:
+            reason = completed.stderr.strip() or completed.stdout.strip()
+            return _failed_sample(
+                mode,
+                reason[-1000:] or f"worker exited {completed.returncode}",
+                len(samples),
+            )
         try:
             sample = json.loads(completed.stdout)
         except json.JSONDecodeError as exc:
             return {
-                "status": "unsupported",
+                "status": "error",
                 "reason": f"worker did not emit JSON: {exc}: {completed.stdout[-500:]}",
                 "requested_core": mode,
                 "samples_completed": len(samples),
             }
         expected = EXPECTED_CORES[mode]
-        if sample["actual_core"] != expected:
+        try:
+            actual_core = sample["actual_core"]
+        except (KeyError, TypeError) as exc:
+            return {
+                "status": "error",
+                "reason": f"worker JSON missing actual_core: {exc}",
+                "requested_core": mode,
+                "samples_completed": len(samples),
+            }
+        if actual_core != expected:
             return {
                 "status": "unsupported",
-                "reason": f"requested {expected}, coverage selected {sample['actual_core']}",
+                "reason": f"requested {expected}, coverage selected {actual_core}",
                 "requested_core": mode,
-                "actual_core": sample["actual_core"],
-                "coverage_version": sample["coverage_version"],
+                "actual_core": actual_core,
+                "coverage_version": sample.get("coverage_version"),
                 "samples_completed": len(samples),
             }
         samples.append(sample)
@@ -267,7 +307,8 @@ def main(argv: list[str] | None = None) -> int:
         for mode in args.modes:
             report["modes"][mode] = _run_mode(mode, args, Path(temp))
     print(json.dumps(report, indent=2, sort_keys=True))
-    return 0
+    return 1 if any(result.get("status") == "error"
+                    for result in report["modes"].values()) else 0
 
 
 if __name__ == "__main__":

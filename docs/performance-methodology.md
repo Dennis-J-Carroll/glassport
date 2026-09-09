@@ -38,7 +38,9 @@ input cap remain active. Custom PII configuration is cleared in child processes
 to measure the built-in baseline. Coverage artifacts live in a temporary
 directory and are removed after each benchmark invocation. Missing coverage or
 an unsupported requested core is reported explicitly; fallback measurements are
-never labeled as the requested core.
+never labeled as the requested core. Worker assertion/import/runtime failures
+and sample timeouts are reported as errors, and the command exits nonzero for
+those errors so a broken measurement cannot look like an unavailable instrument.
 
 ## Measured result, 2026-09-08
 
