@@ -175,6 +175,22 @@ class SessionLog:
         except Exception:
             return None  # logging is best-effort; the relay is sacred
 
+    def write_json(self, entry: dict) -> bool:
+        """Append one caller-shaped JSON record; True on a successful write.
+
+        Not a wire frame and not part of the session schema: this is the
+        private-file append primitive (0700 dir, 0600 file, one lock, never
+        raises) reused by the decision journal, which owns its OWN files.
+        Decision evidence and wire evidence are never written to one file.
+        """
+        try:
+            line = json.dumps(entry, ensure_ascii=False) + "\n"
+            with self._lock:
+                self._fh.write(line)
+            return True
+        except Exception:
+            return False  # journaling is best-effort; the relay is sacred
+
     def write_metrics(self, **fields) -> None:
         """One self-observation line at session end (H1.09): what the tap
         itself witnessed — frames seen, blocks, duration, bytes. Tagged
@@ -743,6 +759,63 @@ def _cmd_advise(audit: str | None, session: str | None,
     return 0
 
 
+def _cmd_observe(args: list[str]) -> int:
+    """`glassport observe --url <remote>` — explicit HTTP observation mode.
+
+    Strict on purpose, and deliberately separate from the `wrap` path's
+    positional parsing: an unknown or duplicated option here must fail rather
+    than silently select a different mode. Observation only — no gate exists.
+    """
+    from glassport.adapters.mcp_http import _validate_remote, run_http_tap
+    from glassport.decision_journal import DecisionJournal
+    from glassport.http_sessions import HTTPObserver, HTTPRegistryLimits
+
+    values: dict[str, str] = {}
+    flags = {"--url", "--log-dir", "--journal-dir", "--bind", "--port",
+             "--max-sessions"}
+    rest = list(args)
+    while rest:
+        arg = rest.pop(0)
+        if arg not in flags:
+            print(f"glassport: unknown option {arg!r} for observe; expected "
+                  f"one of {' '.join(sorted(flags))}", file=sys.stderr)
+            return 2
+        if arg in values:
+            print(f"glassport: {arg} given more than once", file=sys.stderr)
+            return 2
+        if not rest:
+            print(f"glassport: {arg} requires a value", file=sys.stderr)
+            return 2
+        values[arg] = rest.pop(0)
+    if "--url" not in values:
+        print("usage: glassport observe --url <remote-mcp-url> [--log-dir DIR] "
+              "[--journal-dir DIR] [--bind HOST] [--port N] [--max-sessions N]",
+              file=sys.stderr)
+        return 2
+    try:
+        port = int(values.get("--port", "0"))
+        sessions = int(values["--max-sessions"]) if "--max-sessions" in values else None
+    except ValueError:
+        print("glassport: --port and --max-sessions take integers", file=sys.stderr)
+        return 2
+    log_dir = Path(values.get("--log-dir", DEFAULT_LOG_DIR))
+    journal_dir = Path(values.get("--journal-dir", log_dir / "decisions"))
+    # Validate before building anything, so a bad URL never leaves an observer
+    # and a journal dangling behind an early return.
+    try:
+        _validate_remote(values["--url"])
+        limits = (HTTPRegistryLimits(max_sessions=sessions) if sessions is not None
+                  else HTTPRegistryLimits())
+    except ValueError as exc:
+        print(f"glassport: invalid observe configuration: {exc}", file=sys.stderr)
+        return 2
+    observer = HTTPObserver(log_dir, limits=limits)
+    journal = DecisionJournal(journal_dir, observer)
+    run_http_tap(values["--url"], log_dir, values.get("--bind", "127.0.0.1"),
+                 port, observer=observer, journal=journal)
+    return 0
+
+
 # ─────────────────────────────────────────────────────────────────
 # CLI
 # ─────────────────────────────────────────────────────────────────
@@ -762,6 +835,16 @@ glassport — passive MCP stdio proxy
                    (static, pre-deployment: reads source, never runs it.
                     --provenance: opt-in npm/PyPI registry enrichment, off
                     by default so the core audit stays offline/reproducible)
+  observe:         glassport observe --url <remote-mcp-url> [--log-dir DIR]
+                        [--journal-dir DIR] [--bind HOST] [--port N]
+                        [--max-sessions N]
+                   (HTTP tap with per-epoch session isolation plus recorded
+                    candidate decisions and delivery outcomes. Observation
+                    only: nothing is ever blocked)
+  replay-decisions: glassport replay-decisions <journal.jsonl>
+                        --wire <session.jsonl> [--json]
+                   (re-run one epoch's analysis and verify the recorded
+                    decisions; exit 0 only when equivalence is proved)
   summarize:       glassport summarize [--json|--sarif] <session.jsonl>
   detect:          glassport detect [--sarif] <session.jsonl>
                    (run all behavioral detectors; exit 1 if findings,
@@ -875,6 +958,16 @@ def main(argv: list[str]) -> int:
         # retention for the log dir; dry-run by default. Lazy import.
         from glassport import prune as prune_mod
         return prune_mod.main(argv[1:])
+
+    if argv[0] == "observe":
+        # Explicit HTTP observation mode (session isolation + decision
+        # journal). Its own strict parser; the wrap path below is untouched.
+        return _cmd_observe(argv[1:])
+
+    if argv[0] == "replay-decisions":
+        # Verify recorded decisions against their wire evidence. Lazy import.
+        from glassport import decision_replay
+        return decision_replay.main(argv[1:])
 
     if argv[0] == "health":
         # tap self-metrics over recent sessions. Lazy import.

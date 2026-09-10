@@ -122,6 +122,14 @@ ownership, partial/oversized bodies, and an open SSE socket. The existing
 HTTP lifecycle and hardening suite remains part of validation. Listening
 sockets now close on server exit as part of observer teardown.
 
-Next dependency: versioned configuration, candidate decisions, and actual
-delivery records for an explicit CLI observation mode. Blocking remains a
-subsequent transport integration.
+Versioned configuration, candidate decisions and actual delivery records now
+ship on top of this stage — see `docs/http-decision-journal.md` and the
+`observe` / `replay-decisions` commands. Blocking remains a subsequent
+transport integration; observation mode records a would-block and forwards.
+
+One change lands here from that stage: an epoch **freezes** the PII pattern
+registry into a tuple when it is created, and its detector engine scans against
+that tuple for the epoch's whole life. A mid-session `register_pii_pattern()`
+or registry reset therefore cannot change what an already-recorded decision was
+computed from. `HTTPObserver.pattern_snapshot(epoch)` exposes it. Every
+non-HTTP caller keeps reading the live registry exactly as before.

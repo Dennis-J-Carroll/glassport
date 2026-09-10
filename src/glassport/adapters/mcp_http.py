@@ -323,6 +323,24 @@ def _observe_call(lease, method, *args, **kwargs):
         return None
 
 
+def _journal_call(journal, method, *args, **kwargs):
+    """Decision recording never gains control over passive delivery either.
+
+    A journal write failure is exactly as fail-open as an analysis failure: the
+    relay forwards, and the absent record is the honest evidence of absence.
+    """
+    try:
+        return getattr(journal, method)(*args, **kwargs)
+    except Exception:
+        return None
+
+
+def _lease_epoch(lease):
+    """The observed epoch a decision belongs to, or None when unroutable."""
+    epoch = getattr(getattr(lease, "context", None), "epoch", None)
+    return epoch if isinstance(epoch, str) and epoch else None
+
+
 def _observe_json_response(resp, wfile, lease, cap, *, expected=None, interpret=True):
     """Bounded lookahead: fold a complete JSON body before completing delivery."""
     head = bytearray()
@@ -419,7 +437,7 @@ def _observe_sse(resp, wfile, lease, cap):
         raise
 
 
-def _make_handler(remote, log: SessionLog, observer=None):
+def _make_handler(remote, log: SessionLog, observer=None, journal=None):
     class _ProxyHandler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
         # A stalled client (slowloris) must not pin a ThreadingHTTPServer thread
@@ -464,7 +482,8 @@ def _make_handler(remote, log: SessionLog, observer=None):
             head = self.rfile.read(min(length, _MAX_LOGGED_BODY)) if length else b""
             rest = length - len(head)
             if getattr(self, "_observation_lease", None) is not None and head:
-                _observe_call(self._observation_lease, "record", "c2s", head, incomplete=rest > 0)
+                self._c2s_observation = _observe_call(
+                    self._observation_lease, "record", "c2s", head, incomplete=rest > 0)
             if head:
                 log.record("c2s", head)   # one request body = one frame (bounded)
                 if rest > 0:
@@ -485,6 +504,12 @@ def _make_handler(remote, log: SessionLog, observer=None):
 
         def _relay(self, method: str) -> None:
             self._observation_lease = None
+            self._c2s_observation = None
+            # Delivery phase flags. Recording reads them; nothing branches on
+            # them, so the forwarded bytes are identical with journal=None.
+            intent = None
+            delivery = ("unknown", "handler_aborted", None)
+            request_sent = completed = False
             if observer is not None:
                 try:
                     self._observation_lease = observer.begin(method, list(self.headers.items()))
@@ -494,13 +519,44 @@ def _make_handler(remote, log: SessionLog, observer=None):
             try:
                 body, ok = self._read_client_body()
                 if not ok:
+                    # Ambiguous framing: refused locally, never begun upstream.
+                    delivery = ("not_attempted", "framing_rejected", None)
+                    if journal is not None:
+                        epoch = _lease_epoch(self._observation_lease)
+                        if epoch is not None:
+                            intent = _journal_call(journal, "record_intent", epoch,
+                                                   self._c2s_observation)
                     return
+                if journal is not None:
+                    # Intent is persisted BEFORE the upstream request begins, so
+                    # a crash mid-delivery still leaves what analysis concluded.
+                    epoch = _lease_epoch(self._observation_lease)
+                    if epoch is not None:
+                        intent = _journal_call(journal, "record_intent", epoch,
+                                               self._c2s_observation)
+                    delivery = ("not_attempted", "not_begun", None)
                 try:
                     conn = _connect(remote)
                     conn.request(method, _upstream_target(remote), body=body or None,
                                  headers=_req_headers(self.headers, remote))
+                    request_sent = True
                     resp = conn.getresponse()
                 except Exception as exc:
+                    # Classify BEFORE the finally closes conn (close() clears
+                    # .sock and would destroy the zero-bytes-sent proof). A
+                    # missing socket means connect/DNS failed, so nothing was
+                    # written. For HTTPS, connect() assigns .sock before the TLS
+                    # handshake, so a handshake failure reads as an established
+                    # socket and is classified 'unknown' — deliberately
+                    # conservative, not a bug to "fix".
+                    if not request_sent:
+                        delivery = (("not_sent", "connect_failed", None)
+                                    if getattr(conn, "sock", None) is None
+                                    else ("unknown", "send_indeterminate", None))
+                    else:
+                        # request() already returned: the send completed and the
+                        # response state is indeterminate. Never 'not_sent'.
+                        delivery = ("unknown", "response_indeterminate", None)
                     # glassport's own transport failure — surface it plainly, never
                     # fabricate a JSON-RPC reply, and never echo attacker-controlled
                     # exception text back to the client.
@@ -515,6 +571,9 @@ def _make_handler(remote, log: SessionLog, observer=None):
                         pass
                     return
 
+                # A complete request left the local socket and upstream
+                # answered. Not evidence that a remote tool executed.
+                delivery = ("sent", "upstream_response", resp.status)
                 if self._observation_lease is not None:
                     _observe_call(self._observation_lease, "response", resp.status, resp.getheaders())
                 ctype = resp.getheader("Content-Type", "")
@@ -607,6 +666,7 @@ def _make_handler(remote, log: SessionLog, observer=None):
                         log.record("s2c", head)   # one response body = one frame (bounded)
                         if total > len(head):
                             log.record("s2c", b'{"glassport":"s2c_body_truncated_oversize"}')
+                completed = True
             finally:
                 # Close-delimited responses may own the socket after getresponse()
                 # has detached it from conn. Release both owners on every exit.
@@ -620,6 +680,15 @@ def _make_handler(remote, log: SessionLog, observer=None):
                     finally:
                         if self._observation_lease is not None:
                             _observe_call(self._observation_lease, "release")
+                        if intent is not None:
+                            # Exactly one terminal record per intent, on every
+                            # exit path — including a client disconnect that
+                            # unwinds mid-delivery. A response whose body
+                            # transfer then failed is 'failed', not 'sent'.
+                            if delivery[0] == "sent" and not completed:
+                                delivery = ("failed", "body_transfer_failed", delivery[2])
+                            _journal_call(journal, "record_delivery", intent,
+                                          delivery[0], code=delivery[1], status=delivery[2])
 
         def do_POST(self):
             self._relay("POST")
@@ -650,11 +719,15 @@ class _NullLog:
 
 def run_http_tap(remote_url: str, log_dir: Path, bind: str = "127.0.0.1",
                  port: int = 0, *, ready: "threading.Event | None" = None,
-                 server_box: "list | None" = None, observer=None) -> None:
+                 server_box: "list | None" = None, observer=None,
+                 journal=None) -> None:
     """Start the local Streamable-HTTP MITM proxy and serve until shut down.
 
     `ready` is set once the server is bound; `server_box` (if given) receives
     the server so a caller/test can read `server_address` and `shutdown()`.
+    `journal` (opt-in, requires `observer`) records candidate decisions and
+    delivery outcomes into their own per-epoch files; it never changes what is
+    forwarded or when.
     """
     remote = _validate_remote(remote_url)
     log_dir = Path(log_dir)
@@ -664,7 +737,9 @@ def run_http_tap(remote_url: str, log_dir: Path, bind: str = "127.0.0.1",
     # create a second multiplexed capture that a single-session reader could
     # accidentally interpret as a combined declaration surface.
     log = (open_session_log(log_path) or _NullLog()) if observer is None else _NullLog()
-    httpd = ThreadingHTTPServer((bind, port), _make_handler(remote, log, observer))
+    journal = journal if observer is not None else None
+    httpd = ThreadingHTTPServer((bind, port),
+                                _make_handler(remote, log, observer, journal))
     if server_box is not None:
         server_box.append(httpd)
     print(f"[glassport] http tap on http://{bind}:{httpd.server_address[1]} "
@@ -673,6 +748,9 @@ def run_http_tap(remote_url: str, log_dir: Path, bind: str = "127.0.0.1",
         print(f"[glassport] session log: {log_path}", file=sys.stderr)
     else:
         print(f"[glassport] session logs: {observer.log_dir} (one per epoch)", file=sys.stderr)
+        if journal is not None:
+            print(f"[glassport] decision journal: {journal.dir} "
+                  "(observation only; nothing is blocked)", file=sys.stderr)
     if ready is not None:
         ready.set()
     try:
@@ -684,3 +762,5 @@ def run_http_tap(remote_url: str, log_dir: Path, bind: str = "127.0.0.1",
             log.close()
             if observer is not None:
                 observer.close()
+            if journal is not None:
+                journal.close()

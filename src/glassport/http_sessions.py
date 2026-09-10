@@ -18,7 +18,8 @@ import time
 from typing import Callable
 
 from glassport.adapters.mcp_session import MCPTraceBuilder
-from glassport.incremental import DetectorEngine
+from glassport.detectors import snapshot_pii_patterns
+from glassport.incremental import DetectorEngine, default_detectors
 from glassport.session import SessionLimits
 from glassport.tap import open_session_log
 
@@ -72,6 +73,8 @@ class _Context:
     log_opened: bool = False
     seq: int = 0
     sse_ids: OrderedDict = field(default_factory=OrderedDict)
+    # Frozen at epoch creation; the live registry may mutate afterwards.
+    pii_patterns: tuple = ()
 
 
 def _single(headers, name, limit):
@@ -167,6 +170,11 @@ class HTTPObserver:
         if ambiguous_credentials:
             diagnostic = diagnostic or 'http_invalid_credentials'
         partition = self._partition(headers)
+        # Snapshot the mutable PII registry outside the registry lock (it may
+        # load the env pattern file on its first call). A new epoch keeps this
+        # exact tuple for its whole life, so a mid-session register/clear can
+        # never change what an already-recorded decision was computed from.
+        patterns = snapshot_pii_patterns()
         now, cleanup, victims = self.clock(), [], []
         with self._lock:
             for context in list(self._contexts.values()):
@@ -192,7 +200,9 @@ class HTTPObserver:
                     diagnostic = 'http_closed' if self._closed else 'http_capacity'
                 else:
                     context = _Context(secrets.token_hex(16), partition, now,
-                        MCPTraceBuilder(retain_events=False, limits=self.session_limits), DetectorEngine())
+                        MCPTraceBuilder(retain_events=False, limits=self.session_limits),
+                        DetectorEngine(default_detectors(patterns)),
+                        pii_patterns=patterns)
                     self._contexts[context.epoch] = context
             if context is not None:
                 context.active += 1
@@ -216,6 +226,16 @@ class HTTPObserver:
         elif diagnostic:
             self._emit(Observation(None, None, diagnostic=diagnostic))
         return lease
+
+    def pattern_snapshot(self, epoch):
+        """The frozen PII pattern tuple of a live epoch, or None if unknown.
+
+        Decision recording reads this to describe the configuration profile a
+        replay must match; it never mutates the registry to obtain it.
+        """
+        with self._lock:
+            context = self._contexts.get(epoch)
+            return context.pii_patterns if context is not None else None
 
     def _bind(self, lease, token):
         context = lease.context
