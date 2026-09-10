@@ -155,15 +155,31 @@ class HTTPObserver:
 
     def begin(self, method: str, headers, **_unused):
         headers = list(headers.items()) if hasattr(headers, 'items') else list(headers)
+        # Use the same hop-header rules as forwarding, preserving duplicate
+        # fields until ambiguity is checked instead of collapsing them to dict.
+        from glassport.adapters.mcp_http import _hop_headers
+        dropped = _hop_headers(headers)
+        headers = [(k, v) for k, v in headers if k.lower() not in dropped]
         token, diagnostic = _single(headers, 'mcp-session-id', self.limits.max_identifier_chars)
         cursor, cursor_error = _single(headers, 'last-event-id', self.limits.max_identifier_chars)
+        ambiguous_credentials = any(sum(k.lower() == name for k, _ in headers) > 1
+                                    for name in ('authorization', 'cookie', 'proxy-authorization'))
+        if ambiguous_credentials:
+            diagnostic = diagnostic or 'http_invalid_credentials'
         partition = self._partition(headers)
-        now, cleanup = self.clock(), []
+        now, cleanup, victims = self.clock(), [], []
         with self._lock:
             for context in list(self._contexts.values()):
                 if not context.active and now - context.last_used >= self.limits.idle_ttl:
                     self._retire_locked(context); cleanup.append(context)
-            context = self._bindings.get((partition, token)) if token else None
+            if ambiguous_credentials and token is not None:
+                # Upstream may select any of the ambiguous credentials. None
+                # of this token's prior partitions can retain certainty about
+                # traffic which may have affected it but could not be routed.
+                victims = [c for key, c in self._bindings.items() if key[1] == token]
+                for victim in victims:
+                    self._retire_locked(victim)
+            context = self._bindings.get((partition, token)) if token and diagnostic is None else None
             if context is None:
                 if not diagnostic and (token or method != 'POST'):
                     diagnostic = 'http_unknown_identity' if token else 'http_missing_identity'
@@ -180,6 +196,10 @@ class HTTPObserver:
                     self._contexts[context.epoch] = context
             if context is not None:
                 context.active += 1
+        for victim in victims:
+            HTTPLease(self, victim, method, None).loss('http_invalid_credentials')
+            if not victim.active:
+                cleanup.append(victim)
         self._close_idle(cleanup)
         lease = HTTPLease(self, context, method, diagnostic,
                           provisional=method == 'POST' and token is None and diagnostic is None)
@@ -272,7 +292,8 @@ class HTTPLease:
         context.seq += 1
         facts = dict(observation or {}, epoch=context.epoch, order=context.seq)
         receipt = context.log.record(direction, payload, metadata=metadata,
-            observation=facts, wire_bytes=payload if wire_bytes is None else wire_bytes) if context.log is not None else None
+            observation=facts, wire_bytes=payload if wire_bytes is None else wire_bytes,
+            sequence=context.seq) if context.log is not None else None
         # Failed logging never pretends to provide persisted linkage. Feed the
         # same envelope locally so observation can continue without persistence.
         if receipt is None:
@@ -302,7 +323,8 @@ class HTTPLease:
                    'http_invalid_resume', 'http_reset', 'http_resume_gap', 'http_session_deleted',
                    'http_session_expired', 'http_identity_collision', 'http_sse_collision',
                    'http_invalid_sse_id', 'http_frame_incomplete', 'http_analysis_failed',
-                   'http_stale_epoch', 'http_identity_changed', 'http_sse_history_full'}
+                   'http_stale_epoch', 'http_identity_changed', 'http_sse_history_full',
+                   'http_invalid_credentials'}
         if reason not in allowed:
             raise ValueError('unknown HTTP observation code')
         context = self.context

@@ -118,13 +118,16 @@ class SessionLog:
                gate: dict | None = None,
                metadata: dict | None = None, *,
                observation: dict | None = None,
-               wire_bytes: bytes | None = None) -> dict | None:
+               wire_bytes: bytes | None = None,
+               sequence: int | None = None) -> dict | None:
         """Log one wire line; return its envelope on write success, else None.
 
         Never raises — relay must outlive logging. The receipt proves only a
         successful write call, not fsync durability or transport delivery.
         HTTP observation metadata is trusted outer evidence, never peer JSON.
         wire_bytes optionally preserves exact HTTP frame bytes as base64.
+        sequence optionally assigns a strictly increasing caller-owned order,
+        preserving linkage even after an earlier failed recording attempt.
 
         `gate` marks frames the gate acted on: {"action": "blocked"} on a
         c2s frame the server never received, {"action": "injected"} on an
@@ -141,10 +144,15 @@ class SessionLog:
             frame, raw = None, None
             try:
                 frame = json.loads(text)
-            except (json.JSONDecodeError, ValueError):
+            except (json.JSONDecodeError, ValueError, RecursionError):
                 raw = text
             with self._lock:
-                self._seq += 1
+                if sequence is not None:
+                    if type(sequence) is not int or sequence <= self._seq:
+                        raise ValueError('session sequence must increase')
+                    self._seq = sequence
+                else:
+                    self._seq += 1
                 entry = {
                     "schema_version": SCHEMA_VERSION,
                     "seq": self._seq,

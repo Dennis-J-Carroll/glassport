@@ -310,3 +310,46 @@ class TestHTTPSessions(unittest.TestCase):
             self.assertIs(lease.context, expected)
             self.assertFalse(expected.retired)
             lease.release()
+
+    def test_forwarded_credential_ambiguity_and_hop_headers_cannot_share_context(self):
+        variants = [
+            [('Authorization', 'A'), ('Authorization', 'B')],
+            [('Authorization', 'B'), ('Authorization', 'A')],
+            [('authorization', 'B'), ('Authorization', 'A')],
+            [('Authorization', 'A'), ('Connection', 'Authorization')],
+            [('Authorization', 'A'), ('Connection', 'Mcp-Session-Id')],
+        ]
+        for i, headers in enumerate(variants):
+            token = f'shared{i}'
+            known = self.initialize(token, [('Authorization', 'A')])
+            with self.subTest(headers=headers):
+                lease = self.observer.begin('POST', [('Mcp-Session-Id', token)] + headers)
+                self.assertIsNot(lease.context, known)
+                if i < 3:
+                    self.assertTrue(known.retired)
+                lease.release()
+        known = self.initialize('resume', [('Authorization', 'A')])
+        lease = self.observer.begin('GET', [('Mcp-Session-Id', 'resume'), ('Authorization', 'A'),
+                                   ('Last-Event-ID', 'not-retained'), ('Connection', 'Last-Event-ID')])
+        self.assertIs(lease.context, known)
+        self.assertFalse(known.retired)
+        lease.release()
+
+    def test_nested_json_and_failed_write_preserve_sequence_linkage(self):
+        import base64
+        a = self.begin()
+        payload = b'[' * 10000 + b'0' + b']' * 10000
+        result = a.record('c2s', payload)
+        self.assertTrue(result.persisted)
+        rows = [json.loads(line) for line in a.context.log.path.read_text().splitlines()]
+        self.assertEqual(base64.b64decode(rows[-1]['wire_b64']), payload)
+        self.assertEqual(rows[-1]['raw'].encode(), payload)
+        with mock.patch.object(a.context.log, 'record', return_value=None):
+            failed = a.record('c2s', wire(id=2, method='ping'))
+            self.assertFalse(failed.persisted)
+        last = a.record('c2s', wire(id=3, method='ping'))
+        self.assertTrue(last.persisted)
+        self.assertEqual(last.seq, last.event.metadata['seq'])
+        row = json.loads(a.context.log.path.read_text().splitlines()[-1])
+        self.assertEqual(row['seq'], row['http_observation']['order'])
+        a.release()

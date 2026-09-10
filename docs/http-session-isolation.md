@@ -26,8 +26,13 @@ retain only a bounded prefix, explicitly marked incomplete.
 Different clients can both issue request ID `1` and declare different tool
 sets. Sharing a builder would join unrelated evidence. A registry belongs to
 one configured upstream and partitions bindings by session token plus a salted
-credential-context digest. Authorization, Cookie and Proxy-Authorization
-headers contribute to that digest. This is partitioning, not authentication;
+credential-context digest. Only credential headers retained by the relay's
+hop-header filtering contribute to that digest. Session and resumption headers
+use the same filtering. Duplicate effective Authorization, Cookie or
+Proxy-Authorization fields are ambiguous and cannot reuse established context.
+For an ambiguous request carrying a session token, all existing bindings for
+that token are retired: the observer cannot know which credential the upstream
+will select. This is partitioning, not authentication;
 upstream authentication remains responsible for its own credentials, including
 any deployment-specific custom credential headers.
 
@@ -96,6 +101,9 @@ the next stage. Default file readers may load only the trailing 50 MB; use
 does not promise fsync durability, client delivery, or remote execution.
 Logging failure still returns local observations with `persisted=False` and a
 fixed diagnostic. No replay-equivalence claim is made for missing capture data.
+The HTTP context supplies the capture sequence, so subsequent successful
+records retain exact linkage after a failed write. Deeply nested JSON that
+exceeds the parser's recursion limit is retained as raw wire evidence.
 
 ## Transport and validation
 

@@ -403,7 +403,7 @@ def _observe_sse(resp, wfile, lease, cap):
                 _observe_call(lease, "record", "s2c", b"\n".join(data) if data else event,
                              event_id=meta.get("id") if data else None,
                              metadata=meta or None, wire_bytes=raw,
-                             transport_only=not data or meta.get("event", "message") != "message")
+                             transport_only=not data or (meta.get("event") or "message") != "message")
             if len(buf) > cap:
                 if not overflow:
                     _observe_call(lease, "record", "s2c", buf[:cap], incomplete=True, wire_bytes=buf[:cap])

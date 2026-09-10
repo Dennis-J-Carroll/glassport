@@ -19,6 +19,12 @@ from tests.test_incremental_detectors import semantic_findings
 
 
 class TestObservedFraming(unittest.TestCase):
+    def test_empty_sse_event_type_is_a_message(self):
+        lease, writer = mock.Mock(), io.BytesIO()
+        _observe_sse(io.BytesIO(b'event:\ndata: {"jsonrpc":"2.0","id":1,"result":{}}\n\n'),
+                     writer, lease, 1024)
+        self.assertFalse(lease.record.call_args.kwargs['transport_only'])
+
     def test_json_fold_precedes_write_and_failed_analysis_still_forwards(self):
         events = []
         lease = mock.Mock()
