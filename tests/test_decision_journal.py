@@ -706,6 +706,52 @@ class TestDeliveryOutcomes(RelayCase):
         self.assertEqual(result.mismatched, [])
 
 
+class TestFailOpenGuards(JournalCase):
+    """record_intent/record_delivery must stay fail-open on their own, per the
+    class docstring, without relying on mcp_http._journal_call's try/except.
+    These call the methods directly, bypassing the relay entirely."""
+
+    def test_malformed_annotation_does_not_raise_out_of_record_intent(self):
+        """policy.decide() and the faults scan read annotation attributes
+        directly (no getattr guard). A malformed/adversarial annotation object
+        must make record_intent fail open (return None), never raise."""
+        import types
+        lease = self.session()
+        epoch = lease.context.epoch
+        observation = types.SimpleNamespace(
+            event=types.SimpleNamespace(id='evt-1'),
+            # Looks like it could carry annotations, but has none of the
+            # attributes (event_id/kind/severity/metadata) policy.decide and
+            # the faults scan read directly.
+            annotations=(types.SimpleNamespace(),),
+            seq=4, persisted=True, diagnostic=None)
+        intent = self.journal.record_intent(epoch, observation)
+        self.assertIsNone(intent)
+        lease.release()
+
+    def test_malformed_pattern_snapshot_does_not_raise_out_of_profile_write(self):
+        """pattern_profile() is handed whatever observer.pattern_snapshot()
+        returns. A malformed/adversarial pattern object in that snapshot must
+        not raise out of _profile_record (reached from record_intent via
+        _open on first use of an epoch)."""
+        from unittest import mock
+        lease = self.session()
+        epoch = lease.context.epoch
+        obs = lease.record('c2s', wire(id=4, method='tools/call',
+                                       params={'name': 'search', 'arguments': {}}))
+        with mock.patch.object(self.observer, 'pattern_snapshot',
+                               return_value=(object(),)):
+            intent = self.journal.record_intent(epoch, obs)
+        self.assertIsNotNone(intent)
+        self.assertEqual(intent.action, 'allow')
+        lease.release()
+        self.journal.close()
+        profile = self.journal_lines(epoch)[0]
+        self.assertEqual(profile['kind'], 'profile')
+        self.assertEqual(profile['pattern_status'], dj.PROFILE_INCOMPLETE)
+        self.assertFalse(profile['pattern_snapshot_exact'])
+
+
 class TestCLISurface(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()

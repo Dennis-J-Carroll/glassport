@@ -364,7 +364,18 @@ class DecisionJournal:
             exact = False
         else:
             exact = True
-        profile = pattern_profile(patterns)
+        try:
+            profile = pattern_profile(patterns)
+        except Exception:
+            # A malformed/adversarial pattern (a custom pattern object missing
+            # an expected attribute, a non-compiled `.pattern`, etc.) must not
+            # raise into the caller. Fall back to an explicitly incomplete,
+            # empty profile rather than claim a digest over patterns this call
+            # could not describe; `exact` drops to False too, since what got
+            # persisted no longer reflects the patterns actually in force.
+            profile = PatternProfile(digest="", status=PROFILE_INCOMPLETE,
+                                      summary=(), unsupported=(_NONCONFORMING,))
+            exact = False
         return {
             "kind": "profile", "schema": JOURNAL_SCHEMA, "epoch": epoch,
             "n": next(self._counter), "ts": _now_iso(), "mode": self.mode,
@@ -402,18 +413,29 @@ class DecisionJournal:
         annotations = tuple(getattr(observation, "annotations", ()) or ())
         event_id = getattr(event, "id", None) if event is not None else None
         analyzed = isinstance(event_id, str) and bool(event_id)
-        if analyzed:
-            decision = policy.decide(event_id, annotations, block_fabricated=False)
-            action, reason = decision.action.value, decision.reason
-            findings = semantic_findings(annotations, event_id)
-        else:
-            # skip-marked or unparseable frames fold to no event: there is
-            # nothing to decide over, and policy.decide rejects an empty id.
-            action, reason, findings = policy.Action.ALLOW.value, "no_analyzable_event", []
-        faults = [{"detector": _safe_token(a.metadata.get("detector")),
-                   "error_type": _safe_token(a.metadata.get("error_type"))}
-                  for a in annotations
-                  if getattr(a, "subcategory", None) == "detector_error"]
+        try:
+            if analyzed:
+                decision = policy.decide(event_id, annotations, block_fabricated=False)
+                action, reason = decision.action.value, decision.reason
+                findings = semantic_findings(annotations, event_id)
+            else:
+                # skip-marked or unparseable frames fold to no event: there is
+                # nothing to decide over, and policy.decide rejects an empty id.
+                action, reason, findings = policy.Action.ALLOW.value, "no_analyzable_event", []
+            faults = [{"detector": _safe_token(a.metadata.get("detector")),
+                       "error_type": _safe_token(a.metadata.get("error_type"))}
+                      for a in annotations
+                      if getattr(a, "subcategory", None) == "detector_error"]
+        except Exception:
+            # policy.decide() and the faults scan read annotation attributes
+            # directly, with no getattr() guard, because real annotations are
+            # engine-produced and trusted. A malformed/adversarial annotation
+            # object (a future caller, a buggy custom detector) must not raise
+            # out of the journal: no honest record can be written for evidence
+            # this call could not even parse, so this folds to the same
+            # "nothing to attribute the decision to" case used above —
+            # unavailable evidence stays fail-open.
+            return None
         wire_seq = getattr(observation, "seq", None)
         if isinstance(wire_seq, bool) or not isinstance(wire_seq, int):
             wire_seq = None
