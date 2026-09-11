@@ -211,7 +211,14 @@ def verify_journal(journal_path, wire_path, *, patterns=None) -> ReplayResult:
         event, annotations = by_seq[seq]
         faults = [a for a in annotations if getattr(a, "subcategory", None) == "detector_error"]
         findings = dj.semantic_findings(annotations, event.id)
-        decision = policy.decide(event.id, annotations, block_fabricated=False)
+        # The recorded `action` is the CANDIDATE verdict, which record_intent
+        # computes with the blocking rule armed in both modes. Replaying it
+        # with block_fabricated=False would report action_mismatch for every
+        # real observed-surface exclusion, in observe-mode journals as much as
+        # gate-mode ones. Mode needs no branch here precisely because the
+        # candidate is mode-independent; what a gate additionally *did* with it
+        # lives in the delivery records, which equivalence does not re-execute.
+        decision = policy.decide(event.id, annotations, block_fabricated=True)
         problems = []
         if faults:
             problems.append("unrecorded_fault")

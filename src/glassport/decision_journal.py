@@ -21,6 +21,14 @@ Three invariants hold every record honest:
   why the two records are distinct. A completed local send is never treated as
   proof that a remote tool executed.
 
+The candidate action is **mode-independent**: it is always computed with the
+blocking rule armed (``policy.decide(..., block_fabricated=True)``), in observe
+mode exactly as in gate mode, so "what would have been blocked" is visible
+without enforcing anything. Only :meth:`DecisionJournal.evaluate` — and through
+it ``Intent.enforce``, ``enforced`` and the ``blocked`` delivery outcome — reads
+the mode. ``evaluate`` narrows the candidate further: a candidate BLOCK that
+rests on a faulted, limited or unavailable analysis pass is never enforced.
+
 Bounds (all configurable through :class:`JournalLimits`, all documented in
 ``docs/http-decision-journal.md``): tracked epochs, records per epoch, listed
 findings per record and listed faults per record are each capped. Nothing here
@@ -48,6 +56,8 @@ POLICY_VERSION = "glassport.policy/1"
 DETECTOR_ENGINE_VERSION = "glassport.detectors/1"
 
 MODE_OBSERVE = "observe"
+MODE_GATE = "gate"
+MODES = frozenset({MODE_OBSERVE, MODE_GATE})
 
 # Delivery outcome vocabulary. "sent" is a completed local send that upstream
 # answered — never evidence that a remote tool ran.
@@ -56,16 +66,31 @@ OUTCOME_NOT_SENT = "not_sent"             # begun, provably zero bytes on the wi
 OUTCOME_SENT = "sent"                     # complete request sent, status received
 OUTCOME_FAILED = "failed"                 # status received, transfer failed after
 OUTCOME_UNKNOWN = "unknown"               # indeterminate: partial send or no status
+# Distinct from every outcome above, which all describe a real upstream
+# delivery attempt: "blocked" means glassport itself decided not to forward
+# and provably did not — no connection was opened for this request at all.
+OUTCOME_BLOCKED = "blocked"
 DELIVERY_OUTCOMES = frozenset({
     OUTCOME_NOT_ATTEMPTED, OUTCOME_NOT_SENT, OUTCOME_SENT,
-    OUTCOME_FAILED, OUTCOME_UNKNOWN})
+    OUTCOME_FAILED, OUTCOME_UNKNOWN, OUTCOME_BLOCKED})
 
 # Fixed diagnostic codes; a caller-supplied code outside this set is replaced
 # rather than written, so no free text can reach the journal through it.
 DELIVERY_CODES = frozenset({
     "not_begun", "framing_rejected", "connect_failed", "send_indeterminate",
     "response_indeterminate", "upstream_response", "body_transfer_failed",
-    "handler_aborted", "unspecified"})
+    "handler_aborted", "http_gate_blocked", "unspecified"})
+
+# A candidate BLOCK computed alongside any of these is never enforced: each one
+# says the analysis pass that produced it was itself incomplete, so the
+# "observed exclusion" it rests on is not proved. Conservative by construction —
+# a new uncertainty annotation is added here, never silently allowed to enforce.
+NON_ENFORCEABLE = frozenset({
+    "detector_error",                 # a detector raised during this event
+    "analysis_limit",                 # session state bound hit; surface may be partial
+    "declaration_unavailable",        # no complete declaration to check against
+    "http_observation_unavailable",   # epoch evidence lost/stale/uninterpreted
+})
 
 _SAFE_TOKEN_RE = re.compile(r"[^a-z0-9_.:/-]")
 _MAX_TOKEN_CHARS = 64
@@ -241,12 +266,19 @@ class JournalLimits:
 
 @dataclass(frozen=True)
 class Intent:
-    """Handle linking a later delivery record back to its decision record."""
+    """Handle linking a later delivery record back to its decision record.
+
+    `enforce` is the *enforcement* verdict, not the candidate one: True only in
+    gate mode, only for a candidate BLOCK, and only when the analysis pass that
+    produced it was complete. It is computed before any record is written, so a
+    journal write failure can never turn a proved block into a forward.
+    """
     epoch: str
     n: int
     event_seq: int | None
     action: str
     written: bool
+    enforce: bool = False
 
 
 class _EpochJournal:
@@ -264,15 +296,24 @@ class DecisionJournal:
     are used, so a test or an alternative transport can pass any object with
     that surface. Every public method is fail-open: an unwritable directory, a
     mid-write error or an exhausted bound yields a falsy return, never a raise.
+
+    `mode` selects whether a candidate BLOCK is merely recorded (`observe`, the
+    default) or actually enforced by the transport (`gate`). This module still
+    has no transport authority in either mode: it answers `evaluate()`, and the
+    relay is what does — or does not — act on that answer.
     """
 
-    def __init__(self, journal_dir, observer, *, limits: JournalLimits | None = None):
+    def __init__(self, journal_dir, observer, *, limits: JournalLimits | None = None,
+                 mode: str = MODE_OBSERVE):
         self.dir = Path(journal_dir)
         self.observer = observer
         self.limits = limits or JournalLimits()
-        # There is no other mode: no gate exists, so every record this module
-        # writes describes a candidate that was forwarded regardless.
-        self.mode = MODE_OBSERVE
+        # Enforcement must be selected deliberately, so an unrecognized mode is
+        # a construction-time error (like JournalLimits) rather than a silent
+        # fallback that could resolve either way.
+        if mode not in MODES:
+            raise ValueError(f"unknown journal mode {mode!r}")
+        self.mode = mode
         self._lock = threading.Lock()
         self._epochs: OrderedDict[str, _EpochJournal] = OrderedDict()
         # One monotonic ordinal across every epoch of this journal: an evicted
@@ -391,18 +432,59 @@ class DecisionJournal:
             "journal_limits": _limits_dict(self.limits),
         }
 
+    # -- enforcement verdict -----------------------------------------------
+
+    def evaluate(self, observation=None) -> bool:
+        """Should the transport actually refuse to forward this frame?
+
+        True requires ALL of: gate mode; a frame that folded to a real event;
+        no diagnostic on the observation (a lost, stale, incomplete, truncated
+        or unpersisted observation is uncertain evidence); no annotation from
+        :data:`NON_ENFORCEABLE` (a faulted or bounded analysis pass); and a
+        policy verdict of BLOCK with the blocking rule armed — which itself
+        requires a severity-3 fabricated call against an *observed* surface.
+
+        Pure: reads nothing from disk, writes nothing, and never raises. Every
+        error and every uncertainty returns False, which means "forward" — the
+        one default that can only fail in the safe direction.
+        """
+        if self.mode != MODE_GATE:
+            return False
+        try:
+            event = getattr(observation, "event", None)
+            event_id = getattr(event, "id", None) if event is not None else None
+            if not isinstance(event_id, str) or not event_id:
+                return False
+            if getattr(observation, "diagnostic", None):
+                return False
+            annotations = tuple(getattr(observation, "annotations", ()) or ())
+            if any(getattr(a, "subcategory", None) in NON_ENFORCEABLE
+                   for a in annotations):
+                return False
+            return policy.decide(event_id, annotations,
+                                 block_fabricated=True).action is policy.Action.BLOCK
+        except Exception:
+            return False
+
     # -- public recording --------------------------------------------------
 
-    def record_intent(self, epoch, observation=None) -> Intent | None:
+    def record_intent(self, epoch, observation=None, *, enforce=None) -> Intent | None:
         """Record the candidate action for one observed frame, before delivery.
 
         Returns a handle for the matching delivery record, or None when there
         is no epoch to attribute the decision to (an unroutable request that
         never got a context, or a closed journal) — unavailable evidence stays
         fail-open, exactly as the surrounding observation path does.
+
+        `enforce` is the already-computed enforcement verdict. A transport that
+        acts on a block MUST compute it with :meth:`evaluate` *before* calling
+        this method and pass it in, so that no failure inside recording can
+        change what the transport does. None (the default) recomputes it here,
+        for callers that only record.
         """
         if self._closed or not isinstance(epoch, str) or not epoch:
             return None
+        enforce = bool(self.evaluate(observation)) if enforce is None else bool(enforce)
         # Epoch ids are locally generated hex today, so this is a no-op for
         # every real caller — and a guarantee that no future one can route an
         # arbitrary string into a record or a filename.
@@ -415,7 +497,14 @@ class DecisionJournal:
         analyzed = isinstance(event_id, str) and bool(event_id)
         try:
             if analyzed:
-                decision = policy.decide(event_id, annotations, block_fabricated=False)
+                # The CANDIDATE verdict, always computed with the blocking rule
+                # armed — in observe mode exactly as in gate mode. What the
+                # policy would do is a property of the evidence, not of who is
+                # listening; only `enforce` below reads the mode. Computing it
+                # with block_fabricated=False (as this did before Task 4) made
+                # `candidate_block` structurally incapable of ever being True,
+                # so observation mode could never show what a gate would stop.
+                decision = policy.decide(event_id, annotations, block_fabricated=True)
                 action, reason = decision.action.value, decision.reason
                 findings = semantic_findings(annotations, event_id)
             else:
@@ -450,9 +539,12 @@ class DecisionJournal:
             "kind": "intent", "schema": JOURNAL_SCHEMA, "epoch": epoch,
             "n": 0, "ts": _now_iso(), "mode": self.mode,
             "action": action, "reason": _safe_token(reason),
-            # Observation mode never enforces; a candidate block would still
-            # forward. The field exists so a later gate records the same shape.
+            # What the policy WOULD do, identically in both modes. In observe
+            # mode a candidate block is still forwarded; in gate mode it is
+            # enforced only when `enforce` also held. The two fields are
+            # deliberately separate so the gap between them stays auditable.
             "candidate_block": action == policy.Action.BLOCK.value,
+            "enforce": enforce,
             "wire_seq": wire_seq,
             "event_seq": event_seq,
             "persisted": bool(getattr(observation, "persisted", False)),
@@ -469,13 +561,14 @@ class DecisionJournal:
             entry = self._open(epoch)
             record["n"] = next(self._counter)
             written = self._write(entry, record)
-        return Intent(epoch, record["n"], event_seq, action, written)
+        return Intent(epoch, record["n"], event_seq, action, written, enforce)
 
     def record_delivery(self, intent, outcome, *, code=None, status=None) -> bool:
         """Record the terminal delivery outcome for one recorded intent.
 
         A "sent" outcome means the complete request left the local socket and
-        upstream answered. It is not evidence that a remote tool executed.
+        upstream answered. It is not evidence that a remote tool executed. A
+        "blocked" outcome means no upstream request was ever begun.
         """
         if self._closed or not isinstance(intent, Intent):
             return False
@@ -489,9 +582,14 @@ class DecisionJournal:
             "kind": "delivery", "schema": JOURNAL_SCHEMA, "epoch": intent.epoch,
             "n": 0, "ts": _now_iso(), "mode": self.mode, "intent": intent.n,
             "outcome": outcome, "code": code, "status": status,
-            # Observation mode changes no traffic; a recorded candidate block
-            # was still forwarded. Task 4 flips this, not this module.
-            "enforced": False,
+            # True only when BOTH facts hold: the enforcement verdict said
+            # block, and the transport reports it actually did not forward.
+            # The conjunction can only ever under-claim — a relay bug that
+            # forwarded anyway records enforced=False, never a false "we
+            # stopped it". Observation mode has enforce=False throughout, so
+            # a recorded candidate block there is still an honest forward.
+            "enforced": bool(getattr(intent, "enforce", False))
+                        and outcome == OUTCOME_BLOCKED,
             "candidate_action": intent.action,
         }
         with self._lock:

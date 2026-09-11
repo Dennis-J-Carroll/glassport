@@ -1,6 +1,9 @@
-"""Observation-mode decision/delivery records and replay verification.
+"""Decision/delivery records and replay verification.
 
-No blocking exists yet: every candidate action here is recorded, never enforced.
+Journals here are in observation mode unless a test says otherwise: the
+candidate action is recorded identically in both modes, and only an explicitly
+gate-mode journal ever enforces one. The gate's transport behavior is covered
+by tests/test_http_gate.py.
 """
 import contextlib
 import io
@@ -79,7 +82,12 @@ class TestIntentAndDelivery(JournalCase):
                                        params={'name': 'nope', 'arguments': {}}))
         intent = self.journal.record_intent(lease.context.epoch, obs)
         self.assertIsNotNone(intent)
-        self.assertEqual(intent.action, 'warn')
+        # session() declared a complete surface of {'search'}, so 'nope' is an
+        # observed exclusion and the CANDIDATE verdict is block in every mode.
+        # This journal is in observe mode, so nothing is enforced and the
+        # request is still forwarded — which is the whole point of the split.
+        self.assertEqual(intent.action, 'block')
+        self.assertFalse(intent.enforce)
         self.assertTrue(self.journal.record_delivery(intent, 'sent',
                                                      code='upstream_response', status=200))
         lease.release()
@@ -90,8 +98,8 @@ class TestIntentAndDelivery(JournalCase):
         profile, rec_intent, delivery = entries
         self.assertEqual(profile['mode'], 'observe')
         self.assertEqual(profile['pattern_status'], 'reproducible')
-        self.assertEqual(rec_intent['action'], 'warn')
-        self.assertFalse(rec_intent['candidate_block'])
+        self.assertEqual(rec_intent['action'], 'block')
+        self.assertTrue(rec_intent['candidate_block'])
         self.assertEqual(rec_intent['event_seq'], obs.seq)
         self.assertIn('fabricated_tool_call',
                       [f['subcategory'] for f in rec_intent['findings']])
@@ -99,6 +107,60 @@ class TestIntentAndDelivery(JournalCase):
         self.assertEqual(delivery['status'], 200)
         self.assertFalse(delivery['enforced'])
         self.assertEqual(delivery['intent'], rec_intent['n'])
+
+    def test_candidate_block_is_mode_independent_and_only_enforced_gates(self):
+        """The positive control the mode split rests on.
+
+        `session()` declares a real, complete surface of {'search'}, so a call
+        to 'nope' is an *observed* exclusion — not missing evidence. The
+        candidate verdict is a property of the policy, not of the mode, so it
+        must read `block` in BOTH modes. Only `enforced` and the delivery
+        outcome may differ. Before the Task 4 fix `record_intent` hardcoded
+        block_fabricated=False, which made `candidate_block` structurally
+        incapable of ever being True in either mode.
+        """
+        call = wire(id=4, method='tools/call',
+                    params={'name': 'nope', 'arguments': {}})
+        seen = {}
+        for mode in (dj.MODE_OBSERVE, dj.MODE_GATE):
+            observer = HTTPObserver(self.root / f'wire-{mode}')
+            self.addCleanup(observer.close)
+            journal = dj.DecisionJournal(self.root / f'dec-{mode}', observer,
+                                         mode=mode)
+            self.addCleanup(journal.close)
+            lease = observer.begin('POST', [])
+            for payload, direction in (
+                    (wire(id=1, method='initialize', params={}), 'c2s'),):
+                lease.record(direction, payload)
+            lease.response(200, [('Mcp-Session-Id', 'alpha')])
+            lease.record('s2c', wire(id=1, result={
+                'protocolVersion': '2025-11-25', 'capabilities': {},
+                'serverInfo': {'name': 'test', 'version': '1'}}))
+            lease.record('c2s', wire(id=2, method='notifications/initialized'))
+            lease.record('c2s', wire(id=3, method='tools/list'))
+            lease.record('s2c', wire(id=3, result={'tools': [{'name': 'search'}]}))
+            obs = lease.record('c2s', call)
+            intent = journal.record_intent(lease.context.epoch, obs)
+            journal.record_delivery(
+                intent, dj.OUTCOME_BLOCKED if intent.enforce else dj.OUTCOME_SENT,
+                code='http_gate_blocked' if intent.enforce else 'upstream_response',
+                status=200)
+            epoch = lease.context.epoch
+            lease.release()
+            journal.close()
+            records = [json.loads(x) for x in journal.path_for(epoch)
+                       .read_text().splitlines() if x.strip()]
+            seen[mode] = ([r for r in records if r['kind'] == 'intent'][0],
+                          [r for r in records if r['kind'] == 'delivery'][0])
+
+        for mode, (rec_intent, delivery) in seen.items():
+            self.assertEqual(rec_intent['action'], 'block', mode)
+            self.assertTrue(rec_intent['candidate_block'], mode)
+        # ...and ONLY the enforcement half differs.
+        self.assertFalse(seen[dj.MODE_OBSERVE][1]['enforced'])
+        self.assertEqual(seen[dj.MODE_OBSERVE][1]['outcome'], 'sent')
+        self.assertTrue(seen[dj.MODE_GATE][1]['enforced'])
+        self.assertEqual(seen[dj.MODE_GATE][1]['outcome'], 'blocked')
 
 
 class TestReplayPositiveControl(JournalCase):
@@ -385,7 +447,9 @@ class TestIsolationAndSanitization(JournalCase):
                               params={'name': 'search', 'arguments': {}}))
         a.release(); b.release()
 
-        for lease, expected in ((a, 'allow'), (b, 'warn')):
+        # 'search' is inside a's declared surface and outside b's re-declared
+        # one, so the same tool name yields opposite candidate verdicts.
+        for lease, expected in ((a, 'allow'), (b, 'block')):
             entries = self.journal_lines(lease.context.epoch)
             self.assertTrue(all(e['epoch'] == lease.context.epoch for e in entries))
             actions = [e['action'] for e in entries if e['kind'] == 'intent']
@@ -409,7 +473,9 @@ class TestIsolationAndSanitization(JournalCase):
             self.assertNotIn(leaked, text, leaked)
         record = [r for r in self.journal_lines(lease.context.epoch)
                   if r['kind'] == 'intent'][0]
-        self.assertEqual(record['action'], 'warn')
+        # The tool name is outside the declared surface, so the candidate
+        # verdict is block — and none of the poison text rides along with it.
+        self.assertEqual(record['action'], 'block')
         self.assertIn('pii_anthropic_key',
                       [f['subcategory'] for f in record['findings']])
 
