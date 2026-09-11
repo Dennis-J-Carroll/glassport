@@ -816,6 +816,29 @@ def _cmd_observe(args: list[str]) -> int:
     return 0
 
 
+def _run_http_gate(remote_url: str, log_dir: Path) -> int:
+    """`glassport gate --transport http --url <remote>` — HTTP enforcement.
+
+    Deliberately the same construction as `observe`, differing in exactly one
+    argument: the journal's mode. Enforcement is therefore not a second
+    analysis path that could drift from the observed one — it is the observed
+    one, with the verdict it already computed finally acted upon. Everything
+    the observe command guarantees about session isolation, bounded state and
+    fail-open recording holds here unchanged.
+    """
+    from glassport.adapters.mcp_http import _validate_remote, run_http_tap
+    from glassport.decision_journal import MODE_GATE, DecisionJournal
+    from glassport.http_sessions import HTTPObserver
+
+    # Validate before building anything, so a bad URL never leaves an observer
+    # and a journal dangling behind an early return (as `observe` does).
+    _validate_remote(remote_url)
+    observer = HTTPObserver(log_dir)
+    journal = DecisionJournal(log_dir / "decisions", observer, mode=MODE_GATE)
+    run_http_tap(remote_url, log_dir, observer=observer, journal=journal)
+    return 0
+
+
 # ─────────────────────────────────────────────────────────────────
 # CLI
 # ─────────────────────────────────────────────────────────────────
@@ -829,6 +852,14 @@ glassport — passive MCP stdio proxy
   gate:            glassport gate [--controllable] [--log-dir DIR] -- <server command...>
                    (active: blocks tools/call outside the declared surface;
                     --controllable lets `tui --gate-control` toggle it)
+                   glassport gate --transport http --url <remote-mcp-url>
+                        (active MITM over MCP Streamable-HTTP: everything
+                         `observe` does, plus the recorded would-blocks are
+                         enforced. Only a severity-3 tools/call proved against
+                         an observed declared surface is refused — locally,
+                         with a JSON-RPC -32000 error and no upstream request.
+                         Missing/partial declarations, faulted analysis, PII
+                         and unexpected-egress findings all still forward)
   audit:           glassport audit <path> [--json|--sarif]
                         [--provenance [--provenance-cache DIR]
                          [--provenance-refresh]] | audit --rubric
@@ -990,16 +1021,26 @@ def main(argv: list[str]) -> int:
         remote_url = argv[1] if len(argv) > 1 else None
         argv = argv[2:]
     if transport == "http":
-        if gate is not None:
-            print("glassport: gate over HTTP is not supported yet; use the "
-                  "passive `wrap --transport http`", file=sys.stderr)
-            return 2
         if not remote_url:
-            print("usage: glassport wrap --transport http --url "
-                  "<remote-mcp-url>", file=sys.stderr)
+            print("usage: glassport %s --transport http --url <remote-mcp-url>"
+                  % ("gate" if gate is not None else "wrap"), file=sys.stderr)
+            return 2
+        if gate is not None and gate_controllable:
+            # --controllable toggles the stdio Gate through an override file;
+            # the HTTP gate has no such control surface. Refuse rather than
+            # accept the flag and quietly enforce unconditionally anyway.
+            print("glassport: --controllable applies to the stdio gate only",
+                  file=sys.stderr)
             return 2
         from glassport.adapters.mcp_http import run_http_tap
         try:
+            if gate is not None:
+                # `gate` here is only the sentinel meaning "the user asked for
+                # enforcement" — the stdio Gate object itself is never used
+                # over HTTP. HTTP enforcement is a property of the decision
+                # journal's mode, and runs through the same observer the
+                # `observe` command builds.
+                return _run_http_gate(remote_url, log_dir)
             run_http_tap(remote_url, log_dir)
         except ValueError as exc:
             print(f"[glassport] invalid --url: {exc}", file=sys.stderr)
