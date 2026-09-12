@@ -1,6 +1,6 @@
 # HTTP integrity: release and migration notes
 
-Covers `feat/http-session-integrity` (commits `f370fe0..c60d411` on top of the
+Covers `feat/http-session-integrity` (commits `f370fe0..172f8bf` on top of the
 foundation checkpoint), the follow-up sequence in
 [`docs/priority-engineering.md`](priority-engineering.md#agreed-follow-up-sequence--2026-09-08).
 No package version was bumped and no release was tagged by this work; this
@@ -111,20 +111,34 @@ surprises later:
   coverage gate (`.github/workflows/ci-coverage.yml`), reflecting that it now
   holds the project's only enforcement decision point.
 
-## Validation at the final commit (`c60d411`)
+## Validation at the final commit (`172f8bf`)
 
-- Full suite: 902/902 passing (`python -m unittest discover -s tests -t .`).
+- Full suite: 902/902 passing locally (`python -m unittest discover -s tests -t .`).
 - All nine security grills: 9/9 exit 0.
 - Core pipeline coverage: 93% (gate: ≥85%); `mcp_http.py` itself: 93%;
   `http_sessions.py` 94%, `decision_journal.py` 91%, `decision_replay.py` 92%.
 - Repeated scanner benchmark (7 samples/mode): normal, C-tracer, and
   sys.monitoring coverage cores all `status: supported`, no errors.
-- Every task (2, 3, 4, and this final fix wave) passed an independent
+- Every task (2, 3, 4, and the final-review fix wave) passed an independent
   scoped review with fixes applied and re-reviewed clean, plus one whole-
   branch review across the combined diff with no Critical and no open
   Important findings.
+- **Exact-head CI on [PR #80](https://github.com/Dennis-J-Carroll/glassport/pull/80):
+  18/18 checks passed** at `172f8bf` — the full ubuntu/macos/windows ×
+  Python 3.10-3.13 matrix, `coverage`, `bench`, `redteam-grills`,
+  `security-scan`, and `pre-commit-hook`. One round-trip was needed: the
+  first CI run at `562efb2` had the ubuntu/macos legs and all non-matrix
+  jobs green, but all 4 Windows legs failed on a single test
+  (`test_persistence_failure_fails_open_and_records_nothing`) that
+  simulated an unwritable directory via POSIX `mkdir(mode=0o500)`, a no-op
+  on Windows. Not a product bug — the same fail-open property is covered
+  platform-independently by a sibling mock-based test — fixed by skipping
+  that one test on non-POSIX platforms (commit `172f8bf`), matching this
+  codebase's existing convention for the same situation elsewhere
+  (`tests/test_gate.py`, `tests/test_comprehensive_security.py`).
 
 No merge, tag, or release was performed. This branch is pushed to
-`origin/feat/http-session-integrity`; a PR is prepared against
-`fix/foundation-stabilization` (the branch this work forked from, itself an
-open, unmerged PR — see `docs/priority-engineering.md`).
+`origin/feat/http-session-integrity`; [PR #80](https://github.com/Dennis-J-Carroll/glassport/pull/80)
+(draft) is open against `fix/foundation-stabilization` (the branch this
+work forked from, itself an open, unmerged PR — see
+`docs/priority-engineering.md`).
