@@ -97,6 +97,51 @@ class Upstream(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
 
+class ChunkedBodyUpstream(Upstream):
+    """A dechunking upstream, for the one scenario where the proxy itself
+    must re-frame a request as chunked before forwarding it.
+
+    `_read_client_body` in mcp_http.py caps what it captures for observation
+    at `_MAX_LOGGED_BODY`; anything past the cap is still streamed upstream
+    via a generator (see module comments there). Content-Length is a hop
+    header the proxy always drops, and a generator body has no computable
+    length, so `http.client` picks Transfer-Encoding: chunked automatically.
+    The plain `Upstream` above only ever reads `Content-Length` bytes, so it
+    would see zero body for a chunked request; this subclass dechunks first
+    so the test can observe the real, complete bytes the proxy forwarded.
+    """
+
+    def _read_chunked(self):
+        data = b''
+        while True:
+            size_line = self.rfile.readline()
+            size = int(size_line.split(b';', 1)[0].strip(), 16)
+            if size == 0:
+                self.rfile.readline()   # trailing CRLF after the last chunk
+                break
+            data += self.rfile.read(size)
+            self.rfile.readline()       # this chunk's trailing CRLF
+        return data
+
+    def do_POST(self):
+        if 'chunked' not in (self.headers.get('Transfer-Encoding') or '').lower():
+            return Upstream.do_POST(self)
+        raw = self._read_chunked()
+        try:
+            frame = json.loads(raw)
+        except ValueError:
+            frame = {}
+        with type(self).lock:
+            type(self).calls.append({'method': frame.get('method'),
+                                     'id': frame.get('id'), 'raw': raw})
+        body = json.dumps(self._result(frame)).encode()
+        self.send_response(200)
+        self.send_header('Content-Type', 'application/json')
+        self.send_header('Content-Length', str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
 class GateCase(unittest.TestCase):
     """One proxy, one upstream, one journal; gate mode unless told otherwise."""
 
@@ -471,6 +516,84 @@ class TestConservativeForwarding(GateCase):
         self.assertEqual(intent['action'], 'warn')
         self.assertFalse(intent['candidate_block'])
         self.assertFalse(delivery['enforced'])
+
+    def test_oversized_tools_call_body_forwards_in_full_and_does_not_hang(self):
+        """A c2s body over `_MAX_LOGGED_BODY` is only captured up to the cap
+        for observation (`_read_client_body` in mcp_http.py), but the relay
+        still forwards the request upstream IN FULL — via chunked
+        transfer-encoding, since Content-Length is a hop header the proxy
+        always drops and the streamed-remainder body has no computable
+        length. The truncated observation forces `incomplete=True` into
+        `HTTPLease.record`, which marks the epoch lost; `mcp_session.
+        ingest_frame` then nulls the folded event's frame, so it carries no
+        `jsonrpc_id` and `_blockable_id` returns `_NO_ID` (nothing to block
+        against) — independently, the journal also vetoes via the
+        `http_observation_unavailable` annotation (`NON_ENFORCEABLE`). Two
+        separate reasons this must forward, never block, and never leave the
+        connection desynced or hung.
+        """
+        from glassport.adapters.mcp_http import _MAX_LOGGED_BODY
+        # `ChunkedBodyUpstream` doesn't declare its own `calls`/`lock` (unlike
+        # `Both` elsewhere in this file), so it shares `Upstream.calls` — this
+        # keeps `upstream_calls()`/`assert_forwarded`'s hardcoded reference to
+        # `Upstream.calls` valid. `setUp()` already reset it; do not call
+        # `.reset()` again through the subclass or it would shadow the shared
+        # list with a new one of its own and this test would falsely fail.
+        srv = ThreadingHTTPServer(('127.0.0.1', 0), ChunkedBodyUpstream)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.server_close)
+        self.addCleanup(srv.shutdown)
+        self.proxy(remote=f'http://127.0.0.1:{srv.server_address[1]}/mcp')
+        self.handshake()
+        since = self.intent_watermark(self._handshake_request_count)
+        before = self.upstream_calls()
+
+        # A tool the server never declared, so — were the oversized body not
+        # forced to forward for its own independent reasons — this would
+        # otherwise be exactly the shape a proved exclusion blocks.
+        pad = 'A' * (_MAX_LOGGED_BODY + 64_000)
+        frame = {'jsonrpc': '2.0', 'id': 42, 'method': 'tools/call',
+                 'params': {'name': 'nope', 'arguments': {'padding': pad}}}
+        payload = json.dumps(frame).encode()
+        self.assertGreater(len(payload), _MAX_LOGGED_BODY,
+                           'test body must actually exceed the cap')
+
+        status, body = self.post(frame, session='sess-1')
+
+        # Forwarded, not blocked: an ordinary upstream tools/call result, not
+        # glassport's synthesized -32000 error — and it reached upstream
+        # complete, byte for byte (the dechunking upstream saw the full
+        # padded payload, not a cap-sized prefix).
+        self.assertEqual(status, 200)
+        result = json.loads(body)
+        self.assertIn('result', result, result)
+        received = self.upstream_calls()
+        self.assertEqual(len(received), len(before) + 1, received)
+        self.assertEqual(received[-1]['method'], 'tools/call')
+        self.assertEqual(len(received[-1]['raw']), len(payload))
+
+        # The connection completed cleanly (no hang/timeout above), and the
+        # decisive record shows a forward, never a block.
+        intent, delivery = self.last_call_records(since=since)
+        self.assertFalse(intent['candidate_block'])
+        self.assertFalse(intent['enforce'])
+        self.assertIn('http_observation_unavailable',
+                      [f['subcategory'] for f in intent['findings']])
+        self.assertEqual(delivery['outcome'], 'sent')
+        self.assertFalse(delivery['enforced'])
+
+        # Pin the OTHER independent reason this forwards, not just the
+        # NON_ENFORCEABLE veto above: the wire capture itself, at the exact
+        # sequence this intent was computed from, shows glassport never had
+        # an interpretable JSON-RPC id to answer a block with in the first
+        # place (`_blockable_id` -> `_NO_ID`) — read from raw evidence, the
+        # way `TestGateModeReplay` reads the wire log, rather than trusting
+        # only the derived annotation.
+        wire_lines = (self.root / 'wire' / f"{intent['epoch']}.jsonl").read_text().splitlines()
+        wire_entry = next(json.loads(l) for l in wire_lines if json.loads(l)['seq'] == intent['wire_seq'])
+        self.assertEqual(wire_entry['dir'], 'c2s')
+        self.assertIsNone(wire_entry['frame'], wire_entry)
+        self.assertTrue(wire_entry['http_observation'].get('uninterpreted'))
 
     def test_tools_call_shaped_notification_is_forwarded_not_blocked(self):
         """No id means nothing to answer, and MCP has no such notification.

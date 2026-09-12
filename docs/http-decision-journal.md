@@ -132,9 +132,11 @@ claims otherwise.
 
 An epoch evicted from the tracked map and later resumed writes its profile
 again. An identical repeat is a benign resume marker; if the epoch's context is
-also gone by then, the second profile is marked `pattern_snapshot_exact: false`
-and therefore *conflicts*, which replay reports as `unsupported` rather than
-comparing against a profile the recording never actually used.
+also gone by then, the second profile is marked `pattern_snapshot_exact: false`,
+which forces its `pattern_status` to `incomplete` — and it is that field's
+mismatch against the first profile's `pattern_status` that trips
+`profile_conflict`, which replay reports as `unsupported` rather than comparing
+against a profile the recording never actually used.
 
 Past `max_records` the epoch writes one `truncated` marker and then stops;
 replay reads that marker and reports `incomplete` rather than claiming
