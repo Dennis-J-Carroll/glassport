@@ -376,106 +376,116 @@ def _make_handler(remote, log: SessionLog):
             body, ok = self._read_client_body()
             if not ok:
                 return
+            conn = resp = None
             try:
-                conn = _connect(remote)
-                conn.request(method, _upstream_target(remote), body=body or None,
-                             headers=_req_headers(self.headers, remote))
-                resp = conn.getresponse()
-            except Exception as exc:
-                # glassport's own transport failure — surface it plainly, never
-                # fabricate a JSON-RPC reply, and never echo attacker-controlled
-                # exception text back to the client.
-                print(f"[glassport] upstream error: {exc}", file=sys.stderr)
-                msg = b"glassport: upstream unavailable"
-                self.send_response(502)
-                self.send_header("Content-Length", str(len(msg)))
-                self.end_headers()
                 try:
-                    self.wfile.write(msg)
-                except Exception:
-                    pass
-                return
+                    conn = _connect(remote)
+                    conn.request(method, _upstream_target(remote), body=body or None,
+                                 headers=_req_headers(self.headers, remote))
+                    resp = conn.getresponse()
+                except Exception as exc:
+                    # glassport's own transport failure — surface it plainly, never
+                    # fabricate a JSON-RPC reply, and never echo attacker-controlled
+                    # exception text back to the client.
+                    print(f"[glassport] upstream error: {exc}", file=sys.stderr)
+                    msg = b"glassport: upstream unavailable"
+                    self.send_response(502)
+                    self.send_header("Content-Length", str(len(msg)))
+                    self.end_headers()
+                    try:
+                        self.wfile.write(msg)
+                    except Exception:
+                        pass
+                    return
 
-            ctype = resp.getheader("Content-Type", "")
-            all_ct = [v for k, v in resp.getheaders() if k.lower() == "content-type"]
-            self.send_response(resp.status)
-            # Match the *media type*, not any substring; also require exactly one
-            # unambiguous Content-Type header. Duplicate or conflicting CT lines
-            # default to non-streaming so an upstream cannot inject a second
-            # Content-Type to flip a JSON body onto the SSE path.
-            streaming = (
-                len(all_ct) == 1
-                and ctype.split(";", 1)[0].strip().lower() == "text/event-stream"
-            )
-            resp_drop = _hop_headers(resp.getheaders())
-            for k, v in resp.getheaders():
-                if k.lower() in resp_drop:
-                    continue
-                if streaming and k.lower() == "content-length":
-                    continue
-                self.send_header(k, v)
-            if streaming:
-                # An SSE response carries no Content-Length and the proxy strips
-                # the upstream's Transfer-Encoding (a _HOP header), so the only
-                # honest framing left is close-delimiting: mark the connection to
-                # close so that when the upstream ends the stream the client gets
-                # a prompt EOF instead of hanging on a kept-alive socket waiting
-                # for events that will never come.
-                self.send_header("Connection", "close")
-                self.close_connection = True
-                self.end_headers()
-                _stream_sse(resp, self.wfile, log)
-            else:
-                # Non-SSE response: stream to the client in bounded chunks so a
-                # hostile upstream cannot balloon memory, and log at most
-                # _MAX_LOGGED_BODY bytes (plus a note) so it cannot balloon the
-                # session log either. Preserve the upstream's own framing only
-                # when it is unambiguous: a single, purely-numeric Content-Length
-                # with no Transfer-Encoding. Duplicate CL header *lines*, a single
-                # comma-folded CL value ("5, 50"), any non-digit token, or CL
-                # paired with TE all desync the client from the bytes we actually
-                # read, so we drop CL and close-delimit instead — the relay is
-                # still sacred (every byte reaches the client).
-                clen = resp.getheader("Content-Length")
-                te = resp.getheader("Transfer-Encoding")
-                all_cl = [v for k, v in resp.getheaders() if k.lower() == "content-length"]
-                declared: int | None = None
-                bodiless = resp.status in (204, 304)
-                if (clen is not None and te is None and not bodiless
-                        and len(all_cl) == 1 and clen.strip().isdigit()):
-                    declared = int(clen.strip())
-                    self.send_header("Content-Length", clen.strip())
-                else:
+                ctype = resp.getheader("Content-Type", "")
+                all_ct = [v for k, v in resp.getheaders() if k.lower() == "content-type"]
+                self.send_response(resp.status)
+                # Match the *media type*, not any substring; also require exactly one
+                # unambiguous Content-Type header. Duplicate or conflicting CT lines
+                # default to non-streaming so an upstream cannot inject a second
+                # Content-Type to flip a JSON body onto the SSE path.
+                streaming = (
+                    len(all_ct) == 1
+                    and ctype.split(";", 1)[0].strip().lower() == "text/event-stream"
+                )
+                resp_drop = _hop_headers(resp.getheaders())
+                for k, v in resp.getheaders():
+                    if k.lower() in resp_drop:
+                        continue
+                    if streaming and k.lower() == "content-length":
+                        continue
+                    self.send_header(k, v)
+                if streaming:
+                    # An SSE response carries no Content-Length and the proxy strips
+                    # the upstream's Transfer-Encoding (a _HOP header), so the only
+                    # honest framing left is close-delimiting: mark the connection to
+                    # close so that when the upstream ends the stream the client gets
+                    # a prompt EOF instead of hanging on a kept-alive socket waiting
+                    # for events that will never come.
                     self.send_header("Connection", "close")
                     self.close_connection = True
-                self.end_headers()
-                head, total = b"", 0
-                while True:
-                    chunk = resp.read(_RELAY_CHUNK)
-                    if not chunk:
-                        break
-                    total += len(chunk)
-                    try:
-                        self.wfile.write(chunk)
-                    except Exception:
-                        break  # client hung up; stop copying
-                    if len(head) < _MAX_LOGGED_BODY:
-                        head += chunk[: _MAX_LOGGED_BODY - len(head)]
-                # A hostile upstream can declare a Content-Length larger than the
-                # body it actually sends, then close. We can't verify the length
-                # before sending headers without buffering the whole body (that
-                # would reintroduce the R1 memory DoS), but once the stream ends
-                # we know the truth: if the bytes forwarded don't match what we
-                # promised, close the connection so the client gets a prompt EOF
-                # instead of hanging forever on a kept-alive socket waiting for a
-                # body that will never arrive.
-                if declared is not None and total != declared:
-                    self.close_connection = True
-                if head:
-                    log.record("s2c", head)   # one response body = one frame (bounded)
-                    if total > len(head):
-                        log.record("s2c", b'{"glassport":"s2c_body_truncated_oversize"}')
-            conn.close()
+                    self.end_headers()
+                    _stream_sse(resp, self.wfile, log)
+                else:
+                    # Non-SSE response: stream to the client in bounded chunks so a
+                    # hostile upstream cannot balloon memory, and log at most
+                    # _MAX_LOGGED_BODY bytes (plus a note) so it cannot balloon the
+                    # session log either. Preserve the upstream's own framing only
+                    # when it is unambiguous: a single, purely-numeric Content-Length
+                    # with no Transfer-Encoding. Duplicate CL header *lines*, a single
+                    # comma-folded CL value ("5, 50"), any non-digit token, or CL
+                    # paired with TE all desync the client from the bytes we actually
+                    # read, so we drop CL and close-delimit instead — the relay is
+                    # still sacred (every byte reaches the client).
+                    clen = resp.getheader("Content-Length")
+                    te = resp.getheader("Transfer-Encoding")
+                    all_cl = [v for k, v in resp.getheaders() if k.lower() == "content-length"]
+                    declared: int | None = None
+                    bodiless = resp.status in (204, 304)
+                    if (clen is not None and te is None and not bodiless
+                            and len(all_cl) == 1 and clen.strip().isdigit()):
+                        declared = int(clen.strip())
+                        self.send_header("Content-Length", clen.strip())
+                    else:
+                        self.send_header("Connection", "close")
+                        self.close_connection = True
+                    self.end_headers()
+                    head, total = b"", 0
+                    while True:
+                        chunk = resp.read(_RELAY_CHUNK)
+                        if not chunk:
+                            break
+                        total += len(chunk)
+                        try:
+                            self.wfile.write(chunk)
+                        except Exception:
+                            break  # client hung up; stop copying
+                        if len(head) < _MAX_LOGGED_BODY:
+                            head += chunk[: _MAX_LOGGED_BODY - len(head)]
+                    # A hostile upstream can declare a Content-Length larger than the
+                    # body it actually sends, then close. We can't verify the length
+                    # before sending headers without buffering the whole body (that
+                    # would reintroduce the R1 memory DoS), but once the stream ends
+                    # we know the truth: if the bytes forwarded don't match what we
+                    # promised, close the connection so the client gets a prompt EOF
+                    # instead of hanging forever on a kept-alive socket waiting for a
+                    # body that will never arrive.
+                    if declared is not None and total != declared:
+                        self.close_connection = True
+                    if head:
+                        log.record("s2c", head)   # one response body = one frame (bounded)
+                        if total > len(head):
+                            log.record("s2c", b'{"glassport":"s2c_body_truncated_oversize"}')
+            finally:
+                # Close-delimited responses may own the socket after getresponse()
+                # has detached it from conn. Release both owners on every exit.
+                try:
+                    if resp is not None:
+                        resp.close()
+                finally:
+                    if conn is not None:
+                        conn.close()
 
         def do_POST(self):
             self._relay("POST")
