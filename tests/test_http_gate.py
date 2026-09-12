@@ -158,6 +158,11 @@ class GateCase(unittest.TestCase):
         if declare:
             self.post({'jsonrpc': '2.0', 'id': 2, 'method': 'tools/list'},
                       session=session, url=url, auth=auth)
+        # Number of requests just issued, i.e. how many intent records this
+        # handshake must eventually produce. `intent_watermark` reads this
+        # rather than a hardcoded literal, so it can never drift out of sync
+        # if a future change adds/removes a request here.
+        self._handshake_request_count = 2 + (1 if declare else 0)
         return session
 
     def call(self, name, rid=7, session='sess-1', args=None, **kw):
@@ -228,8 +233,45 @@ class GateCase(unittest.TestCase):
                     out.append(record)
         return out
 
-    def last_call_records(self):
+    def intent_watermark(self, expected):
+        """Highest intent `n` written so far, once `expected` intents exist.
+
+        Call this right after setup traffic (handshake(), etc.) and before
+        the one decisive request a test cares about, then pass the result to
+        `last_call_records(since=...)`. `expected` is the number of setup
+        requests already issued (e.g. 3 for a handshake with tools/list
+        declared, 2 for `declare=False`) — the number of intent records that
+        setup traffic must eventually produce.
+
+        This must WAIT for those records rather than just reading whatever is
+        on disk right now: `record_delivery` (and, for the request whose
+        response is still being written, even `record_intent`) can still be
+        in flight in the relay's own worker thread at the moment a synchronous
+        client call like `handshake()` returns to the test — the client sees
+        the full response before the server thread's bookkeeping for that
+        same request necessarily finishes. Reading a stale, too-low watermark
+        just narrows the same race `last_call_records` guards against: the
+        decisive call's own record could then land in between the (still
+        settling) last setup record and get mistaken for it.
+        """
+        deadline = time.monotonic() + 15
+        ns = []
+        while time.monotonic() < deadline:
+            ns = [r['n'] for r in self._read('intent')]
+            if len(ns) >= expected:
+                break
+            time.sleep(0.02)
+        self.assertGreaterEqual(len(ns), expected,
+                                'setup traffic never finished recording')
+        return max(ns)
+
+    def last_call_records(self, since=0):
         """(intent, delivery) for the most recent decisive frame.
+
+        Only intents with `n > since` are considered, so a pre-existing,
+        already-terminal (intent, delivery) pair from setup traffic (e.g. the
+        handshake's own tools/list) can never be mistaken for the record the
+        test's actual decisive call produced — see `intent_watermark`.
 
         The relay's finally block can run after the client has its response —
         and after a disconnect it runs with no client at all — so wait for the
@@ -238,8 +280,9 @@ class GateCase(unittest.TestCase):
         deadline = time.monotonic() + 15
         chosen = delivery = None
         while time.monotonic() < deadline:
-            intents = self._read('intent')
-            deliveries = {r['intent']: r for r in self._read('delivery')}
+            intents = [r for r in self._read('intent') if r['n'] > since]
+            deliveries = {r['intent']: r for r in self._read('delivery')
+                          if r['intent'] > since}
             interesting = [r for r in intents
                            if r['findings'] or r['action'] != 'allow']
             if intents:
@@ -249,7 +292,8 @@ class GateCase(unittest.TestCase):
                     break
             time.sleep(0.02)
         self.journal.close()
-        self.assertIsNotNone(delivery, 'no terminal delivery record was written')
+        self.assertIsNotNone(delivery, 'no terminal delivery record was written '
+                             'after the watermark')
         return chosen, delivery
 
 
@@ -259,10 +303,11 @@ class TestObservedExclusionBlocks(GateCase):
     def test_excluded_call_is_blocked_and_never_reaches_upstream(self):
         self.proxy()
         self.handshake()
+        since = self.intent_watermark(self._handshake_request_count)
         before = self.upstream_calls()
         _, body = self.call('nope')
         self.assert_blocked(body, before)
-        intent, delivery = self.last_call_records()
+        intent, delivery = self.last_call_records(since=since)
         self.assertEqual(intent['action'], 'block')
         self.assertTrue(intent['candidate_block'])
         self.assertTrue(intent['enforce'])
@@ -283,10 +328,11 @@ class TestObservedExclusionBlocks(GateCase):
         """The two modes differ ONLY in enforcement, never in the verdict."""
         self.proxy(mode=dj.MODE_OBSERVE)
         self.handshake()
+        since = self.intent_watermark(self._handshake_request_count)
         before = self.upstream_calls()
         _, body = self.call('nope')
         self.assert_forwarded(body, before)
-        intent, delivery = self.last_call_records()
+        intent, delivery = self.last_call_records(since=since)
         self.assertEqual(intent['action'], 'block')
         self.assertTrue(intent['candidate_block'])
         self.assertFalse(intent['enforce'])
@@ -317,10 +363,11 @@ class TestConservativeForwarding(GateCase):
     def test_allowed_declared_tool_forwards(self):
         self.proxy()
         self.handshake()
+        since = self.intent_watermark(self._handshake_request_count)
         before = self.upstream_calls()
         _, body = self.call('search')
         self.assert_forwarded(body, before)
-        intent, delivery = self.last_call_records()
+        intent, delivery = self.last_call_records(since=since)
         self.assertEqual(intent['action'], 'allow')
         self.assertFalse(intent['enforce'])
         self.assertEqual(delivery['outcome'], 'sent')
@@ -330,10 +377,11 @@ class TestConservativeForwarding(GateCase):
         """Missing evidence is not exclusion evidence."""
         self.proxy()
         self.handshake(declare=False)
+        since = self.intent_watermark(self._handshake_request_count)
         before = self.upstream_calls()
         _, body = self.call('anything')
         self.assert_forwarded(body, before)
-        intent, _ = self.last_call_records()
+        intent, _ = self.last_call_records(since=since)
         self.assertFalse(intent['candidate_block'])
 
     def test_malformed_declaration_forwards(self):
@@ -390,12 +438,13 @@ class TestConservativeForwarding(GateCase):
         """A faulted pass cannot prove an exclusion, however it ended up."""
         self.proxy()
         self.handshake()
+        since = self.intent_watermark(self._handshake_request_count)
         before = self.upstream_calls()
         with mock.patch.object(detectors, '_scan_pii',
                                side_effect=RuntimeError('boom')):
             _, body = self.call('nope')
         self.assert_forwarded(body, before)
-        intent, delivery = self.last_call_records()
+        intent, delivery = self.last_call_records(since=since)
         # The candidate verdict still says block — that is the honest record —
         # but the fault vetoes acting on it.
         self.assertTrue(intent['candidate_block'])
@@ -408,12 +457,13 @@ class TestConservativeForwarding(GateCase):
         """Severity 3 is not the blocking rule; a proved exclusion is."""
         self.proxy()
         self.handshake()
+        since = self.intent_watermark(self._handshake_request_count)
         before = self.upstream_calls()
         _, body = self.call('search', args={
             'key': 'sk-ant-api03-' + 'A' * 40,
             'url': 'https://exfil.example.com/drop'})
         self.assert_forwarded(body, before)
-        intent, delivery = self.last_call_records()
+        intent, delivery = self.last_call_records(since=since)
         subcategories = [f['subcategory'] for f in intent['findings']]
         self.assertIn('pii_anthropic_key', subcategories)
         self.assertIn('unexpected_egress_host', subcategories)
@@ -566,6 +616,7 @@ class TestBlockUnderPressure(GateCase):
     def test_client_disconnect_around_the_block_still_records_it(self):
         self.proxy()
         self.handshake()
+        since = self.intent_watermark(self._handshake_request_count)
         before = self.upstream_calls()
         body = json.dumps({'jsonrpc': '2.0', 'id': 7, 'method': 'tools/call',
                            'params': {'name': 'nope', 'arguments': {}}}).encode()
@@ -579,7 +630,7 @@ class TestBlockUnderPressure(GateCase):
                          + b'\r\n\r\n' + body)
             sock.shutdown(socket.SHUT_RDWR)
         self.assertEqual(self.upstream_calls(), before)
-        intent, delivery = self.last_call_records()
+        intent, delivery = self.last_call_records(since=since)
         self.assertTrue(intent['enforce'])
         self.assertEqual(delivery['outcome'], 'blocked')
         self.assertTrue(delivery['enforced'])
