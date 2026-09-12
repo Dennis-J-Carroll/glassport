@@ -56,11 +56,10 @@ class TestViewModelHeader(unittest.TestCase):
         self.assertEqual(vm.title, "unknown server")
 
     def test_violation_counter_excludes_fabricated_and_info(self):
-        # call before any tools/list → context violation (sev 1) AND,
-        # with no declaration ever seen, also fabricated (sev 3)
-        lines = [
-            call(1, 1, "web_search", {"query": "x"}),
-            result(2, 1),
+        # Known declaration excludes shadow; web_search violates its schema.
+        lines = handshake() + [
+            call(6, 3, "shadow", {}),
+            call(7, 4, "web_search", {}),
         ]
         vm = tui.build_view_model(annotated_trace(lines), live=False)
         self.assertEqual(vm.counters["fabricated"], 1)
@@ -263,12 +262,12 @@ class TestReducer(unittest.TestCase):
         self.assertTrue(self.st.follow)               # untouched while overlay
 
     def test_enter_with_stale_findings_selection_does_not_crash(self):
-        # findings can shrink on re-ingest: a call made before any
-        # tools/list is fabricated until a later declaration arrives
-        pre = [call(1, 1, "web_search", {"query": "x"}), result(2, 1)]
+        # Rotation can replace a session with one containing fewer findings.
+        # Future declarations no longer erase old findings (issue #76).
+        pre = [call(1, 1, "web_search", {}), call(2, 2, "web_search", {})]
         vm_many = tui.build_view_model(annotated_trace(pre), live=True)
         vm_fewer = tui.build_view_model(
-            annotated_trace(pre + handshake(start_seq=3)), live=True)
+            annotated_trace(handshake() + [call(6, 3, "web_search", {})]), live=True)
         self.assertLess(len(vm_fewer.findings), len(vm_many.findings))
 
         st = tui.UIState(focus="findings",

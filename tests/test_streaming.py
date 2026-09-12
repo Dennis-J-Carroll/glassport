@@ -12,6 +12,7 @@ import re
 import time
 import unittest
 import tempfile
+from unittest.mock import patch
 from pathlib import Path
 
 from glassport import detectors
@@ -116,10 +117,8 @@ class TestEquivalence(StreamingCase):
             self.assertIs(s.trace, t0)              # same object, updated
             self.assertGreater(len(s.trace.events), n0)
 
-    def test_retroactive_unfabrication_across_polls(self):
-        # a call before any declaration is fabricated; when the
-        # handshake lands in a LATER poll the annotation must vanish,
-        # exactly as a batch re-read would conclude
+    def test_unknown_surface_never_fabricates_across_polls(self):
+        # Issue #76: future declarations cannot prove earlier exclusion.
         with tempfile.TemporaryDirectory() as tmp:
             p = Path(tmp) / "s.jsonl"
             pre = [call(1, 1, "web_search", {"q": "x"}), result(2, 1)]
@@ -127,7 +126,7 @@ class TestEquivalence(StreamingCase):
             s = StreamingSession(p)
             s.poll()
             subs = [a.subcategory for a in s.trace.annotations]
-            self.assertIn("fabricated_tool_call", subs)
+            self.assertNotIn("fabricated_tool_call", subs)
             with open(p, "a", encoding="utf-8") as fh:
                 fh.write("\n".join(handshake(start_seq=3)) + "\n")
             s.poll()
@@ -151,6 +150,63 @@ class TestEquivalence(StreamingCase):
 
 
 class TestFileEdgeCases(StreamingCase):
+    def test_growing_file_enters_bounded_tail_and_matches_batch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp) / "s.jsonl"
+            p.write_text("\n".join(handshake()) + "\n")
+            cap = p.stat().st_size + 100
+            session = StreamingSession(p, tail_cap_bytes=cap)
+            session.poll()
+            for i in range(20):
+                with p.open("a") as fh:
+                    fh.write(call(i + 10, i + 10, "web_search", {"query": "x" * 100}) + "\n")
+                session.poll()
+                ref = from_mcp_session_file(p, tail_cap_bytes=cap)
+                detectors.annotate(ref)
+                self.assertEqual(canon_events(session.trace), canon_events(ref))
+                self.assertEqual(canon_annotations(session.trace), canon_annotations(ref))
+                self.assertLessEqual(len(session._buf), cap)
+            self.assertTrue(session.tail_only)
+
+    def test_append_does_not_rescan_prior_events(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp) / "s.jsonl"
+            p.write_text("\n".join(handshake()) + "\n")
+            session = StreamingSession(p)
+            session.poll()
+            with p.open("a") as fh:
+                fh.write(call(6, 3, "web_search", {"query": "x"}) + "\n")
+            with patch.object(detectors, "annotate", side_effect=AssertionError("batch rescan")):
+                self.assertTrue(session.poll())
+            self.assert_equivalent(session, p)
+
+    def test_unterminated_input_stays_bounded(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp) / "s.jsonl"
+            session = StreamingSession(p, tail_cap_bytes=128)
+            for _ in range(5):
+                with p.open("ab") as fh:
+                    fh.write(b"x" * 100)
+                session.poll()
+                self.assertLessEqual(len(session._buf), 128)
+            self.assertTrue(session.trace.metadata["tail_only"])
+
+    def test_batch_extension_registry_stays_supported(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp) / "s.jsonl"
+            p.write_text("\n".join(handshake()) + "\n")
+            session = StreamingSession(p)
+            session.poll()
+            with patch.object(detectors, "DETECTORS", [detectors.context_violations]):
+                self.assertTrue(session.poll())
+                self.assert_equivalent(session, p)
+            self.assertTrue(session.poll())
+            self.assert_equivalent(session, p)
+
+    def test_invalid_tail_cap_rejected(self):
+        with self.assertRaises(ValueError):
+            StreamingSession("unused", tail_cap_bytes=0)
+
     def test_partial_line_is_buffered_not_parsed(self):
         with tempfile.TemporaryDirectory() as tmp:
             p = Path(tmp) / "s.jsonl"

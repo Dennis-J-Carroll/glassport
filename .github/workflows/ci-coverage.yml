@@ -19,7 +19,10 @@ jobs:
 
       - uses: actions/setup-python@v6
         with:
-          python-version: "3.12"
+          # coverage.py's sys.monitoring core requires CPython 3.12+.
+          # Pin this opt-in job to the measured 3.13 line; the stdlib matrix
+          # in ci.yml continues to cover Python 3.10 through 3.13.
+          python-version: "3.13"
 
       # Node is required only for the e2e test, which spawns the official
       # @modelcontextprotocol/server-filesystem via npx. Without it the e2e
@@ -31,14 +34,30 @@ jobs:
       # The dev extra provides coverage + hypothesis. tests/__init__.py puts
       # src/ ahead of site-packages on sys.path, so `--source=src/glassport`
       # matches the executed files with no editable-install juggling.
-      - name: Install dev extra
-        run: pip install .[dev]
+      - name: Install dev extra and measured coverage version
+        run: pip install '.[dev]' 'coverage==7.13.0'
+
+      # A requested core can fall back after a warning. Probe an actual traced
+      # process and assert coverage's own debug identity before the full run,
+      # so a changed runner or coverage release cannot silently restore the
+      # high-overhead C tracer.
+      - name: Verify sys.monitoring coverage core
+        shell: bash
+        env:
+          COVERAGE_CORE: sysmon
+        run: |
+          python -m coverage run --debug=sys \
+            --data-file="$RUNNER_TEMP/glassport-core-probe.coverage" \
+            -m unittest tests.test_policy.TestPolicy.test_block_option_requires_boolean \
+            2>&1 | tee "$RUNNER_TEMP/glassport-core-probe.log"
+          grep -Eq 'core: +SysMonitor' "$RUNNER_TEMP/glassport-core-probe.log"
 
       # The e2e participates here (node present) and additionally drives real
       # bytes through the mcp_session adapter and InteractionTrace.
       - name: Run suite under coverage
         env:
           PYTHONIOENCODING: utf-8
+          COVERAGE_CORE: sysmon
         run: |
           python -m coverage run --source=src/glassport \
             -m unittest discover -s tests -t .
@@ -51,7 +70,7 @@ jobs:
       # low-value UI tests.
       - name: Core pipeline coverage gate (>=85%)
         run: |
-          CORE="src/glassport/detectors.py,src/glassport/audit.py,src/glassport/sarif.py,src/glassport/interaction_trace.py,src/glassport/adapters/mcp_session.py,src/glassport/adapters/streaming.py,src/glassport/advise.py,src/glassport/health.py,src/glassport/prune.py"
+          CORE="src/glassport/detectors.py,src/glassport/audit.py,src/glassport/sarif.py,src/glassport/interaction_trace.py,src/glassport/session.py,src/glassport/http_sessions.py,src/glassport/incremental.py,src/glassport/policy.py,src/glassport/decision_journal.py,src/glassport/decision_replay.py,src/glassport/adapters/mcp_session.py,src/glassport/adapters/mcp_http.py,src/glassport/adapters/streaming.py,src/glassport/advise.py,src/glassport/health.py,src/glassport/prune.py"
           python -m coverage report --fail-under=85 --include="$CORE"
 
       # INFORMATIONAL — whole-package coverage, including the CLI/UI layer.

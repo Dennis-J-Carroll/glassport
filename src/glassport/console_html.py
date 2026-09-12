@@ -273,7 +273,7 @@ function renderBars(){
   $("h-live").textContent=vm?(vm.live?"LIVE ▮":"IDLE"):"";
   $("h-live").className=vm&&vm.live?"live":"";
   $("h-declared").textContent=vm?("declared: "+
-    (vm.declared.join(", ")||"—")):"";
+    (vm.declared.join(", ")||(vm.declaration_known?"empty":"unknown"))):"";
   $("h-frames").textContent=vm?("frames "+vm.counters.frames):"";
   $("c-fab").textContent=vm?("fabricated "+vm.counters.fabricated):"";
   $("c-vio").textContent=vm?("violations "+vm.counters.violations):"";

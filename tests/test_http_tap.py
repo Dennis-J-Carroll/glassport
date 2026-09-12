@@ -341,6 +341,8 @@ class TestHttpTapNamedSse(unittest.TestCase):
 
         # Confirm the raw log entries are no longer ``frame: null``.
         text = logs[0].read_text(encoding="utf-8")
+        from tests.test_incremental_detectors import TestFabricatedParity
+        TestFabricatedParity.assert_parity(self, text.splitlines(), annotate, None)
         s2c = [json.loads(ln) for ln in text.splitlines()
                if '"dir": "s2c"' in ln]
         for entry in s2c:
@@ -392,10 +394,13 @@ class TestHttpTapCli(unittest.TestCase):
         from glassport import tap
         self.assertEqual(tap.main(["wrap", "--transport", "http"]), 2)
 
-    def test_gate_over_http_rejected(self):
-        from glassport import tap
-        self.assertEqual(
-            tap.main(["gate", "--transport", "http", "--url", "http://x"]), 2)
+    # NOTE: `gate --transport http` used to be rejected outright (exit 2,
+    # "not supported yet"). Task 4 wired up a real HTTP enforcement gate
+    # (tap._run_http_gate), so that rejection no longer exists — coverage for
+    # the new behavior (and for the invocations that are still refused, e.g.
+    # missing --url or --controllable) now lives in
+    # tests/test_http_gate.py::TestGateCLISurface, which mocks
+    # _run_http_gate/run_http_tap so it never opens a real socket.
 
 
 class TestHttpTapGetDelete(unittest.TestCase):

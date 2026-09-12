@@ -1,11 +1,9 @@
 # glassport — project status
 
 Living snapshot of what's built, what's built-but-unshipped, and what's next.
-Update when a tier changes. Last updated: 2026-07-15 (0.6.10 — HTTP tap fix:
-named-event SSE framing no longer blinds declared-tools tracking or the
-pii_in_result_* detector on Streamable-HTTP servers, found by dogfooding
-glassport against real remote servers rather than synthetic fixtures. See
-"Recently shipped" below).
+Update when a tier changes. Last updated: 2026-09-08 (unreleased source changes:
+#76/#77 fixes, incremental built-in detectors, batch/live parity, and a pure
+policy interface). Package version remains 0.6.10; no release was made here.
 
 ## Tier 1 — Built, tested, in the repo
 
@@ -16,6 +14,7 @@ Source is the truth; this is the index.
 | Passive tap (`wrap`) | `tap.py` | stdio man-in-the-middle; logs every JSON-RPC frame, never alters one |
 | HTTP tap (H2.01) | `adapters/mcp_http.py` | `wrap --transport http --url <remote>`: local MITM proxy over MCP Streamable-HTTP (POST/GET/SSE); streams SSE to the client while framing each event, reuses `SessionLog` so the trace is identical to stdio; fail-open |
 | Active gate (`gate`) | `tap.py` | blocks `tools/call` outside the declared surface; opt-in enforcement |
+| HTTP gate | `adapters/mcp_http.py` / `http_sessions.py` / `decision_journal.py` | `gate --transport http --url <remote>`: HTTP-session-isolated enforcement wired through `policy.decide()`; blocks only a severity-3 `tools/call` proved against an *observed* declared surface for that HTTP session — everything else (missing/malformed declarations, detector faults, PII/egress findings) forwards |
 | Session summary | `tap.py` (`summarize`) | declared vs. called vs. fabricated delta |
 | Detectors | `detectors.py` | annotations over a trace: fabricated calls, context/schema violations, **data exfiltration** (PII/credentials) |
 | HTML report | `report.py` | self-contained static report, severity-colored |
@@ -33,7 +32,26 @@ Source is the truth; this is the index.
 
 ## Tier 2 — Built but NOT shipped to PyPI
 
-**Empty — `pip install glassport` serves 0.6.10** (published via tag-triggered
+**Priority engineering changes are implemented locally, not released:**
+
+- #76: unknown and explicitly empty tool declarations remain distinct across
+  analysis and output. Fabricated calls require exclusion by an observed surface.
+- #77: HTTP upstream responses/connections close on every relay exit.
+- Bounded incremental session state and all built-in event detectors; batch
+  `annotate()` replays the same engine. File views retain a bounded tail;
+  no-history ingestion supports continuous analysis with separate persistence.
+- Pure `policy.decide()` supports allow/warn/block, with severity-1 warnings
+  visible and fabricated-call blocking explicitly selected. Now wired into the
+  HTTP transport (`gate --transport http`, via `DecisionJournal.evaluate()`);
+  the stdio `gate` still enforces through its own separate mechanism and has
+  not been migrated onto this engine.
+- Permanent batch/live parity coverage includes real stdio and HTTP captures;
+  repeated latency/throughput and retained-memory benchmark added.
+
+See [the staged implementation and validation record](docs/priority-engineering.md)
+for compatibility changes, bounds, and remaining integration risks.
+
+**Release baseline: 0.6.10** (published via tag-triggered
 trusted publishing, tag `v0.6.10`). 0.6.10 fixes the HTTP tap's named-event
 SSE blind spot (see "Recently shipped"); 0.6.9 closed issue #64. 0.6.3 was the
 Kimi round-2 renderer hardening (PR #33): shared
@@ -68,15 +86,18 @@ Roughly in dependency order — earlier unlocks later.
    so it must emit glassport's own classification sentences + redacted tags,
    never echo attacker-controlled bytes. Fenced `glassport:begin/end` markers
    for idempotent, human-reversible writes.~~ ✅ Shipped
-3. **Streaming detector path** *(large, architectural)* — detectors currently
-   consume a *full in-memory trace* (batch). Streaming means processing frames as
-   they arrive. This is the prerequisite for #4.
-4. **Live/streaming detector path and HTTP enforcement parity** *(large)* —
-   passive interception over Streamable-HTTP already shipped (H2.01,
-   `adapters/mcp_http.py`; see Tier 1). What remains: `gate`'s active
-   enforcement (block `tools/call` outside the declared surface) has no HTTP
-   equivalent yet — it's stdio-only today. Depends on #3 for a detector path
-   that can evaluate a call in-flight rather than after a full batch trace.
+3. **Streaming detector path** — implemented in this checkout; see Tier 2.
+   All built-in event detectors evaluate frames incrementally. Drift,
+   fingerprints, and aggregate reports remain retrospective.
+4. ~~**HTTP enforcement parity** — shared session/detector/policy foundations
+   now exist. Remaining work includes MCP session partitioning across concurrent
+   HTTP streams, delivery/action evidence, and explicit transport integration.~~
+   ✅ Shipped — HTTP session isolation (`http_sessions.py`), decision/delivery
+   journaling (`decision_journal.py`), and an explicit HTTP gate
+   (`gate --transport http`) that blocks only a severity-3 `tools/call` proved
+   against an *observed* declared surface for that HTTP session, mirroring the
+   stdio gate's narrow rule. The existing stdio `gate` still runs its own
+   separate mechanism and has not been migrated onto this shared engine.
 5. **Agent↔Agent (A2A) trace coverage** *(large)* — extend beyond Agent↔Tool to
    agent-to-agent protocols.
 6. **Performance-methodology redesign** *(small, bounded)* — `test_streaming.py`'s
@@ -87,6 +108,8 @@ Roughly in dependency order — earlier unlocks later.
    a documented reference environment (the coverage job's line-trace overhead
    is a known, unmodeled variable), and enough tolerance to absorb CI noise
    without silently raising the bar past a real regression.
+   `scripts/bench_incremental.py` now provides repeated samples and memory-growth
+   evidence for the new core. Existing timing assertions remain unchanged.
 
 ## Recently shipped
 
@@ -208,7 +231,14 @@ Roughly in dependency order — earlier unlocks later.
 
 ## Next action
 
-- **0.6.9 released and stabilizing**
-- next RFC: streaming detector path
-- subsequent prototype: read-only observatory
-- later: HTTP enforcement parity
+1. Review and land the isolated #76/#77 and incremental-analysis commits; verify
+   PR CI and address coverage/timing sensitivity as a separate bounded change.
+2. ~~Add bounded HTTP session routing with concurrent-session isolation tests.~~
+   ✅ Shipped (`http_sessions.py`)
+3. ~~Persist replayable policy/delivery records and evaluate HTTP policy in
+   observation mode.~~ ✅ Shipped (`decision_journal.py`, `decision_replay.py`)
+4. ~~Add narrow, explicit HTTP enforcement for observed fabricated calls.~~
+   ✅ Shipped (`gate --transport http`)
+
+Deliverables and acceptance checks are fixed in the
+[follow-up sequence](docs/priority-engineering.md#agreed-follow-up-sequence--2026-09-08).
