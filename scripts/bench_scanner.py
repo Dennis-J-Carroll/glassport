@@ -287,6 +287,13 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(_worker(args.begin_markers, args.argument_bytes)))
         return 0
 
+    # Deduplicate --modes preserving first-occurrence order: report["modes"]
+    # below is keyed by mode name, so a repeated mode would otherwise be run
+    # twice and the second run's result would silently overwrite the first's
+    # (including clobbering a real failure with a later, possibly successful,
+    # run).
+    args.modes = list(dict.fromkeys(args.modes))
+
     report: dict[str, Any] = {
         "python": platform.python_version(),
         "implementation": platform.python_implementation(),

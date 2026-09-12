@@ -14,6 +14,7 @@ Source is the truth; this is the index.
 | Passive tap (`wrap`) | `tap.py` | stdio man-in-the-middle; logs every JSON-RPC frame, never alters one |
 | HTTP tap (H2.01) | `adapters/mcp_http.py` | `wrap --transport http --url <remote>`: local MITM proxy over MCP Streamable-HTTP (POST/GET/SSE); streams SSE to the client while framing each event, reuses `SessionLog` so the trace is identical to stdio; fail-open |
 | Active gate (`gate`) | `tap.py` | blocks `tools/call` outside the declared surface; opt-in enforcement |
+| HTTP gate | `adapters/mcp_http.py` / `http_sessions.py` / `decision_journal.py` | `gate --transport http --url <remote>`: HTTP-session-isolated enforcement wired through `policy.decide()`; blocks only a severity-3 `tools/call` proved against an *observed* declared surface for that HTTP session — everything else (missing/malformed declarations, detector faults, PII/egress findings) forwards |
 | Session summary | `tap.py` (`summarize`) | declared vs. called vs. fabricated delta |
 | Detectors | `detectors.py` | annotations over a trace: fabricated calls, context/schema violations, **data exfiltration** (PII/credentials) |
 | HTML report | `report.py` | self-contained static report, severity-colored |
@@ -40,8 +41,10 @@ Source is the truth; this is the index.
   `annotate()` replays the same engine. File views retain a bounded tail;
   no-history ingestion supports continuous analysis with separate persistence.
 - Pure `policy.decide()` supports allow/warn/block, with severity-1 warnings
-  visible and fabricated-call blocking explicitly selected. No HTTP enforcement
-  or stdio-gate integration was added.
+  visible and fabricated-call blocking explicitly selected. Now wired into the
+  HTTP transport (`gate --transport http`, via `DecisionJournal.evaluate()`);
+  the stdio `gate` still enforces through its own separate mechanism and has
+  not been migrated onto this engine.
 - Permanent batch/live parity coverage includes real stdio and HTTP captures;
   repeated latency/throughput and retained-memory benchmark added.
 
@@ -86,11 +89,15 @@ Roughly in dependency order — earlier unlocks later.
 3. **Streaming detector path** — implemented in this checkout; see Tier 2.
    All built-in event detectors evaluate frames incrementally. Drift,
    fingerprints, and aggregate reports remain retrospective.
-4. **HTTP enforcement parity** — shared session/detector/policy foundations
+4. ~~**HTTP enforcement parity** — shared session/detector/policy foundations
    now exist. Remaining work includes MCP session partitioning across concurrent
-   HTTP streams, delivery/action evidence, and explicit transport integration.
-   Passive HTTP interception is shipped; existing active `gate` remains
-   stdio-only and has not been migrated to the shared engine.
+   HTTP streams, delivery/action evidence, and explicit transport integration.~~
+   ✅ Shipped — HTTP session isolation (`http_sessions.py`), decision/delivery
+   journaling (`decision_journal.py`), and an explicit HTTP gate
+   (`gate --transport http`) that blocks only a severity-3 `tools/call` proved
+   against an *observed* declared surface for that HTTP session, mirroring the
+   stdio gate's narrow rule. The existing stdio `gate` still runs its own
+   separate mechanism and has not been migrated onto this shared engine.
 5. **Agent↔Agent (A2A) trace coverage** *(large)* — extend beyond Agent↔Tool to
    agent-to-agent protocols.
 6. **Performance-methodology redesign** *(small, bounded)* — `test_streaming.py`'s
@@ -226,10 +233,12 @@ Roughly in dependency order — earlier unlocks later.
 
 1. Review and land the isolated #76/#77 and incremental-analysis commits; verify
    PR CI and address coverage/timing sensitivity as a separate bounded change.
-2. Add bounded HTTP session routing with concurrent-session isolation tests.
-3. Persist replayable policy/delivery records and evaluate HTTP policy in
-   observation mode.
-4. Add narrow, explicit HTTP enforcement for observed fabricated calls.
+2. ~~Add bounded HTTP session routing with concurrent-session isolation tests.~~
+   ✅ Shipped (`http_sessions.py`)
+3. ~~Persist replayable policy/delivery records and evaluate HTTP policy in
+   observation mode.~~ ✅ Shipped (`decision_journal.py`, `decision_replay.py`)
+4. ~~Add narrow, explicit HTTP enforcement for observed fabricated calls.~~
+   ✅ Shipped (`gate --transport http`)
 
 Deliverables and acceptance checks are fixed in the
 [follow-up sequence](docs/priority-engineering.md#agreed-follow-up-sequence--2026-09-08).

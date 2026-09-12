@@ -46,6 +46,11 @@ class ContextDetector(StreamingDetector):
     def on_event(self, event: Event, state: SessionState) -> list[Annotation]:
         out = []
         md = event.metadata
+        if md.get("http_uninterpreted"):
+            out.append(detectors._ann(
+                event, detectors.AnnotationKind.ANOMALY, "http_observation_unavailable",
+                "HTTP session evidence is incomplete; reinitialize for a fresh observation epoch",
+                severity=1))
         if state.surface_delta:
             out.append(detectors._ann(
                 event, detectors.AnnotationKind.DIVERGENCE, "surface_change",
@@ -107,9 +112,13 @@ class GateRecordsDetector(StreamingDetector):
 class DataExfiltrationDetector(StreamingDetector):
     name = "data_exfiltration"
 
-    def __init__(self):
+    def __init__(self, pii_patterns=None):
+        """`pii_patterns` pins this detector to a frozen pattern set for the
+        whole session (see detectors.snapshot_pii_patterns). None — the
+        default — keeps reading the live process-global registry per scan."""
         self._tool_defs = self._server_info = None
         self._declared_hosts: set[str] = set()
+        self._pii_patterns = tuple(pii_patterns) if pii_patterns is not None else None
 
     def on_event(self, event: Event, state: SessionState) -> list[Annotation]:
         if state.tool_defs is not self._tool_defs or state.server_info is not self._server_info:
@@ -121,7 +130,15 @@ class DataExfiltrationDetector(StreamingDetector):
             # Commit the cache only after successful extraction.
             self._tool_defs, self._server_info = state.tool_defs, state.server_info
             self._declared_hosts = hosts
-        return detectors._exfiltration_for_event(event, self._declared_hosts)
+        return detectors._exfiltration_for_event(event, self._declared_hosts,
+                                                 self._pii_patterns)
+
+
+def default_detectors(pii_patterns=None) -> tuple[StreamingDetector, ...]:
+    """The standard streaming detector set, optionally pinned to a frozen
+    PII pattern snapshot. One fresh instance set per session."""
+    return (FabricatedCallsDetector(), ContextDetector(), GateRecordsDetector(),
+            DataExfiltrationDetector(pii_patterns))
 
 
 class DetectorEngine:
@@ -133,9 +150,7 @@ class DetectorEngine:
     """
 
     def __init__(self, active: Iterable[StreamingDetector] | None = None):
-        self.active = tuple(active) if active is not None else (
-            FabricatedCallsDetector(), ContextDetector(), GateRecordsDetector(),
-            DataExfiltrationDetector())
+        self.active = tuple(active) if active is not None else default_detectors()
         self._state: SessionState | None = None
         self._finished = False
         self._reported_limits: set[str] = set()

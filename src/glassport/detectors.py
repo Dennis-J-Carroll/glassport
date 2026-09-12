@@ -29,7 +29,7 @@ import re
 import string
 import sys
 import unicodedata
-from typing import Any, Iterator, NamedTuple, Optional, Callable
+from typing import Any, Iterator, NamedTuple, Optional, Callable, Sequence
 
 from glassport.interaction_trace import (
     Annotation, AnnotationKind, HallucinationCategory,
@@ -968,6 +968,20 @@ def _active_patterns() -> list[PIIPattern]:
     return PII_PATTERNS + _CUSTOM_PATTERNS
 
 
+def snapshot_pii_patterns() -> tuple[PIIPattern, ...]:
+    """Freeze the currently active pattern set into an immutable tuple.
+
+    The registry above is process-global and mutable: `register_pii_pattern()`
+    and the env autoload can change it between two scans. Ordinary callers
+    (stdio tap, summarize, advise, audit) keep reading it live, unchanged. A
+    caller that must stay reproducible across a whole session — an explicitly
+    observed HTTP epoch — takes one snapshot at session start and passes it
+    down through the scanner helpers, so a mid-session registry mutation
+    cannot silently change what the recorded decisions were computed from.
+    """
+    return tuple(_active_patterns())
+
+
 # Set by _ensure_env_patterns_loaded(); reset by clear_custom_pii_patterns().
 _env_loaded = False
 
@@ -1099,16 +1113,21 @@ _STRUCTURAL_CONTAINERS = frozenset({"jwt_token"})
 _GENERIC_SECRETS = frozenset({"aws_secret_key", "generic_api_key", "high_entropy_token_30_40"})
 
 
-def _scan_normalized(text: str) -> list[tuple[PIIPattern, str, int, int]]:
+def _scan_normalized(text: str,
+                     patterns: "Sequence[PIIPattern] | None" = None,
+                     ) -> list[tuple[PIIPattern, str, int, int]]:
     """Validated, de-duped PII hits WITH normalized-coordinate spans.
     `text` is assumed ALREADY normalized (see _normalize_for_scan).
+
+    `patterns` is an optional frozen pattern set (see snapshot_pii_patterns).
+    None — the default every ordinary caller uses — reads the live registry.
 
     Span-aware suppression: a generic-secret match (aws_secret_key,
     generic_api_key) that falls entirely inside a structural token match
     (jwt_token) is part of that structure, not a separate credential."""
     raw: list[tuple[PIIPattern, str, int, int]] = []
     structural_spans: list[tuple[int, int]] = []
-    for pat in _active_patterns():
+    for pat in (_active_patterns() if patterns is None else patterns):
         for m in pat.pattern.finditer(text):
             value = m.group(m.lastindex) if m.lastindex else m.group(0)
             if pat.validator and not pat.validator(value):
@@ -1132,19 +1151,23 @@ def _scan_normalized(text: str) -> list[tuple[PIIPattern, str, int, int]]:
     return hits
 
 
-def _scan_pii_spanned(text: str) -> list[tuple[PIIPattern, str, int, int]]:
+def _scan_pii_spanned(text: str,
+                      patterns: "Sequence[PIIPattern] | None" = None,
+                      ) -> list[tuple[PIIPattern, str, int, int]]:
     """Validated, de-duped PII hits with spans, from raw (un-normalized) text.
     Caps input at MAX_SCAN_BYTES so a multi-megabyte payload can't turn the
     scan into a DoS, then normalizes to defeat obfuscation."""
     if len(text) > MAX_SCAN_BYTES:
         text = text[:MAX_SCAN_BYTES]
-    return _scan_normalized(_normalize_for_scan(text))
+    return _scan_normalized(_normalize_for_scan(text), patterns)
 
 
-def _scan_pii(text: str) -> list[tuple[PIIPattern, str]]:
+def _scan_pii(text: str,
+              patterns: "Sequence[PIIPattern] | None" = None,
+              ) -> list[tuple[PIIPattern, str]]:
     """Validated, de-duplicated PII hits (no spans). Back-compat wrapper for
     consumers that don't need offsets."""
-    return [(p, v) for p, v, _, _ in _scan_pii_spanned(text)]
+    return [(p, v) for p, v, _, _ in _scan_pii_spanned(text, patterns)]
 
 
 def _extract_hosts_from_value(value: Any, hosts: set[str]) -> None:
@@ -1198,13 +1221,18 @@ def data_exfiltration(trace: InteractionTrace) -> list[Annotation]:
     return replay(trace, [DataExfiltrationDetector()])
 
 
-def _exfiltration_for_event(e: Event, declared: set[str]) -> list[Annotation]:
-    """Shared payload checks; declared hosts come from bounded session state."""
+def _exfiltration_for_event(e: Event, declared: set[str],
+                            patterns: "Sequence[PIIPattern] | None" = None,
+                            ) -> list[Annotation]:
+    """Shared payload checks; declared hosts come from bounded session state.
+
+    `patterns` optionally pins the scan to a frozen pattern set instead of the
+    live registry (see snapshot_pii_patterns); None keeps today's behavior."""
     out: list[Annotation] = []
     if e.kind == EventKind.TOOL_CALL:
         for name, args in _tool_call_parts(e):
             blob = json.dumps(args, ensure_ascii=False, default=str)
-            hits = _scan_pii(blob)
+            hits = _scan_pii(blob, patterns)
             for pat, value in hits:
                 out.append(_ann(
                     e, AnnotationKind.DIVERGENCE, f"pii_{pat.category}",
@@ -1233,7 +1261,7 @@ def _exfiltration_for_event(e: Event, declared: set[str]) -> list[Annotation]:
     elif e.kind == EventKind.TOOL_RESULT:
         blob = json.dumps([p.content for p in e.parts],
                           ensure_ascii=False, default=str)
-        for pat, _ in _scan_pii(blob):
+        for pat, _ in _scan_pii(blob, patterns):
             if pat.severity < 3:
                 continue
             out.append(_ann(

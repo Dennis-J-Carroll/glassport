@@ -70,7 +70,7 @@ jobs:
       # low-value UI tests.
       - name: Core pipeline coverage gate (>=85%)
         run: |
-          CORE="src/glassport/detectors.py,src/glassport/audit.py,src/glassport/sarif.py,src/glassport/interaction_trace.py,src/glassport/session.py,src/glassport/incremental.py,src/glassport/policy.py,src/glassport/adapters/mcp_session.py,src/glassport/adapters/streaming.py,src/glassport/advise.py,src/glassport/health.py,src/glassport/prune.py"
+          CORE="src/glassport/detectors.py,src/glassport/audit.py,src/glassport/sarif.py,src/glassport/interaction_trace.py,src/glassport/session.py,src/glassport/http_sessions.py,src/glassport/incremental.py,src/glassport/policy.py,src/glassport/decision_journal.py,src/glassport/decision_replay.py,src/glassport/adapters/mcp_session.py,src/glassport/adapters/mcp_http.py,src/glassport/adapters/streaming.py,src/glassport/advise.py,src/glassport/health.py,src/glassport/prune.py"
           python -m coverage report --fail-under=85 --include="$CORE"
 
       # INFORMATIONAL — whole-package coverage, including the CLI/UI layer.

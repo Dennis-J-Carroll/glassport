@@ -209,11 +209,30 @@ class MCPTraceBuilder:
         """
         if not isinstance(entry, dict):
             raise ValueError("tap entry must be an object")
+        observation = entry.get("http_observation")
+        observation = observation if isinstance(observation, dict) else {}
+        if observation.get("skip") is True:
+            return None
+        loss = observation.get("loss")
+        if loss or observation.get("uninterpreted"):
+            raw = entry.get("raw")
+            if raw is None:
+                raw = json.dumps(entry.get("frame"), ensure_ascii=False)
+            entry = dict(entry, frame=None, raw=raw)
+        if loss:
+            self.pending.clear()
+            self.pending_s2c.clear()
+            self.client.metadata.clear()
+            self.server.metadata.clear()
         before = len(self.events)
         self._feed_entry(entry)
         if len(self.events) == before:
             return None
         event = self.events[-1]
+        if loss:
+            event.metadata["http_observation_loss"] = True
+        if loss or observation.get("uninterpreted"):
+            event.metadata["http_uninterpreted"] = True
         if isinstance(entry.get("gate"), dict):
             event.metadata["gate"] = entry["gate"]
         # Actor metadata is a bounded materialized view; events remain faithful.
@@ -492,6 +511,7 @@ def from_mcp_session(
     server_name: str = "mcp_server",
     client_name: str = "mcp_client",
     user_intent: Optional[str] = None,
+    *, limits: SessionLimits | None = None,
 ) -> InteractionTrace:
     """
     Build an InteractionTrace from glassport_tap JSONL lines.
@@ -503,7 +523,7 @@ def from_mcp_session(
     """
     builder = _TraceBuilder(server_name=server_name,
                             client_name=client_name,
-                            user_intent=user_intent)
+                            user_intent=user_intent, limits=limits)
     for entry in _iter_entries(log_lines):
         builder.feed(entry)
     return builder.snapshot()
