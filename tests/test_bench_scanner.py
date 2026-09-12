@@ -94,6 +94,50 @@ class TestScannerBenchmark(unittest.TestCase):
         self.assertEqual(report["status"], "unsupported")
         self.assertEqual(report["actual_core"], "pytrace")
 
+    def test_duplicate_modes_are_deduplicated_preserving_order(self):
+        # A repeated --modes entry must be run (and recorded) exactly once,
+        # not once per occurrence: two _run_mode calls for the same mode
+        # would let the second silently clobber the first's recorded
+        # result (including an earlier failure) in report["modes"].
+        benchmark = load_benchmark()
+        calls: list[str] = []
+
+        def fake_run_mode(mode, args, temp_dir):
+            calls.append(mode)
+            return {"status": "supported", "requested_core": mode,
+                    "actual_core": mode, "coverage_version": None,
+                    "sample_count": args.samples, "timings_ms": {}}
+
+        with mock.patch.object(benchmark, "_run_mode", side_effect=fake_run_mode), \
+                mock.patch.object(benchmark, "_parse_args", return_value=mock.Mock(
+                    worker=False, modes=["normal", "normal", "ctrace"], samples=2,
+                    begin_markers=1, argument_bytes=1, timeout=1)):
+            exit_code = benchmark.main([])
+        self.assertEqual(exit_code, 0)
+        # First-occurrence order preserved; "normal" run only once despite
+        # appearing twice in the requested modes.
+        self.assertEqual(calls, ["normal", "ctrace"])
+
+    def test_cli_duplicate_modes_produces_single_clean_result(self):
+        # End-to-end smoke check that the real CLI accepts a duplicate mode
+        # without raising and produces one clean report entry for it. This
+        # does not by itself prove dedup happened (report["modes"] is a dict
+        # keyed by mode name, so it would show one entry either way) — that
+        # is what test_duplicate_modes_are_deduplicated_preserving_order
+        # (above) locks via call count.
+        completed = subprocess.run(
+            [sys.executable, str(SCRIPT), "--samples", "2", "--modes", "normal",
+             "normal", "--begin-markers", "4", "--argument-bytes", "128"],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+        report = json.loads(completed.stdout)
+        self.assertEqual(list(report["modes"].keys()), ["normal"])
+        self.assertEqual(report["modes"]["normal"]["status"], "supported")
+        self.assertEqual(report["modes"]["normal"]["sample_count"], 2)
+
     def test_main_returns_nonzero_for_error_and_zero_for_unsupported(self):
         benchmark = load_benchmark()
         error = {"status": "error", "reason": "boom"}

@@ -1011,7 +1011,9 @@ def main(argv: list[str]) -> int:
         argv = argv[2:]
     # H2.01: passive tap over MCP's Streamable-HTTP transport. Default stays
     # stdio (spawn + relay a child). `--transport http --url <remote>` runs a
-    # local MITM proxy instead. Gate (active enforcement) is stdio-only for now.
+    # local MITM proxy instead. Gate (active enforcement) now covers both
+    # stdio and HTTP; they differ only in control surface — `--controllable`
+    # is stdio-only and refused below for the HTTP gate.
     transport = "stdio"
     remote_url = None
     if argv and argv[0] == "--transport":
