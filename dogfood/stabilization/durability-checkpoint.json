@@ -1,0 +1,70 @@
+{
+  "task": "T07",
+  "checkpoint_type": "e2e_final",
+  "timestamp": 1784325519.5847492,
+  "e2e_metrics": {
+    "cases_executed": 5,
+    "cases_passed": 5,
+    "total_responses_received": 129,
+    "total_wall_elapsed_sec": 0.8869428634643555,
+    "throughput_calls_per_sec": 145.4434161588857
+  },
+  "case_details": [
+    {
+      "case_id": "C1",
+      "responses": 3,
+      "elapsed_sec": 0.16539502143859863
+    },
+    {
+      "case_id": "C2",
+      "responses": 7,
+      "elapsed_sec": 0.19222068786621094
+    },
+    {
+      "case_id": "C3",
+      "responses": 12,
+      "elapsed_sec": 0.18858766555786133
+    },
+    {
+      "case_id": "C4",
+      "responses": 5,
+      "elapsed_sec": 0.15923619270324707
+    },
+    {
+      "case_id": "C5",
+      "responses": 102,
+      "elapsed_sec": 0.1815032958984375
+    }
+  ],
+  "b2_checkpoints": [
+    {
+      "call_n": 25,
+      "iso_time": "2026-07-17T22:24:39Z",
+      "responses_so_far": 25,
+      "log_size_bytes": 13019,
+      "tap_rss_kb": 13680
+    },
+    {
+      "call_n": 50,
+      "iso_time": "2026-07-17T22:27:09Z",
+      "responses_so_far": 50,
+      "log_size_bytes": 24825,
+      "tap_rss_kb": 13684
+    },
+    {
+      "call_n": 75,
+      "iso_time": "2026-07-17T22:29:40Z",
+      "responses_so_far": 75,
+      "log_size_bytes": 36675,
+      "tap_rss_kb": 13684
+    },
+    {
+      "call_n": 100,
+      "iso_time": "2026-07-17T22:32:11Z",
+      "responses_so_far": 100,
+      "log_size_bytes": 48533,
+      "tap_rss_kb": 13688
+    }
+  ],
+  "b2_tap_pid": 113998
+}

@@ -1,0 +1,48 @@
+{
+  "commit": "0e2fb9d",
+  "tag": "v0.6.10",
+  "python": "3.10.12",
+  "branch": "stabilization/0610",
+  "timestamp": "2026-07-17T20:36:15.222179Z",
+  "suite": {
+    "total": 705,
+    "passed": 705,
+    "failed": 0,
+    "skipped": 0,
+    "seconds": 36.94
+  },
+  "grills": [
+    {"script": "eval_advise_redteam.py", "exit_code": 0, "pass": true},
+    {"script": "eval_report_redteam.py", "exit_code": 0, "pass": true},
+    {"script": "eval_sarif_redteam.py", "exit_code": 0, "pass": true},
+    {"script": "eval_redaction_redteam.py", "exit_code": 0, "pass": true},
+    {"script": "eval_server_redteam.py", "exit_code": 0, "pass": true},
+    {"script": "eval_streaming_redteam.py", "exit_code": 0, "pass": true},
+    {"script": "eval_provenance_redteam.py", "exit_code": 0, "pass": true},
+    {"script": "eval_http_tap_redteam.py", "exit_code": 0, "pass": true},
+    {"script": "eval_http_relay_redteam.py", "exit_code": 0, "pass": true}
+  ],
+  "grills_executed": 9,
+  "grills_passed": 9,
+  "grills_failed": 0,
+  "claims": [
+    {"source": "README.md", "line": 14, "claim": "Python 3.10+", "assessment": "MATCHES", "note": "Running 3.10.12"},
+    {"source": "README.md", "line": 15, "claim": "Zero dependencies", "assessment": "MATCHES", "note": "Suite runs PYTHONPATH=src only"},
+    {"source": "README.md", "line": 21, "claim": "Passive stdio/Streamable HTTP proxy", "assessment": "MATCHES", "note": "All 9 grills passed"},
+    {"source": "README.md", "line": 111, "claim": "Performance: 10k-frame at ~48k/s", "assessment": "UNVERIFIABLE", "note": "bench.py deferred"},
+    {"source": "README.md", "line": 659, "claim": "Passive covers stdio+HTTP; gate is stdio-only", "assessment": "MATCHES", "note": "No HTTP gate tests in grill"},
+    {"source": "README.md", "line": 684, "claim": "Streaming/HTTP enforcement on horizon", "assessment": "MATCHES", "note": "STATUS Tier 3 #3–4"},
+    {"source": "README.md", "line": 688, "claim": "TUI, CI, agent advisory built", "assessment": "MATCHES", "note": "All eval grills passed"},
+    {"source": "STATUS.md", "line": 113, "claim": "705 tests OK", "assessment": "MATCHES", "note": "Verified 705 passed"},
+    {"source": "STATUS.md", "line": 36, "claim": "v0.6.10 tag published", "assessment": "MATCHES", "note": "At commit 0e2fb9d"},
+    {"source": "STATUS.md", "line": 29, "claim": "Named validators (luhn/ssn/entropy/iban/aba/base58/jwt/uuid4)", "assessment": "MATCHES", "note": "eval_redaction_redteam passed"},
+    {"source": "STATUS.md", "line": 32, "claim": "Network-enriched audit (--provenance, stdlib urllib)", "assessment": "MATCHES", "note": "eval_provenance_redteam passed"}
+  ],
+  "summary": {
+    "status": "PASS",
+    "suite_status": "PASS (705/705)",
+    "grills_status": "PASS (9/9)",
+    "claims_status": "10 MATCH / 1 UNVERIFIABLE / 0 DRIFT",
+    "no_blockers": true
+  }
+}

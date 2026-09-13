@@ -165,6 +165,7 @@ def _call_tool(name: str, args: dict, log_dir: Path,
         return _text({
             "session": path.name,
             "declared_tools": sorted(trace.declared_tools()),
+            "declaration_known": trace.declared_surface() is not None,
             "called_tools": [n for _, n in trace.called_tools()],
             "fabricated_calls": [{"seq": seq_of.get(eid), "tool": n}
                                  for eid, n in trace.fabricated_tool_calls()],

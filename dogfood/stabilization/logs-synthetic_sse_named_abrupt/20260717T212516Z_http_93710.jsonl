@@ -1,0 +1,1 @@
+{"schema_version": "0.1", "seq": 1, "ts": "2026-07-17T21:25:16.744946+00:00", "dir": "c2s", "frame": {"jsonrpc": "2.0", "method": "tools/list", "id": 2}, "raw": null}

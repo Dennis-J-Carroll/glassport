@@ -1,0 +1,93 @@
+{
+  "task": "T02",
+  "timestamp": "2026-07-17T21:00:24.753192Z",
+  "install": {
+    "index_ok": true,
+    "resolved_version": "0.6.10",
+    "seconds": 0.92
+  },
+  "shadowing": {
+    "import_path": "<scratchpad>/venv-0610/lib/python3.10/site-packages/glassport/__init__.py",
+    "ok": true
+  },
+  "cli": {
+    "help_exit": 0,
+    "functional_cmd": "glassport audit test_audit_dir",
+    "functional_exit": 0
+  },
+  "sarif_valid_json": true,
+  "wheel_content": {
+    "extract_sse_meta_count": 2,
+    "sse_meta_count": 3,
+    "ok": true,
+    "path": "<scratchpad>/venv-0610/lib/python3.10/site-packages/glassport/adapters/mcp_http.py"
+  },
+  "assertions": [
+    {
+      "name": "install_from_pypi",
+      "expected": "glassport==0.6.10 resolves and installs successfully",
+      "observed": "Successfully installed glassport-0.6.10 from PyPI",
+      "pass": true
+    },
+    {
+      "name": "version_exactly_0610",
+      "expected": "Version: 0.6.10",
+      "observed": "Version: 0.6.10",
+      "pass": true
+    },
+    {
+      "name": "shadowing_guard",
+      "expected": "import path inside venv site-packages, not ~/Desktop/projects/GLASSPORT",
+      "observed": "<scratchpad>/venv-0610/lib/python3.10/site-packages/glassport/__init__.py",
+      "pass": true
+    },
+    {
+      "name": "cli_help_exit_code",
+      "expected": 0,
+      "observed": 0,
+      "pass": true
+    },
+    {
+      "name": "cli_help_produces_output",
+      "expected": "glassport \u2014 passive MCP stdio proxy",
+      "observed": "First line contains help text starting with glassport",
+      "pass": true
+    },
+    {
+      "name": "audit_functional_exit_code",
+      "expected": 0,
+      "observed": 0,
+      "pass": true
+    },
+    {
+      "name": "audit_score_found",
+      "expected": "score line in output",
+      "observed": "score:    100/100 (A) \u2014 no deductions",
+      "pass": true
+    },
+    {
+      "name": "sarif_valid_json",
+      "expected": "glassport audit --sarif produces valid JSON",
+      "observed": "JSON validated with python -m json.tool",
+      "pass": true
+    },
+    {
+      "name": "_extract_sse_meta_present",
+      "expected": ">= 1 occurrence",
+      "observed": "2 occurrences in mcp_http.py",
+      "pass": true
+    },
+    {
+      "name": "sse_meta_string_present",
+      "expected": ">= 1 occurrence",
+      "observed": "3 occurrences in mcp_http.py",
+      "pass": true
+    }
+  ],
+  "venv_path": "<scratchpad>/venv-0610",
+  "summary": {
+    "total_assertions": 10,
+    "passed": 10,
+    "failed": 0
+  }
+}

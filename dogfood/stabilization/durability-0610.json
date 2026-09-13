@@ -1,0 +1,95 @@
+{
+  "task": "T07",
+  "commit": "0e2fb9d",
+  "timestamp": 1784325519.5847492,
+  "cases_total": 5,
+  "cases_passed": 5,
+  "cases_failed": 0,
+  "results": [
+    {
+      "case_id": "C1",
+      "case_name": "LOG-WRITE isolation",
+      "expected": "Relay continues (\u22653 tool results, returncode 0) regardless of log-dir permission state",
+      "observed": "3/3 echo tool results received, returncode 0, wall 0.175s. Target session dir was pre-created and chmod 500 BEFORE the run. Note: tap.py's SessionLog.__init__ re-asserts 0o700 on any log directory it owns before writing (source comment: 'reassert 0o700 either way'), so on this same-uid sandbox the chmod-500 precondition was self-healed by the tap itself and the expected 'logging disabled' stderr warning did NOT fire -- logging proceeded normally. The primary acceptance criterion (relay isolation: responses unaffected by log-dir state) still passed.",
+      "passed": true,
+      "metrics": {
+        "responses_total": 5,
+        "tool_results": 3,
+        "returncode": 0
+      },
+      "notes": "driver.run_session against synthetic_echo_server.py, log_dir chmod 500 pre-run, chmod 755 post-run; driver.py's own SessionResult does not expose the tap subprocess PID (recorded as 'driver-internal')",
+      "client_responses": 3,
+      "wall_elapsed_sec": 0.17463265700644115,
+      "tap_pid": "driver-internal (subprocess pid not returned by SessionResult)",
+      "stderr_captured": true
+    },
+    {
+      "case_id": "C2",
+      "case_name": "Session with 5 calls",
+      "expected": "\u22655 responses; returncode 0",
+      "observed": "7 responses; returncode 0",
+      "passed": true,
+      "metrics": {
+        "calls_sent": 5,
+        "responses": 7,
+        "returncode": 0
+      },
+      "notes": "Ran 5 calls successfully",
+      "client_responses": 7,
+      "wall_elapsed_sec": 0.19222068786621094,
+      "evidence_note": "driver-based run: returncode + response counts only, captured via SessionResult; no tap subprocess PID or independent wall-clock instrumentation was captured for this case"
+    },
+    {
+      "case_id": "C3",
+      "case_name": "Session with 10 calls",
+      "expected": "\u226510 responses; returncode 0",
+      "observed": "12 responses; returncode 0",
+      "passed": true,
+      "metrics": {
+        "calls_sent": 10,
+        "responses": 12,
+        "returncode": 0
+      },
+      "notes": "Ran 10 calls successfully",
+      "client_responses": 12,
+      "wall_elapsed_sec": 0.18858766555786133,
+      "evidence_note": "driver-based run: returncode + response counts only, captured via SessionResult; no tap subprocess PID or independent wall-clock instrumentation was captured for this case"
+    },
+    {
+      "case_id": "C4",
+      "case_name": "Session with 3 calls",
+      "expected": "\u22653 responses; returncode 0",
+      "observed": "5 responses; returncode 0",
+      "passed": true,
+      "metrics": {
+        "calls_sent": 3,
+        "responses": 5,
+        "returncode": 0
+      },
+      "notes": "Ran 3 calls successfully",
+      "client_responses": 5,
+      "wall_elapsed_sec": 0.15923619270324707,
+      "evidence_note": "driver-based run: returncode + response counts only, captured via SessionResult; no tap subprocess PID or independent wall-clock instrumentation was captured for this case"
+    },
+    {
+      "case_id": "C5",
+      "case_name": "Extended run: 100 calls paced at 6s, manual tapped session",
+      "expected": "\u2265100 client-visible responses; no hang; \u22654 RSS checkpoints; total wall \u2265600s",
+      "observed": "100/100 responses; returncode 0; total wall 603.18s; log has 206 lines; 4 checkpoints (call 25/50/75/100) with tap_rss_kb flat at ~13.68MB (13680-13688 KB, i.e. stable, no leak)",
+      "passed": true,
+      "metrics": {
+        "calls_sent": 100,
+        "responses": 100,
+        "returncode": 0,
+        "total_wall_elapsed_sec": 603.1834399600011,
+        "tap_pid": 113998,
+        "log_line_count": 206,
+        "rss_samples": 4
+      },
+      "notes": "Manual tapped session (not driver-based) against synthetic_echo_server.py; paced with time.sleep(6) after each call to force wall time past the 600s floor; checkpoints appended live to durability-checkpoint.json every 25 calls with iso_time, responses_so_far, log_size_bytes, and tap_rss_kb from /proc/<tap_pid>/status VmRSS. Full detail in b2_result.json (scratch) and durability-checkpoint.json (b2_checkpoints array).",
+      "client_responses": 100,
+      "wall_elapsed_sec": 603.1834399600011,
+      "tap_pid": 113998
+    }
+  ]
+}

@@ -8,13 +8,26 @@ but never interprets method/id/params — and fail-open: SSE bytes reach the
 client as they arrive, independent of framing/logging. A logging failure never
 alters, delays, or kills a live session.
 
-Passive tap only: gate-over-HTTP and the streaming *detector* path are separate
-later increments. Detectors still consume the full JSONL after the session.
+The optional observer API isolates live analysis and wire captures per HTTP
+session epoch. It folds complete frames before completing client delivery;
+analysis failures still fail open.
+
+Enforcement is off unless a journal in gate mode is supplied (`glassport gate
+--transport http`). With one, and ONLY then, a frame whose analysis proves a
+severity-3 tools/call against an observed declared surface is answered locally
+with a JSON-RPC error and never forwarded: no upstream connection is opened for
+it at all. Every other state — missing, partial or malformed declarations, a
+faulted detector pass, an unparseable or oversized body, a lost or stale epoch,
+a call with no JSON-RPC id — forwards, with the would-block recorded. Passive
+wrap and observation mode keep byte-for-byte identical behavior, because with
+`journal=None` (or a journal in observe mode) the enforcement branch is never
+reachable.
 """
 
 from __future__ import annotations
 
 import http.client
+import json
 import os
 import re
 import sys
@@ -310,7 +323,181 @@ def _stream_sse(resp, wfile, log: SessionLog) -> None:
             buf = b""
 
 
-def _make_handler(remote, log: SessionLog):
+def _observe_call(lease, method, *args, **kwargs):
+    """Optional analysis must never acquire control over passive delivery."""
+    try:
+        return getattr(lease, method)(*args, **kwargs)
+    except Exception:
+        try:
+            lease.loss('http_analysis_failed')
+        except Exception:
+            pass
+        return None
+
+
+def _journal_call(journal, method, *args, **kwargs):
+    """Decision recording never gains control over passive delivery either.
+
+    A journal write failure is exactly as fail-open as an analysis failure: the
+    relay forwards, and the absent record is the honest evidence of absence.
+    """
+    try:
+        return getattr(journal, method)(*args, **kwargs)
+    except Exception:
+        return None
+
+
+def _lease_epoch(lease):
+    """The observed epoch a decision belongs to, or None when unroutable."""
+    epoch = getattr(getattr(lease, "context", None), "epoch", None)
+    return epoch if isinstance(epoch, str) and epoch else None
+
+
+_NO_ID = object()   # sentinel: this frame cannot be answered locally
+
+
+def _blockable_id(observation):
+    """The exact JSON-RPC id a synthesized block must echo, or :data:`_NO_ID`.
+
+    The id is read from the folded event's metadata, which holds the value the
+    wire carried with its original type — so a numeric id comes back numeric
+    and a string id comes back a string, never normalized between the two.
+
+    MCP defines ``tools/call`` as a request that expects a result. A
+    ``tools/call``-shaped frame carrying no id is therefore a notification
+    shape the method is not allowed to take: non-conformant, with nothing to
+    correlate a synthetic error to, and JSON-RPC forbids answering a
+    notification at all. Rather than block something it cannot answer — which
+    would drop a call silently, with no error visible to the client — the relay
+    treats that as a malformed request and forwards it, the would-block still
+    recorded. Same for an id of any type JSON-RPC does not permit (null, a
+    float, an object): glassport does not invent a correlation the client never
+    established. (``type(...) is int`` also excludes bool, which JSON has no
+    concept of but Python's json module would never produce here anyway.)
+    """
+    event = getattr(observation, "event", None)
+    metadata = getattr(event, "metadata", None)
+    rid = metadata.get("jsonrpc_id") if isinstance(metadata, dict) else None
+    return rid if type(rid) is int or type(rid) is str else _NO_ID
+
+
+def _gate_verdict(journal, observation) -> bool:
+    """Should this frame be refused? Computed BEFORE anything is recorded.
+
+    This is the single decision point for enforcement, and it is deliberately
+    a pure read: it opens no file, writes no record, and swallows every error
+    into False. Nothing that happens after it — a journal write failure, an
+    unwritable directory, a raising ``record_intent`` — may change the answer,
+    which is what keeps "recording is fail-open" from quietly becoming
+    "enforcement is fail-open".
+    """
+    if journal is None:
+        return False
+    try:
+        if not journal.evaluate(observation):
+            return False
+    except Exception:
+        return False
+    return _blockable_id(observation) is not _NO_ID
+
+
+def _observe_json_response(resp, wfile, lease, cap, *, expected=None, interpret=True):
+    """Bounded lookahead: fold a complete JSON body before completing delivery."""
+    head = bytearray()
+    complete = False
+    read_error = None
+    try:
+        while len(head) <= cap:
+            chunk = resp.read(min(_RELAY_CHUNK, cap + 1 - len(head)))
+            if not chunk:
+                complete = expected is None or len(head) == expected
+                break
+            head.extend(chunk)
+    except Exception as exc:
+        read_error = exc
+        head.extend(getattr(exc, 'partial', b''))
+    if head or not complete:
+        _observe_call(lease, "record", "s2c", bytes(head[:cap]),
+                      incomplete=not complete or not interpret)
+    # Even a failed upstream read may have provided bytes before failure.
+    # Flush that prefix before surfacing the read error and closing transport.
+    wfile.write(head)
+    total = len(head)
+    if read_error is not None:
+        raise read_error
+    if not complete:
+        while True:
+            chunk = resp.read(_RELAY_CHUNK)
+            if not chunk:
+                break
+            total += len(chunk)
+            wfile.write(chunk)
+    return total
+
+
+def _observe_sse(resp, wfile, lease, cap):
+    """Observe frames before forwarding their completing chunk; bound lookahead.
+
+    Every normal event has exact raw bytes in wire_b64. Oversize events retain
+    a bounded prefix, then discard interpretation through their terminator.
+    """
+    buf = b""
+    overflow = False
+    first = True
+    try:
+        while True:
+            chunk = resp.read1(4096)
+            if not chunk:
+                if buf and not overflow:
+                    _observe_call(lease, "record", "s2c", buf, incomplete=True, wire_bytes=buf)
+                return
+            buf += chunk
+            while True:
+                terms = [(i, t) for t in (b"\r\n\r\n", b"\n\n", b"\r\r")
+                         if (i := buf.find(t)) >= 0]
+                if not terms:
+                    break
+                i, term = min(terms, key=lambda item: item[0])
+                raw, buf = buf[:i + len(term)], buf[i + len(term):]
+                if overflow:
+                    overflow = False
+                    continue
+                event = raw[:-len(term)]
+                if first and event.startswith(b"\xef\xbb\xbf"):
+                    event = event[3:]
+                first = False
+                if len(raw) > cap:
+                    _observe_call(lease, "record", "s2c", raw[:cap], incomplete=True, wire_bytes=raw[:cap])
+                    continue
+                data, meta = [], {}
+                for line in event.replace(b"\r\n", b"\n").replace(b"\r", b"\n").split(b"\n"):
+                    field, colon, value = line.partition(b":")
+                    if value.startswith(b" "):
+                        value = value[1:]
+                    if field == b"data":
+                        data.append(value)
+                    elif field in (b"id", b"event", b"retry"):
+                        meta[field.decode()] = value.decode("utf-8", errors="replace")
+                _observe_call(lease, "record", "s2c", b"\n".join(data) if data else event,
+                             event_id=meta.get("id") if data else None,
+                             metadata=meta or None, wire_bytes=raw,
+                             transport_only=not data or (meta.get("event") or "message") != "message")
+            if len(buf) > cap:
+                if not overflow:
+                    _observe_call(lease, "record", "s2c", buf[:cap], incomplete=True, wire_bytes=buf[:cap])
+                    overflow = True
+                    first = False
+                # Preserve a possible terminator crossing the next chunk.
+                buf = buf[-3:]
+            wfile.write(chunk)
+            wfile.flush()
+    except Exception:
+        if buf and not overflow:
+            _observe_call(lease, "record", "s2c", buf[:cap], incomplete=True, wire_bytes=buf[:cap])
+        raise
+
+
+def _make_handler(remote, log: SessionLog, observer=None, journal=None):
     class _ProxyHandler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
         # A stalled client (slowloris) must not pin a ThreadingHTTPServer thread
@@ -336,6 +523,43 @@ def _make_handler(remote, log: SessionLog):
             note = why.replace(" ", "_")
             log.record("c2s", ('{"glassport":"rejected_%s"}' % note).encode())
 
+        def _send_block(self, observation) -> None:
+            """Answer a refused tools/call locally, in glassport's own voice.
+
+            The client gets an ordinary 200 carrying a JSON-RPC error — the
+            same shape a server's own error would take, so a conforming client
+            surfaces it through its normal error path — with the request's
+            exact id echoed back so it correlates. `-32000` matches the stdio
+            gate's convention, but the marker is `http_gate_blocked` rather
+            than the stdio gate's `gate_blocked`: two independent enforcement
+            paths must stay distinguishable in a log.
+
+            Nothing attacker-influenced is echoed. The client already knows
+            which call it made (the id says so), and the tool name and declared
+            surface are both influenced by the other side of a session this
+            response is trying to keep honest; the wire log and the decision
+            journal carry that evidence instead.
+            """
+            body = json.dumps({
+                "jsonrpc": "2.0",
+                "id": _blockable_id(observation),
+                "error": {
+                    "code": -32000,
+                    "message": ("glassport gate: tools/call blocked — the "
+                                "requested tool is outside the surface this "
+                                "server declared"),
+                    "data": {"glassport": "http_gate_blocked"},
+                },
+            }, ensure_ascii=False).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            try:
+                self.wfile.write(body)
+            except Exception:
+                pass   # client hung up; the block already happened
+
         def _read_client_body(self):
             """Return (body_for_upstream, framing_ok). Rejects ambiguous framing
             (Transfer-Encoding, duplicate/invalid Content-Length) rather than
@@ -354,6 +578,9 @@ def _make_handler(remote, log: SessionLog):
             length = int(cls[0]) if cls else 0
             head = self.rfile.read(min(length, _MAX_LOGGED_BODY)) if length else b""
             rest = length - len(head)
+            if getattr(self, "_observation_lease", None) is not None and head:
+                self._c2s_observation = _observe_call(
+                    self._observation_lease, "record", "c2s", head, incomplete=rest > 0)
             if head:
                 log.record("c2s", head)   # one request body = one frame (bounded)
                 if rest > 0:
@@ -373,17 +600,77 @@ def _make_handler(remote, log: SessionLog):
             return _stream(), True
 
         def _relay(self, method: str) -> None:
-            body, ok = self._read_client_body()
-            if not ok:
-                return
+            self._observation_lease = None
+            self._c2s_observation = None
+            # Delivery phase flags. Recording reads them; nothing branches on
+            # them, so the forwarded bytes are identical with journal=None.
+            intent = None
+            delivery = ("unknown", "handler_aborted", None)
+            request_sent = completed = False
+            if observer is not None:
+                try:
+                    self._observation_lease = observer.begin(method, list(self.headers.items()))
+                except Exception:
+                    pass  # optional analysis cannot break passive transport
             conn = resp = None
             try:
+                body, ok = self._read_client_body()
+                if not ok:
+                    # Ambiguous framing: refused locally, never begun upstream.
+                    delivery = ("not_attempted", "framing_rejected", None)
+                    if journal is not None:
+                        epoch = _lease_epoch(self._observation_lease)
+                        if epoch is not None:
+                            intent = _journal_call(journal, "record_intent", epoch,
+                                                   self._c2s_observation)
+                    return
+                if journal is not None:
+                    # ORDER IS LOAD-BEARING. The verdict is computed first,
+                    # from analysis alone; recording comes second and cannot
+                    # revise it; acting on it comes third. Anything that
+                    # reordered these — deriving `enforce` from the returned
+                    # intent, say — would silently convert every journal
+                    # failure into a forward of a call glassport had already
+                    # proved should not be forwarded.
+                    enforce = _gate_verdict(journal, self._c2s_observation)
+                    # Intent is persisted BEFORE the upstream request begins, so
+                    # a crash mid-delivery still leaves what analysis concluded.
+                    epoch = _lease_epoch(self._observation_lease)
+                    if epoch is not None:
+                        intent = _journal_call(journal, "record_intent", epoch,
+                                               self._c2s_observation,
+                                               enforce=enforce)
+                    delivery = ("not_attempted", "not_begun", None)
+                    if enforce:
+                        # Refused. `conn` is still None and stays None: no
+                        # socket is opened, so not one byte of this request can
+                        # reach upstream. The finally block below records the
+                        # terminal outcome, exactly as on every other path.
+                        delivery = ("blocked", "http_gate_blocked", 200)
+                        self._send_block(self._c2s_observation)
+                        return
                 try:
                     conn = _connect(remote)
                     conn.request(method, _upstream_target(remote), body=body or None,
                                  headers=_req_headers(self.headers, remote))
+                    request_sent = True
                     resp = conn.getresponse()
                 except Exception as exc:
+                    # Classify BEFORE the finally closes conn (close() clears
+                    # .sock and would destroy the zero-bytes-sent proof). A
+                    # missing socket means connect/DNS failed, so nothing was
+                    # written. For HTTPS, connect() assigns .sock before the TLS
+                    # handshake, so a handshake failure reads as an established
+                    # socket and is classified 'unknown' — deliberately
+                    # conservative, not a bug to "fix".
+                    if not request_sent:
+                        delivery = (("not_sent", "connect_failed", None)
+                                    if getattr(conn, "sock", None) is None
+                                    else ("unknown", "send_indeterminate", None))
+                    else:
+                        # request() already returned: the send completed and the
+                        # response state is indeterminate. Never 'not_sent'.
+                        delivery = ("unknown", "response_indeterminate", None)
                     # glassport's own transport failure — surface it plainly, never
                     # fabricate a JSON-RPC reply, and never echo attacker-controlled
                     # exception text back to the client.
@@ -398,6 +685,11 @@ def _make_handler(remote, log: SessionLog):
                         pass
                     return
 
+                # A complete request left the local socket and upstream
+                # answered. Not evidence that a remote tool executed.
+                delivery = ("sent", "upstream_response", resp.status)
+                if self._observation_lease is not None:
+                    _observe_call(self._observation_lease, "response", resp.status, resp.getheaders())
                 ctype = resp.getheader("Content-Type", "")
                 all_ct = [v for k, v in resp.getheaders() if k.lower() == "content-type"]
                 self.send_response(resp.status)
@@ -426,7 +718,11 @@ def _make_handler(remote, log: SessionLog):
                     self.send_header("Connection", "close")
                     self.close_connection = True
                     self.end_headers()
-                    _stream_sse(resp, self.wfile, log)
+                    if self._observation_lease is None:
+                        _stream_sse(resp, self.wfile, log)
+                    else:
+                        _observe_sse(resp, self.wfile, self._observation_lease,
+                                     min(_MAX_SSE_BUF, observer.limits.max_frame_bytes))
                 else:
                     # Non-SSE response: stream to the client in bounded chunks so a
                     # hostile upstream cannot balloon memory, and log at most
@@ -451,18 +747,25 @@ def _make_handler(remote, log: SessionLog):
                         self.send_header("Connection", "close")
                         self.close_connection = True
                     self.end_headers()
-                    head, total = b"", 0
-                    while True:
-                        chunk = resp.read(_RELAY_CHUNK)
-                        if not chunk:
-                            break
-                        total += len(chunk)
-                        try:
-                            self.wfile.write(chunk)
-                        except Exception:
-                            break  # client hung up; stop copying
-                        if len(head) < _MAX_LOGGED_BODY:
-                            head += chunk[: _MAX_LOGGED_BODY - len(head)]
+                    if self._observation_lease is not None:
+                        total = _observe_json_response(resp, self.wfile, self._observation_lease,
+                            min(_MAX_LOGGED_BODY, observer.limits.max_frame_bytes), expected=declared,
+                            interpret=(len(all_ct) == 1 and ctype.split(';', 1)[0].strip().lower()
+                                       == 'application/json'))
+                        head = b""
+                    else:
+                        head, total = b"", 0
+                        while True:
+                            chunk = resp.read(_RELAY_CHUNK)
+                            if not chunk:
+                                break
+                            total += len(chunk)
+                            try:
+                                self.wfile.write(chunk)
+                            except Exception:
+                                break  # client hung up; stop copying
+                            if len(head) < _MAX_LOGGED_BODY:
+                                head += chunk[: _MAX_LOGGED_BODY - len(head)]
                     # A hostile upstream can declare a Content-Length larger than the
                     # body it actually sends, then close. We can't verify the length
                     # before sending headers without buffering the whole body (that
@@ -477,6 +780,7 @@ def _make_handler(remote, log: SessionLog):
                         log.record("s2c", head)   # one response body = one frame (bounded)
                         if total > len(head):
                             log.record("s2c", b'{"glassport":"s2c_body_truncated_oversize"}')
+                completed = True
             finally:
                 # Close-delimited responses may own the socket after getresponse()
                 # has detached it from conn. Release both owners on every exit.
@@ -484,8 +788,21 @@ def _make_handler(remote, log: SessionLog):
                     if resp is not None:
                         resp.close()
                 finally:
-                    if conn is not None:
-                        conn.close()
+                    try:
+                        if conn is not None:
+                            conn.close()
+                    finally:
+                        if self._observation_lease is not None:
+                            _observe_call(self._observation_lease, "release")
+                        if intent is not None:
+                            # Exactly one terminal record per intent, on every
+                            # exit path — including a client disconnect that
+                            # unwinds mid-delivery. A response whose body
+                            # transfer then failed is 'failed', not 'sent'.
+                            if delivery[0] == "sent" and not completed:
+                                delivery = ("failed", "body_transfer_failed", delivery[2])
+                            _journal_call(journal, "record_delivery", intent,
+                                          delivery[0], code=delivery[1], status=delivery[2])
 
         def do_POST(self):
             self._relay("POST")
@@ -516,26 +833,55 @@ class _NullLog:
 
 def run_http_tap(remote_url: str, log_dir: Path, bind: str = "127.0.0.1",
                  port: int = 0, *, ready: "threading.Event | None" = None,
-                 server_box: "list | None" = None) -> None:
+                 server_box: "list | None" = None, observer=None,
+                 journal=None) -> None:
     """Start the local Streamable-HTTP MITM proxy and serve until shut down.
 
     `ready` is set once the server is bound; `server_box` (if given) receives
     the server so a caller/test can read `server_address` and `shutdown()`.
+    `journal` (opt-in, requires `observer`) records candidate decisions and
+    delivery outcomes into their own per-epoch files. A journal in observation
+    mode never changes what is forwarded or when; a journal in gate mode is the
+    only thing that enables enforcement, and then only for the narrow proved
+    case described in the module docstring.
     """
     remote = _validate_remote(remote_url)
     log_dir = Path(log_dir)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     log_path = log_dir / f"{stamp}_http_{os.getpid()}.jsonl"
-    log = open_session_log(log_path) or _NullLog()
-    httpd = ThreadingHTTPServer((bind, port), _make_handler(remote, log))
+    # An explicitly observed proxy has one capture per opaque epoch. Never
+    # create a second multiplexed capture that a single-session reader could
+    # accidentally interpret as a combined declaration surface.
+    log = (open_session_log(log_path) or _NullLog()) if observer is None else _NullLog()
+    journal = journal if observer is not None else None
+    httpd = ThreadingHTTPServer((bind, port),
+                                _make_handler(remote, log, observer, journal))
     if server_box is not None:
         server_box.append(httpd)
     print(f"[glassport] http tap on http://{bind}:{httpd.server_address[1]} "
           f"-> {remote_url}", file=sys.stderr)
-    print(f"[glassport] session log: {log_path}", file=sys.stderr)
+    if observer is None:
+        print(f"[glassport] session log: {log_path}", file=sys.stderr)
+    else:
+        print(f"[glassport] session logs: {observer.log_dir} (one per epoch)", file=sys.stderr)
+        if journal is not None:
+            from glassport.decision_journal import MODE_GATE
+            gating = getattr(journal, "mode", None) == MODE_GATE
+            print(f"[glassport] decision journal: {journal.dir} "
+                  + ("(GATE: proved out-of-surface tools/call is blocked; "
+                     "everything else forwards)" if gating else
+                     "(observation only; nothing is blocked)"),
+                  file=sys.stderr)
     if ready is not None:
         ready.set()
     try:
         httpd.serve_forever()
     finally:
-        log.close()
+        try:
+            httpd.server_close()
+        finally:
+            log.close()
+            if observer is not None:
+                observer.close()
+            if journal is not None:
+                journal.close()

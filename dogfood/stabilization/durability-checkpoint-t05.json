@@ -1,0 +1,20 @@
+{
+  "timestamp": "2026-07-17T17:53:24Z",
+  "task": "T05 HTTP Transport Matrix",
+  "runs_completed": 6,
+  "passed": 6,
+  "failed": 0,
+  "not_tested": 0,
+  "framings_verified": [
+    "direct_json",
+    "sse_unnamed",
+    "sse_named"
+  ],
+  "servers_tested": [
+    "synthetic-http",
+    "fastmcp-python-sdk"
+  ],
+  "http_calls_total": 18,
+  "http_calls_correlated": 18,
+  "sse_named_sse_meta_total": 18
+}
