@@ -51,7 +51,7 @@ Author: Dennis J. Carroll · 2026 (skeleton drafted with Claude)
 """
 from __future__ import annotations
 
-from glassport.detectors import find_taint, _schema_problems
+from glassport.detectors import find_taint, _schema_problems, _scan_pii, _redact
 
 import hashlib
 import json
@@ -438,6 +438,33 @@ class Gate:
                 return ("block", response,
                         {"action": "blocked", "tool": name,
                          "reason": "schema_violation"})
+            try:
+                blob = json.dumps(arguments, ensure_ascii=False, default=str)
+                pii_hits = [(pat, val) for pat, val in _scan_pii(blob)
+                            if pat.severity == 3]
+            except Exception:
+                return ("forward", None,
+                        {"action": "gate_skipped", "tool": name,
+                         "reason": "pii_scan_error"})
+            if pii_hits:
+                if not self._enforcement_on():
+                    return ("forward", None,
+                            {"action": "gate_disabled", "tool": name,
+                             "reason": "pii_exfiltration"})
+                pat, val = pii_hits[0]
+                self.blocked_count += 1
+                rid = frame.get("id")
+                response = self._block(
+                    rid, "pii_exfiltration", name,
+                    f"glassport gate: tools/call '{name}' blocked — "
+                    f"argument contains {pat.description}: "
+                    f"{_redact(val, pat.category)}",
+                    suggestion="Remove the credential/secret from the "
+                               "argument before retrying; this tool call "
+                               "will not be forwarded with it present.")
+                return ("block", response,
+                        {"action": "blocked", "tool": name,
+                         "reason": "pii_exfiltration"})
             return ("forward", None, None)
 
         if not self._enforcement_on():

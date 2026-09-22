@@ -524,6 +524,48 @@ class TestGateBoundaryChecks(unittest.TestCase):
             self.assertEqual(marker["action"], "gate_skipped")
             self.assertEqual(marker["reason"], "idempotency_check_error")
 
+    def test_gate_blocks_private_key_in_arguments_live(self):
+        g = declared_gate()
+        pem = ("-----BEGIN RSA PRIVATE KEY-----\n" + "A" * 200 +
+               "\n-----END RSA PRIVATE KEY-----")
+        action, resp, info = g.check_c2s(
+            line({"jsonrpc": "2.0", "id": 6, "method": "tools/call",
+                  "params": {"name": "web_search", "arguments": {"q": pem}}}))
+        self.assertEqual(action, "block")
+        frame = json.loads(resp)
+        self.assertEqual(frame["error"]["data"]["reason"], "pii_exfiltration")
+        self.assertNotIn("A" * 200, json.dumps(frame))
+        self.assertNotIn("A" * 200, json.dumps(info))
+
+    def test_gate_forwards_clean_arguments_after_all_boundary_checks(self):
+        g = declared_gate()
+        action, _, _ = g.check_c2s(
+            line({"jsonrpc": "2.0", "id": 7, "method": "tools/call",
+                  "params": {"name": "web_search", "arguments": {"query": "weather"}}}))
+        self.assertEqual(action, "forward")
+
+    def test_gate_does_not_block_low_severity_pii(self):
+        g = declared_gate()
+        action, _, _ = g.check_c2s(line({"jsonrpc": "2.0", "id": 7,
+            "method": "tools/call", "params": {"name": "web_search",
+            "arguments": {"email": "person@example.org"}}}))
+        self.assertEqual(action, "forward")
+
+    def test_pii_scan_failure_forwards_original_and_logs_marker(self):
+        frame = line({"jsonrpc": "2.0", "id": 4, "method": "tools/call",
+                      "params": {"name": "web_search", "arguments": {}}})
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "s.jsonl"
+            log = SessionLog(path)
+            dst = _KeepOpen()
+            with mock.patch("glassport.tap._scan_pii", side_effect=RuntimeError("scan failed")):
+                pump(io.BytesIO(frame), dst, log, "c2s", gate=declared_gate())
+            log.close()
+            self.assertEqual(dst.getvalue(), frame)
+            marker = json.loads(path.read_text())["gate"]
+            self.assertEqual(marker["action"], "gate_skipped")
+            self.assertEqual(marker["reason"], "pii_scan_error")
+
 
 if __name__ == "__main__":
     unittest.main()
