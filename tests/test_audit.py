@@ -451,5 +451,51 @@ class TestProvenanceRendererBoundaryDefensiveGaps(unittest.TestCase):
         self.assertNotIn(secret, text)   # no contiguous, directly-usable form
 
 
+class TestToolRegistryAudit(unittest.TestCase):
+    def _write_session(self, tmp_path, name, tools):
+        lines = [
+            json.dumps({"schema_version": "0.1", "seq": 1,
+                        "ts": "2026-01-01T00:00:00Z", "dir": "c2s",
+                        "frame": {"jsonrpc": "2.0", "id": 1,
+                                  "method": "tools/list"}}),
+            json.dumps({"schema_version": "0.1", "seq": 2,
+                        "ts": "2026-01-01T00:00:01Z", "dir": "s2c",
+                        "frame": {"jsonrpc": "2.0", "id": 1,
+                                  "result": {"tools": tools}}}),
+        ]
+        p = tmp_path / f"{name}.jsonl"
+        p.write_text("\n".join(lines) + "\n")
+        return p
+
+    def test_duplicate_tool_name_across_servers_flagged(self):
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            a = self._write_session(d, "server_a", [{"name": "search"}])
+            b = self._write_session(d, "server_b", [{"name": "search"}])
+            report = audit.audit_tool_registry([a, b])
+        findings = [f for f in report.findings if f.rule == "tool-shadowing"]
+        self.assertEqual(len(findings), 1)
+
+    def test_unbounded_schema_flagged(self):
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            a = self._write_session(d, "server_a", [{
+                "name": "run_query",
+                "inputSchema": {"type": "object", "additionalProperties": True},
+            }])
+            report = audit.audit_tool_registry([a])
+        findings = [f for f in report.findings if f.rule == "unbounded-schema"]
+        self.assertEqual(len(findings), 1)
+
+    def test_distinct_tool_names_not_flagged(self):
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            a = self._write_session(d, "server_a", [{"name": "search"}])
+            b = self._write_session(d, "server_b", [{"name": "fetch"}])
+            report = audit.audit_tool_registry([a, b])
+        self.assertEqual(
+            [f for f in report.findings if f.rule == "tool-shadowing"], [])
+
+
 if __name__ == "__main__":
     unittest.main()
