@@ -245,6 +245,26 @@ class Gate:
         # disabled still carries a "gate_disabled" marker in the log.
         self.control_path = control_path
 
+    def _block(self, rid, reason: str, tool: str | None, message: str,
+               suggestion: str | None = None, **extra_data) -> bytes | None:
+        """Build the synthesized JSON-RPC error for any gate block.
+
+        All gate blocks reuse -32000 and distinguish checks via data.reason.
+        Callers build suggestions from known structured values, never from
+        matched payload content.
+        """
+        if rid is None:
+            return None
+        data = {"glassport": "gate_blocked", "reason": reason, **extra_data}
+        if tool is not None:
+            data["tool"] = tool
+        if suggestion is not None:
+            data["suggestion"] = suggestion
+        return (json.dumps({
+            "jsonrpc": "2.0", "id": rid,
+            "error": {"code": -32000, "message": message, "data": data},
+        }, ensure_ascii=False) + "\n").encode("utf-8")
+
     def _enforcement_on(self) -> bool:
         """Consult the override file. Fail-closed: enforcement stays ON
         unless the file is a well-formed {"enforce": false} owned by
@@ -325,19 +345,13 @@ class Gate:
 
         self.blocked_count += 1
         rid = frame.get("id")
-        response = None
-        if rid is not None:
-            response = (json.dumps({
-                "jsonrpc": "2.0", "id": rid,
-                "error": {
-                    "code": -32000,
-                    "message": (f"glassport gate: tools/call '{name}' "
-                                f"blocked — not in the declared tool "
-                                f"surface"),
-                    "data": {"glassport": "gate_blocked", "tool": name,
-                             "declared": sorted(declared)},
-                },
-            }, ensure_ascii=False) + "\n").encode("utf-8")
+        suggestion = (f"Call one of the declared tools: "
+                      f"{', '.join(sorted(declared))}") if declared else None
+        response = self._block(
+            rid, "gate_blocked", name,
+            f"glassport gate: tools/call '{name}' blocked — not in the "
+            f"declared tool surface",
+            suggestion=suggestion, declared=sorted(declared))
         info = {"action": "blocked", "tool": name,
                 "declared": sorted(declared)}
         return ("block", response, info)

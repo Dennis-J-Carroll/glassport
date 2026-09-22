@@ -9,6 +9,8 @@ the glass and a declared call passing untouched.
 
 Pure stdlib, run with:  python3 -m unittest tests.test_gate
 """
+from __future__ import annotations
+
 import io
 import json
 import subprocess
@@ -389,6 +391,20 @@ class TestGateEndToEnd(unittest.TestCase):
                             if e["dir"] == "s2c" and "gate" not in e]
             self.assertFalse(any("shadow_tool" in json.dumps(e)
                                  for e in server_lines))
+
+
+class TestGateBoundaryChecks(unittest.TestCase):
+    def test_block_response_carries_reason_and_suggestion(self):
+        g = declared_gate()
+        action, resp, info = g.check_c2s(
+            line({"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                  "params": {"name": "shell_exec", "arguments": {}}}))
+        self.assertEqual(action, "block")
+        frame = json.loads(resp)
+        self.assertEqual(frame["error"]["code"], -32000)
+        self.assertEqual(frame["error"]["data"]["reason"], "gate_blocked")
+        self.assertIn("suggestion", frame["error"]["data"])
+        self.assertIn("web_search", frame["error"]["data"]["suggestion"])
 
 
 if __name__ == "__main__":
