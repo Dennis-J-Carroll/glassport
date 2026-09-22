@@ -51,7 +51,7 @@ Author: Dennis J. Carroll · 2026 (skeleton drafted with Claude)
 """
 from __future__ import annotations
 
-from glassport.attestation import ATTESTATION_KEY
+from glassport.attestation import ATTESTATION_KEY, validate_public_key
 from glassport.detectors import (
     find_taint, _schema_problems, _scan_pii, _redact, neutralize_text,
     _TAINT_PATTERNS,
@@ -240,6 +240,8 @@ class Gate:
                  idempotency_max_repeats: int = 3,
                  enforce_attestation: bool = False,
                  attestation_pubkey_b64: str | None = None) -> None:
+        if enforce_attestation:
+            validate_public_key(attestation_pubkey_b64)
         self._lock = threading.Lock()
         self._declared: set[str] | None = None   # None until tools/list seen
         self._declared_defs: dict[str, dict] = {}  # name -> full tool def
@@ -437,18 +439,28 @@ class Gate:
                         {"action": "gate_skipped",
                          "reason": "no_surface_timeout", "tool": name})
         if name in declared:
+            forward_info = None
             if self.enforce_attestation:
-                from glassport.attestation import check_meta, verify_signature
-                params = frame.get("params") if isinstance(frame.get("params"), dict) else {}
-                meta = params.get("_meta") if isinstance(params, dict) else None
-                att = check_meta(meta)
-                sig_ok = None
-                if att.present and att.well_formed and not att.expired \
-                        and self.attestation_pubkey_b64:
-                    raw_meta = meta[ATTESTATION_KEY]
-                    payload = json.dumps(params, sort_keys=True).encode("utf-8")
-                    sig_ok = verify_signature(
-                        payload, raw_meta["sig"], self.attestation_pubkey_b64)
+                try:
+                    from glassport.attestation import (
+                        check_meta, signing_payload, verify_signature)
+                    params = frame.get("params") or {}
+                    meta = params.get("_meta")
+                    att = check_meta(meta)
+                    sig_ok = None
+                    if att.present and att.well_formed and not att.expired:
+                        sig_ok = verify_signature(
+                            signing_payload(params), meta[ATTESTATION_KEY]["sig"],
+                            self.attestation_pubkey_b64)
+                        if sig_ok is None:
+                            # Unavailable verification does not disable the
+                            # remaining taint/schema/PII boundary checks.
+                            forward_info = {"action": "gate_skipped", "tool": name,
+                                            "reason": "attestation_unavailable"}
+                except Exception:
+                    return ("forward", None,
+                            {"action": "gate_skipped", "tool": name,
+                             "reason": "attestation_check_error"})
                 if not att.present or not att.well_formed or att.expired \
                         or sig_ok is False:
                     if not self._enforcement_on():
@@ -570,7 +582,7 @@ class Gate:
                 return ("block", response,
                         {"action": "blocked", "tool": name,
                          "reason": "pii_exfiltration"})
-            return ("forward", None, None)
+            return ("forward", None, forward_info)
 
         if not self._enforcement_on():
             # would have been blocked; forward, but say so in the log

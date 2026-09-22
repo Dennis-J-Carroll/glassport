@@ -10,10 +10,45 @@ the optional, explicitly-opt-in enforcement path.
 """
 from __future__ import annotations
 
+import base64
+import json
 import time
 from dataclasses import dataclass, field
 
 ATTESTATION_KEY = "com.glassport/attestation"
+
+
+def signing_payload(params: dict) -> bytes:
+    """Canonical bytes signed by the vendor extension, excluding only sig.
+
+    Copy the containing objects so signing never mutates the caller's frame.
+    Keep every other parameter, including the algorithm, expiry, arguments,
+    and other metadata, in the signed payload. Use sorted, compact JSON with
+    ASCII escapes and reject non-finite numbers. Callers sign these bytes
+    before inserting the base64 signature into the attestation object.
+    """
+    if not isinstance(params, dict):
+        raise ValueError("attestation parameters must be an object")
+    meta = params.get("_meta")
+    if not isinstance(meta, dict) or not isinstance(meta.get(ATTESTATION_KEY), dict):
+        raise ValueError("attestation metadata must contain an object")
+    att = dict(meta[ATTESTATION_KEY])
+    att.pop("sig", None)
+    unsigned = {**params, "_meta": {**meta, ATTESTATION_KEY: att}}
+    return json.dumps(unsigned, sort_keys=True, separators=(",", ":"),
+                      ensure_ascii=True, allow_nan=False).encode("utf-8")
+
+
+def validate_public_key(pubkey_b64: str | None) -> None:
+    """Reject unusable enforcement configuration, without requiring crypto."""
+    if not isinstance(pubkey_b64, str) or not pubkey_b64:
+        raise ValueError("attestation enforcement requires a base64 Ed25519 public key")
+    try:
+        key = base64.b64decode(pubkey_b64, validate=True)
+    except ValueError as exc:
+        raise ValueError("attestation public key must be valid base64") from exc
+    if len(key) != 32:
+        raise ValueError("attestation public key must decode to 32 bytes")
 
 
 @dataclass
@@ -63,7 +98,6 @@ try:
     from cryptography.hazmat.primitives.asymmetric.ed25519 import (
         Ed25519PublicKey)
     from cryptography.exceptions import InvalidSignature
-    import base64
     HAS_CRYPTO = True
 except ImportError:
     HAS_CRYPTO = False
@@ -79,8 +113,8 @@ def verify_signature(payload: bytes, sig_b64: str, pubkey_b64: str
         return None
     try:
         pubkey = Ed25519PublicKey.from_public_bytes(
-            base64.b64decode(pubkey_b64))
-        pubkey.verify(base64.b64decode(sig_b64), payload)
+            base64.b64decode(pubkey_b64, validate=True))
+        pubkey.verify(base64.b64decode(sig_b64, validate=True), payload)
         return True
     except (InvalidSignature, ValueError, Exception):
         return False
