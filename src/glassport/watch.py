@@ -106,26 +106,51 @@ JSD_DRIFT_THRESHOLD = 0.15
 JSD_MIN_CALLS = 5   # minimum total calls on both sides before scoring
 
 
-def _premature_list_changed(trace: InteractionTrace, tools_list_ts,
-                             ttl_ms) -> bool:
-    """True if notifications/tools/list_changed fired before the most
-    recent tools/list result's declared ttlMs would have expired."""
-    if not tools_list_ts or not isinstance(ttl_ms, (int, float)):
-        return False
+def _event_time(value) -> datetime | None:
+    """Parse a log timestamp without trusting its JSON type or format."""
+    if not isinstance(value, str):
+        return None
     try:
-        base = datetime.fromisoformat(tools_list_ts.replace("Z", "+00:00"))
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError:
-        return False
+        return None
+
+
+def _premature_list_changed(trace: InteractionTrace) -> bool:
+    """Compare each server notification with its preceding declaration.
+
+    Replay in wire order: later refreshes cannot erase an earlier finding,
+    and omitted/invalid TTLs replace, rather than inherit, the old window.
+    Only responses paired with tools/list establish a cache window.
+    """
+    base, ttl_ms = None, None
     for e in trace.events:
-        if e.metadata.get("method") != "notifications/tools/list_changed":
+        if e.metadata.get("method_replied_to") == "<tools/list>":
+            for part in e.parts:
+                if part.kind != PartKind.JSON or not isinstance(part.content, dict):
+                    continue
+                result = part.content.get("result")
+                if not isinstance(result, dict) or not isinstance(result.get("tools"), list):
+                    continue
+                candidate = result.get("ttlMs")
+                valid = (isinstance(candidate, (int, float))
+                         and not isinstance(candidate, bool) and candidate > 0
+                         and (not isinstance(candidate, float) or math.isfinite(candidate)))
+                base = _event_time(e.timestamp)
+                ttl_ms = candidate if valid else None
+                break
+        if (e.metadata.get("method") != "notifications/tools/list_changed"
+                or not e.metadata.get("server_initiated")
+                or not e.metadata.get("notification")):
             continue
-        if not e.timestamp:
+        fired = _event_time(e.timestamp)
+        if base is None or ttl_ms is None or fired is None:
             continue
         try:
-            fired = datetime.fromisoformat(e.timestamp.replace("Z", "+00:00"))
-        except ValueError:
+            elapsed_ms = (fired - base).total_seconds() * 1000
+        except TypeError:
+            # Mixed offset-aware/naive timestamps do not prove elapsed time.
             continue
-        elapsed_ms = (fired - base).total_seconds() * 1000
         if 0 <= elapsed_ms < ttl_ms:
             return True
     return False
@@ -195,7 +220,6 @@ def fingerprint(trace: InteractionTrace, source_name: str = "") -> dict:
     tool_call_counts = dict(Counter(n for _, n in trace.called_tools()))
     ttl_ms = server_meta.get("tools_list_ttl_ms")
     cache_scope = server_meta.get("tools_list_cache_scope")
-    tools_list_ts = server_meta.get("tools_list_ts")
     timestamps = [e.timestamp for e in trace.events if e.timestamp]
     return {
         "fingerprint_version": FINGERPRINT_VERSION,
@@ -219,8 +243,7 @@ def fingerprint(trace: InteractionTrace, source_name: str = "") -> dict:
         "tools_list_cache_scope": cache_scope,
         "schemas": {t["name"]: t.get("inputSchema") for t in declared_defs
                     if isinstance(t, dict) and "name" in t},
-        "premature_list_changed": _premature_list_changed(
-            trace, tools_list_ts, ttl_ms),
+        "premature_list_changed": _premature_list_changed(trace),
         # a tail-only ingest dropped the head of the log; drift derived
         # from it is low-confidence and drift() prints a notice saying so
         "tail_only": bool(trace.metadata.get("tail_only")),
@@ -332,9 +355,8 @@ def drift(baseline: dict, fp: dict) -> list[Drift]:
 
     if fp.get("premature_list_changed") and not fp.get("tail_only"):
         d("premature_list_changed", 2,
-          f"notifications/tools/list_changed fired before the previously "
-          f"declared ttlMs ({fp.get('tools_list_ttl_ms')}ms) would have "
-          f"expired")
+          "notifications/tools/list_changed fired before its preceding "
+          "tools/list declaration's ttlMs would have expired")
 
     for name in sorted(set(fp["fabricated_tools"])
                        - baseline["fabricated_ever"]):

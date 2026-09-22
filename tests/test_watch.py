@@ -386,5 +386,71 @@ class TestSchemaChangeReview(unittest.TestCase):
                 self.assertEqual(watch._classify_schema_change(malformed, valid), "unknown")
 
 
+class TestTemporalIntegrityReview(unittest.TestCase):
+    def entry(self, seq, second, direction, frame):
+        return json.dumps({"schema_version": "0.1", "seq": seq,
+                           "ts": f"2026-01-01T00:00:{second:02d}+00:00",
+                           "dir": direction, "frame": frame})
+
+    def listed(self, seq, second, rid, extra=None, method="tools/list"):
+        return [
+            self.entry(seq, second, "c2s", {"jsonrpc": "2.0", "id": rid, "method": method}),
+            self.entry(seq + 1, second + 1, "s2c", {"jsonrpc": "2.0", "id": rid,
+                       "result": {"tools": [{"name": "search"}], **(extra or {})}}),
+        ]
+
+    def changed(self, seq, second, direction="s2c"):
+        return self.entry(seq, second, direction, {
+            "jsonrpc": "2.0", "method": "notifications/tools/list_changed"})
+
+    def test_premature_finding_survives_following_refresh(self):
+        lines = self.listed(1, 0, 1, {"ttlMs": 60000}) + [self.changed(3, 6)]
+        self.assertTrue(fp(lines)["premature_list_changed"])
+        refreshed = lines + self.listed(4, 7, 2, {"ttlMs": 60000})
+        self.assertTrue(fp(refreshed)["premature_list_changed"])
+        base = watch.merge(watch.new_baseline(), fp(self.listed(1, 0, 1)))
+        self.assertIn("premature_list_changed", kinds(watch.drift(base, fp(refreshed))))
+
+    def test_omitted_cache_fields_clear_previous_declaration(self):
+        lines = self.listed(1, 0, 1, {"ttlMs": 60000, "cacheScope": "public"})
+        lines += self.listed(3, 7, 2) + [self.changed(5, 9)]
+        f = fp(lines)
+        self.assertIsNone(f["tools_list_ttl_ms"])
+        self.assertIsNone(f["tools_list_cache_scope"])
+        self.assertFalse(f["premature_list_changed"])
+
+    def test_each_notification_uses_its_preceding_ttl(self):
+        lines = self.listed(1, 0, 1, {"ttlMs": 1000}) + [self.changed(3, 5)]
+        lines += self.listed(4, 6, 2, {"ttlMs": 1000}) + [self.changed(6, 10)]
+        self.assertFalse(fp(lines)["premature_list_changed"])
+
+    def test_unrelated_result_does_not_reset_declaration_window(self):
+        lines = self.listed(1, 0, 1, {"ttlMs": 60000})
+        lines += self.listed(3, 5, 2, {"ttlMs": 0}, method="ping")
+        lines += [self.changed(5, 9)]
+        f = fp(lines)
+        self.assertTrue(f["premature_list_changed"])
+        self.assertEqual(f["tools_list_ttl_ms"], 60000)
+
+    def test_client_notification_is_not_a_server_surface_change(self):
+        lines = self.listed(1, 0, 1, {"ttlMs": 60000})
+        lines += [self.changed(3, 2, direction="c2s")]
+        self.assertFalse(fp(lines)["premature_list_changed"])
+
+    def test_malformed_timestamps_and_ttls_do_not_crash_analysis(self):
+        for timestamp in (None, 3, "bad", "2026-01-01T00:00:01"):
+            with self.subTest(timestamp=timestamp):
+                lines = self.listed(1, 0, 1, {"ttlMs": 60000})
+                listed = json.loads(lines[1])
+                listed["ts"] = timestamp
+                lines[1] = json.dumps(listed)
+                lines += [self.changed(3, 2)]
+                self.assertFalse(fp(lines)["premature_list_changed"])
+        for ttl in (True, "60000", [], -1, float("inf"), float("nan")):
+            with self.subTest(ttl=ttl):
+                lines = self.listed(1, 0, 1, {"ttlMs": ttl}) + [self.changed(3, 1)]
+                self.assertFalse(fp(lines)["premature_list_changed"])
+
+
 if __name__ == "__main__":
     unittest.main()

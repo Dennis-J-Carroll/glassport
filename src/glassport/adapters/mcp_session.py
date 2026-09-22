@@ -242,14 +242,16 @@ class _TraceBuilder:
                 for t in result["tools"]:
                     if isinstance(t, dict) and "name" in t:
                         declared.append(t)
-                if "ttlMs" in result:
-                    server.metadata["tools_list_ttl_ms"] = result.get("ttlMs")
-                if "cacheScope" in result:
-                    server.metadata["tools_list_cache_scope"] = result.get("cacheScope")
-                server.metadata["tools_list_ts"] = ts
-
             parent_eid, call_name = pending.pop(rid, (None, None)) \
                 if rid is not None else (None, None)
+
+            # Cache fields describe this tools/list response only. An omitted
+            # field clears the prior promise; unrelated results cannot renew it.
+            if (call_name == "<tools/list>" and isinstance(result, dict)
+                    and isinstance(result.get("tools"), list) and error is None):
+                server.metadata["tools_list_ttl_ms"] = result.get("ttlMs")
+                server.metadata["tools_list_cache_scope"] = result.get("cacheScope")
+                server.metadata["tools_list_ts"] = ts
 
             # the initialize result carries the server's declared
             # capabilities and identity — stamp them on the server actor
