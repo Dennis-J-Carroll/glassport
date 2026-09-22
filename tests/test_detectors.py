@@ -79,6 +79,25 @@ class TestAdapterPlumbing(unittest.TestCase):
         self.assertEqual(server.metadata.get("server_info"),
                          {"name": "test-server"})
 
+    def test_tools_list_ttl_and_cache_scope_captured(self):
+        lines = [
+            json.dumps({"schema_version": "0.1", "seq": 1,
+                        "ts": "2026-01-01T00:00:00Z", "dir": "c2s",
+                        "frame": {"jsonrpc": "2.0", "id": 1,
+                                  "method": "tools/list"}}),
+            json.dumps({"schema_version": "0.1", "seq": 2,
+                        "ts": "2026-01-01T00:00:01Z", "dir": "s2c",
+                        "frame": {"jsonrpc": "2.0", "id": 1,
+                          "result": {"tools": [{"name": "search"}],
+                                     "ttlMs": 300000, "cacheScope": "public"}}}),
+        ]
+        trace = from_mcp_session(lines)
+        server = next(a for a in trace.actors
+                      if a.metadata.get("role") == "mcp_server")
+        self.assertEqual(server.metadata["tools_list_ttl_ms"], 300000)
+        self.assertEqual(server.metadata["tools_list_cache_scope"], "public")
+        self.assertEqual(server.metadata["tools_list_ts"], "2026-01-01T00:00:01Z")
+
     def test_server_initiated_request_is_message_not_orphan(self):
         lines = handshake() + [
             L(6, "s2c", {"jsonrpc": "2.0", "id": 1,

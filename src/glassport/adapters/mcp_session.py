@@ -242,6 +242,11 @@ class _TraceBuilder:
                 for t in result["tools"]:
                     if isinstance(t, dict) and "name" in t:
                         declared.append(t)
+                if "ttlMs" in result:
+                    server.metadata["tools_list_ttl_ms"] = result.get("ttlMs")
+                if "cacheScope" in result:
+                    server.metadata["tools_list_cache_scope"] = result.get("cacheScope")
+                server.metadata["tools_list_ts"] = ts
 
             parent_eid, call_name = pending.pop(rid, (None, None)) \
                 if rid is not None else (None, None)

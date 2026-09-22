@@ -34,6 +34,7 @@ import re
 import sys
 from collections import Counter
 from dataclasses import asdict, dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Iterable
 
@@ -105,6 +106,56 @@ JSD_DRIFT_THRESHOLD = 0.15
 JSD_MIN_CALLS = 5   # minimum total calls on both sides before scoring
 
 
+def _premature_list_changed(trace: InteractionTrace, tools_list_ts,
+                             ttl_ms) -> bool:
+    """True if notifications/tools/list_changed fired before the most
+    recent tools/list result's declared ttlMs would have expired."""
+    if not tools_list_ts or not isinstance(ttl_ms, (int, float)):
+        return False
+    try:
+        base = datetime.fromisoformat(tools_list_ts.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    for e in trace.events:
+        if e.metadata.get("method") != "notifications/tools/list_changed":
+            continue
+        if not e.timestamp:
+            continue
+        try:
+            fired = datetime.fromisoformat(e.timestamp.replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        elapsed_ms = (fired - base).total_seconds() * 1000
+        if 0 <= elapsed_ms < ttl_ms:
+            return True
+    return False
+
+
+def _classify_schema_change(old: dict | None, new: dict | None) -> str:
+    """additive: new optional properties, nothing removed or narrowed.
+    mutative: a property removed, an existing property's declared type
+    changed, or a new required field appeared. unknown: not enough
+    information."""
+    if not isinstance(old, dict) or not isinstance(new, dict):
+        return "unknown"
+    old_props = old.get("properties") or {}
+    new_props = new.get("properties") or {}
+    if set(old_props) - set(new_props):
+        return "mutative"
+    for key, old_spec in old_props.items():
+        new_spec = new_props.get(key) or {}
+        if isinstance(old_spec, dict) and \
+                old_spec.get("type") != new_spec.get("type"):
+            return "mutative"
+    old_required = set(old.get("required") or [])
+    new_required = set(new.get("required") or [])
+    if new_required - old_required:
+        return "mutative"
+    if set(new_props) - set(old_props):
+        return "additive"
+    return "unknown"
+
+
 def fingerprint(trace: InteractionTrace, source_name: str = "") -> dict:
     """Reduce a trace to a JSON-serializable, order-independent summary."""
     server_meta: dict = {}
@@ -133,6 +184,9 @@ def fingerprint(trace: InteractionTrace, source_name: str = "") -> dict:
 
     server_info = server_meta.get("server_info") or {}
     tool_call_counts = dict(Counter(n for _, n in trace.called_tools()))
+    ttl_ms = server_meta.get("tools_list_ttl_ms")
+    cache_scope = server_meta.get("tools_list_cache_scope")
+    tools_list_ts = server_meta.get("tools_list_ts")
     timestamps = [e.timestamp for e in trace.events if e.timestamp]
     return {
         "fingerprint_version": FINGERPRINT_VERSION,
@@ -152,6 +206,12 @@ def fingerprint(trace: InteractionTrace, source_name: str = "") -> dict:
         "hosts": sorted(hosts),
         "event_count": len(trace.events),
         "tool_call_counts": tool_call_counts,
+        "tools_list_ttl_ms": ttl_ms,
+        "tools_list_cache_scope": cache_scope,
+        "schemas": {t["name"]: t.get("inputSchema") for t in declared_defs
+                    if isinstance(t, dict) and "name" in t},
+        "premature_list_changed": _premature_list_changed(
+            trace, tools_list_ts, ttl_ms),
         # a tail-only ingest dropped the head of the log; drift derived
         # from it is low-confidence and drift() prints a notice saying so
         "tail_only": bool(trace.metadata.get("tail_only")),
@@ -175,6 +235,7 @@ def new_baseline() -> dict:
         "server_versions": {},        # server name -> set of versions
         "last_declared": set(),       # most recent session's surface
         "tool_call_counts_ever": {},   # tool name -> cumulative call count
+        "last_schemas": {},           # tool name -> most recent full schema
     }
 
 
@@ -199,6 +260,7 @@ def merge(baseline: dict, fp: dict) -> dict:
                 fp["server_name"], set()).add(fp["server_version"])
     if fp["declared_tools"]:
         baseline["last_declared"] = set(fp["declared_tools"])
+    baseline["last_schemas"].update(fp["schemas"])
     return baseline
 
 
@@ -251,9 +313,19 @@ def drift(baseline: dict, fp: dict) -> list[Drift]:
     for name, h in sorted(fp["schema_hashes"].items()):
         seen = baseline["schema_hashes_seen"].get(name)
         if seen and h not in seen:
-            d("schema_changed", 2,
-              f"inputSchema for '{name}' changed since it was first declared",
-              tool=name, hash=h)
+            change_kind = _classify_schema_change(
+                baseline["last_schemas"].get(name), fp["schemas"].get(name))
+            severity = 3 if change_kind == "mutative" else 2
+            d("schema_changed", severity,
+              f"inputSchema for '{name}' changed since it was first "
+              f"declared ({change_kind})",
+              tool=name, hash=h, change_kind=change_kind)
+
+    if fp.get("premature_list_changed") and not fp.get("tail_only"):
+        d("premature_list_changed", 2,
+          f"notifications/tools/list_changed fired before the previously "
+          f"declared ttlMs ({fp.get('tools_list_ttl_ms')}ms) would have "
+          f"expired")
 
     for name in sorted(set(fp["fabricated_tools"])
                        - baseline["fabricated_ever"]):
