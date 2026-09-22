@@ -37,5 +37,14 @@ class TestStructuralAttestation(unittest.TestCase):
             self.assertIsInstance(result.problems, list)   # never raises
 
 
+class TestOptionalSignatureVerification(unittest.TestCase):
+    def test_verify_signature_returns_none_when_library_absent(self):
+        from glassport import attestation
+        if attestation.HAS_CRYPTO:
+            self.skipTest("cryptography extra is installed in this env")
+        result = attestation.verify_signature(b"payload", "c2ln", "cGs=")
+        self.assertIsNone(result)
+
+
 if __name__ == "__main__":
     unittest.main()

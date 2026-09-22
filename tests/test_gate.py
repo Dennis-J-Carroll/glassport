@@ -653,6 +653,27 @@ class TestGateBoundaryChecks(unittest.TestCase):
             self.assertEqual(dst.getvalue(), raw)
             self.assertEqual(json.loads(path.read_text())["gate"]["reason"], "resource_tracking_error")
 
+    def test_gate_enforcement_off_by_default_even_with_bad_attestation(self):
+        g = declared_gate()   # enforce_attestation defaults to False
+        action, _, _ = g.check_c2s(line({
+            "jsonrpc": "2.0", "id": 11, "method": "tools/call",
+            "params": {"name": "web_search", "arguments": {"query": "x"},
+                       "_meta": {"com.glassport/attestation": {
+                           "alg": "ed25519", "sig": "bad", "expires_at": 1}}},
+        }))
+        self.assertEqual(action, "forward")   # not enforced by default
+
+    def test_gate_blocks_missing_attestation_when_enforced(self):
+        g = Gate(enforce_attestation=True)
+        g.observe_s2c(TOOLS_LIST_RESULT)
+        action, resp, info = g.check_c2s(line({
+            "jsonrpc": "2.0", "id": 12, "method": "tools/call",
+            "params": {"name": "web_search", "arguments": {}},
+        }))
+        self.assertEqual(action, "block")
+        self.assertEqual(json.loads(resp)["error"]["data"]["reason"],
+                          "attestation_failed")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -57,3 +57,30 @@ def check_meta(meta: dict | None) -> AttestationResult:
 
     return AttestationResult(present=True, well_formed=well_formed,
                               expired=expired, problems=problems)
+
+
+try:
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import (
+        Ed25519PublicKey)
+    from cryptography.exceptions import InvalidSignature
+    import base64
+    HAS_CRYPTO = True
+except ImportError:
+    HAS_CRYPTO = False
+
+
+def verify_signature(payload: bytes, sig_b64: str, pubkey_b64: str
+                      ) -> bool | None:
+    """True/False when the `cryptography` extra is installed and the
+    inputs are well-formed; None when the extra is absent — the caller
+    must treat None as "could not check," never as "failed check."
+    Never raises: both inputs are attacker-controlled wire content."""
+    if not HAS_CRYPTO:
+        return None
+    try:
+        pubkey = Ed25519PublicKey.from_public_bytes(
+            base64.b64decode(pubkey_b64))
+        pubkey.verify(base64.b64decode(sig_b64), payload)
+        return True
+    except (InvalidSignature, ValueError, Exception):
+        return False

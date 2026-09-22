@@ -51,6 +51,7 @@ Author: Dennis J. Carroll · 2026 (skeleton drafted with Claude)
 """
 from __future__ import annotations
 
+from glassport.attestation import ATTESTATION_KEY
 from glassport.detectors import (
     find_taint, _schema_problems, _scan_pii, _redact, neutralize_text,
     _TAINT_PATTERNS,
@@ -236,7 +237,9 @@ class Gate:
     def __init__(self, hold_timeout: float = 2.0,
                  control_path: "Path | None" = None,
                  idempotency_ttl: float = 5.0,
-                 idempotency_max_repeats: int = 3) -> None:
+                 idempotency_max_repeats: int = 3,
+                 enforce_attestation: bool = False,
+                 attestation_pubkey_b64: str | None = None) -> None:
         self._lock = threading.Lock()
         self._declared: set[str] | None = None   # None until tools/list seen
         self._declared_defs: dict[str, dict] = {}  # name -> full tool def
@@ -248,6 +251,8 @@ class Gate:
         self.idempotency_max_repeats = idempotency_max_repeats
         # request_hash -> (count, first_seen_monotonic)
         self._recent_calls: dict[str, tuple[int, float]] = {}
+        self.enforce_attestation = enforce_attestation
+        self.attestation_pubkey_b64 = attestation_pubkey_b64
         # Runtime enable/disable via an override file (M6 TUI control).
         # None (the default) means enforcement is unconditional. Only a
         # tap launched with `gate --controllable` sets this.
@@ -432,6 +437,37 @@ class Gate:
                         {"action": "gate_skipped",
                          "reason": "no_surface_timeout", "tool": name})
         if name in declared:
+            if self.enforce_attestation:
+                from glassport.attestation import check_meta, verify_signature
+                params = frame.get("params") if isinstance(frame.get("params"), dict) else {}
+                meta = params.get("_meta") if isinstance(params, dict) else None
+                att = check_meta(meta)
+                sig_ok = None
+                if att.present and att.well_formed and not att.expired \
+                        and self.attestation_pubkey_b64:
+                    raw_meta = meta[ATTESTATION_KEY]
+                    payload = json.dumps(params, sort_keys=True).encode("utf-8")
+                    sig_ok = verify_signature(
+                        payload, raw_meta["sig"], self.attestation_pubkey_b64)
+                if not att.present or not att.well_formed or att.expired \
+                        or sig_ok is False:
+                    if not self._enforcement_on():
+                        return ("forward", None,
+                                {"action": "gate_disabled", "tool": name,
+                                 "reason": "attestation_failed"})
+                    self.blocked_count += 1
+                    rid = frame.get("id")
+                    response = self._block(
+                        rid, "attestation_failed", name,
+                        f"glassport gate: tools/call '{name}' blocked — "
+                        f"caller attestation missing, malformed, expired, "
+                        f"or invalid",
+                        suggestion=f"Include a valid {ATTESTATION_KEY} "
+                                   f"entry in params._meta, signed with "
+                                   f"the configured key.")
+                    return ("block", response,
+                            {"action": "blocked", "tool": name,
+                             "reason": "attestation_failed"})
             arguments = (frame.get("params") or {}).get("arguments")
             try:
                 repeat = self._idempotency_hit(name, arguments)
