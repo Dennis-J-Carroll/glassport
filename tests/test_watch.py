@@ -235,5 +235,36 @@ class TestWatchDir(unittest.TestCase):
                 self.assertEqual(rows[0]["findings"], [])
 
 
+class TestJSDDrift(unittest.TestCase):
+    def baseline_from(self, *fps):
+        base = watch.new_baseline()
+        for f in fps:
+            watch.merge(base, f)
+        return base
+
+    def test_tool_call_counts_present_in_fingerprint(self):
+        f = fp(session(calls=(("search", {}), ("search", {}), ("fetch", {}))))
+        self.assertEqual(f["tool_call_counts"], {"search": 2, "fetch": 1})
+
+    def test_jsd_drift_flagged_on_vocabulary_shift(self):
+        history = [fp(session(calls=(("query_database", {}),) * 10))
+                   for _ in range(5)]
+        base = self.baseline_from(*history)
+        shifted = fp(session(calls=(("execute_powershell", {}),) * 10))
+        findings = watch.drift(base, shifted)
+        jsd = [d for d in findings if d.kind == "jsd_drift"]
+        self.assertEqual(len(jsd), 1)
+        self.assertGreater(jsd[0].detail["jsd"], 0.5)
+        self.assertEqual(jsd[0].severity, 3)
+
+    def test_jsd_drift_absent_on_stable_vocabulary(self):
+        history = [fp(session(calls=(("query_database", {}),) * 10))
+                   for _ in range(5)]
+        base = self.baseline_from(*history)
+        stable = fp(session(calls=(("query_database", {}),) * 10))
+        findings = watch.drift(base, stable)
+        self.assertEqual([d for d in findings if d.kind == "jsd_drift"], [])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -29,8 +29,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 import sys
+from collections import Counter
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Iterable
@@ -75,6 +77,34 @@ def _hosts_in(content) -> set[str]:
     return hosts
 
 
+def _jsd(p_counts: dict[str, int], q_counts: dict[str, int]) -> float:
+    """Jensen-Shannon Divergence, base 2, bounded [0, 1]. See
+    APPENDIX.md §6 for the derivation. 0.0 = identical distributions,
+    1.0 = disjoint support."""
+    vocab = sorted(set(p_counts) | set(q_counts))
+    if not vocab:
+        return 0.0
+    p_total = sum(p_counts.values()) or 1
+    q_total = sum(q_counts.values()) or 1
+    p = [p_counts.get(k, 0) / p_total for k in vocab]
+    q = [q_counts.get(k, 0) / q_total for k in vocab]
+    m = [(pi + qi) / 2 for pi, qi in zip(p, q)]
+
+    def kl(a: list[float], b: list[float]) -> float:
+        total = 0.0
+        for ai, bi in zip(a, b):
+            if ai <= 0.0 or bi <= 0.0:
+                continue
+            total += ai * math.log2(ai / bi)
+        return total
+
+    return (kl(p, m) + kl(q, m)) / 2.0
+
+
+JSD_DRIFT_THRESHOLD = 0.15
+JSD_MIN_CALLS = 5   # minimum total calls on both sides before scoring
+
+
 def fingerprint(trace: InteractionTrace, source_name: str = "") -> dict:
     """Reduce a trace to a JSON-serializable, order-independent summary."""
     server_meta: dict = {}
@@ -102,6 +132,7 @@ def fingerprint(trace: InteractionTrace, source_name: str = "") -> dict:
                 hosts |= _hosts_in(p.content.get("output"))
 
     server_info = server_meta.get("server_info") or {}
+    tool_call_counts = dict(Counter(n for _, n in trace.called_tools()))
     timestamps = [e.timestamp for e in trace.events if e.timestamp]
     return {
         "fingerprint_version": FINGERPRINT_VERSION,
@@ -120,6 +151,7 @@ def fingerprint(trace: InteractionTrace, source_name: str = "") -> dict:
         "server_requests": sorted(server_requests),
         "hosts": sorted(hosts),
         "event_count": len(trace.events),
+        "tool_call_counts": tool_call_counts,
         # a tail-only ingest dropped the head of the log; drift derived
         # from it is low-confidence and drift() prints a notice saying so
         "tail_only": bool(trace.metadata.get("tail_only")),
@@ -142,6 +174,7 @@ def new_baseline() -> dict:
         "server_names": set(),
         "server_versions": {},        # server name -> set of versions
         "last_declared": set(),       # most recent session's surface
+        "tool_call_counts_ever": {},   # tool name -> cumulative call count
     }
 
 
@@ -150,6 +183,9 @@ def merge(baseline: dict, fp: dict) -> dict:
     baseline["sessions"] += 1
     baseline["declared_ever"] |= set(fp["declared_tools"])
     baseline["called_ever"] |= set(fp["called_tools"])
+    for tname, c in fp["tool_call_counts"].items():
+        baseline["tool_call_counts_ever"][tname] = \
+            baseline["tool_call_counts_ever"].get(tname, 0) + c
     baseline["fabricated_ever"] |= set(fp["fabricated_tools"])
     baseline["server_requests_ever"] |= set(fp["server_requests"])
     baseline["hosts_ever"] |= set(fp["hosts"])
@@ -199,6 +235,18 @@ def drift(baseline: dict, fp: dict) -> list[Drift]:
                            - set(fp["declared_tools"])):
             d("removed_declared_tool", 1,
               f"'{name}' disappeared from the declared surface", tool=name)
+
+    baseline_calls = baseline["tool_call_counts_ever"]
+    session_calls = fp["tool_call_counts"]
+    if sum(baseline_calls.values()) >= JSD_MIN_CALLS and \
+            sum(session_calls.values()) >= JSD_MIN_CALLS:
+        jsd_score = _jsd(baseline_calls, session_calls)
+        if jsd_score > JSD_DRIFT_THRESHOLD:
+            severity = 3 if jsd_score > 0.5 else 2 if jsd_score > 0.3 else 1
+            d("jsd_drift", severity,
+              f"tool-call vocabulary distribution diverged from history "
+              f"(JSD={jsd_score:.3f}, threshold={JSD_DRIFT_THRESHOLD})",
+              jsd=round(jsd_score, 4))
 
     for name, h in sorted(fp["schema_hashes"].items()):
         seen = baseline["schema_hashes_seen"].get(name)
