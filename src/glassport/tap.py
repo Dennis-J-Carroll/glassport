@@ -51,7 +51,7 @@ Author: Dennis J. Carroll · 2026 (skeleton drafted with Claude)
 """
 from __future__ import annotations
 
-from glassport.detectors import find_taint
+from glassport.detectors import find_taint, _schema_problems
 
 import json
 import os
@@ -232,6 +232,7 @@ class Gate:
                  control_path: "Path | None" = None) -> None:
         self._lock = threading.Lock()
         self._declared: set[str] | None = None   # None until tools/list seen
+        self._declared_defs: dict[str, dict] = {}  # name -> full tool def
         self._surface_known = threading.Event()
         self._hold_timeout = hold_timeout
         self.blocked_count = 0
@@ -301,10 +302,11 @@ class Gate:
             return
         result = frame.get("result")
         if isinstance(result, dict) and isinstance(result.get("tools"), list):
-            names = {t["name"] for t in result["tools"]
-                     if isinstance(t, dict) and "name" in t}
+            defs = {t["name"]: t for t in result["tools"]
+                    if isinstance(t, dict) and "name" in t}
             with self._lock:
-                self._declared = names
+                self._declared = set(defs)
+                self._declared_defs = defs
             self._surface_known.set()
 
     def check_c2s(self, line: bytes
@@ -362,6 +364,30 @@ class Gate:
                 return ("block", response,
                         {"action": "blocked", "tool": name,
                          "reason": "taint_detected"})
+            with self._lock:
+                schema = (self._declared_defs.get(name) or {}).get("inputSchema")
+            try:
+                problems = list(_schema_problems(
+                    (frame.get("params") or {}).get("arguments"), schema))
+            except Exception:
+                return ("forward", None,
+                        {"action": "gate_skipped", "tool": name,
+                         "reason": "schema_scan_error"})
+            if problems:
+                if not self._enforcement_on():
+                    return ("forward", None,
+                            {"action": "gate_disabled", "tool": name,
+                             "reason": "schema_violation"})
+                self.blocked_count += 1
+                rid = frame.get("id")
+                response = self._block(
+                    rid, "schema_violation", name,
+                    f"glassport gate: tools/call '{name}' blocked — "
+                    f"{problems[0]}",
+                    suggestion=f"Fix the argument and retry: {problems[0]}")
+                return ("block", response,
+                        {"action": "blocked", "tool": name,
+                         "reason": "schema_violation"})
             return ("forward", None, None)
 
         if not self._enforcement_on():

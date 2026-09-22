@@ -122,13 +122,14 @@ def find_taint(args: Any) -> Optional[tuple[str, str, str]]:
     return None
 
 
-def _schema_problems(args, schema) -> Iterator[str]:
+def _schema_problems(args, schema, _depth: int = 0) -> Iterator[str]:
     """
-    Top-level check of tools/call arguments against a declared inputSchema.
-    Deliberately a subset of JSON Schema (required, top-level property
-    types, additionalProperties: false) — enough to catch an agent
-    inventing arguments, with zero dependencies.
+    Subset of JSON Schema: required, property types, additionalProperties:
+    false, enum, and nested objects capped at depth 2. Deliberately excludes
+    pattern/format/$ref: never execute a server-supplied regular expression.
     """
+    if _depth > 2:
+        return
     if not isinstance(schema, dict) or schema.get("type", "object") != "object":
         return
     if not isinstance(args, dict):
@@ -154,6 +155,16 @@ def _schema_problems(args, schema) -> Iterator[str]:
         if types and not any(_matches_type(value, t) for t in types):
             yield (f"argument '{key}' is {type(value).__name__}, "
                    f"schema expects {declared_type}")
+            continue
+        enum = spec.get("enum")
+        if isinstance(enum, list) and value not in enum:
+            yield (f"argument '{key}' value {value!r} is not one of the "
+                   f"schema's enum {enum!r}")
+        if isinstance(value, dict) and spec.get("type") == "object":
+            for sub in _schema_problems(value, spec, _depth + 1):
+                # Keep nested paths contiguous (e.g. coords.lat) in diagnostics.
+                yield sub.replace("argument '", f"argument '{key}.", 1)
+
 
 
 def _tool_call_parts(event: Event):

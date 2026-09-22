@@ -646,3 +646,27 @@ class TestSemanticTaintDetector(unittest.TestCase):
         anns = detectors.annotate(trace)
         hit = next(a for a in anns if a.subcategory == "role_switch_delimiter")
         self.assertNotIn("private_payload", hit.explanation)
+
+
+class TestSchemaProblemsExtended(unittest.TestCase):
+    def test_enum_violation_flagged(self):
+        schema = {"type": "object",
+                  "properties": {"unit": {"type": "string",
+                                          "enum": ["celsius", "fahrenheit"]}}}
+        problems = list(detectors._schema_problems({"unit": "kelvin"}, schema))
+        self.assertTrue(any("enum" in p for p in problems))
+
+    def test_nested_object_type_mismatch_flagged(self):
+        schema = {"type": "object",
+                  "properties": {"coords": {"type": "object",
+                                            "properties": {
+                                                "lat": {"type": "number"}}}}}
+        problems = list(detectors._schema_problems(
+            {"coords": {"lat": "not-a-number"}}, schema))
+        self.assertTrue(any("coords.lat" in p for p in problems))
+
+    def test_pattern_keyword_is_ignored_not_evaluated(self):
+        schema = {"type": "object",
+                  "properties": {"x": {"type": "string", "pattern": "(a+)+$"}}}
+        problems = list(detectors._schema_problems({"x": "a" * 40}, schema))
+        self.assertEqual(problems, [])

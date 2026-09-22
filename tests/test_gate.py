@@ -439,6 +439,42 @@ class TestGateBoundaryChecks(unittest.TestCase):
             self.assertEqual(marker["action"], "gate_skipped")
             self.assertEqual(marker["reason"], "taint_scan_error")
 
+    def test_gate_blocks_schema_violation_live(self):
+        g = Gate()
+        g.observe_s2c(line({"jsonrpc": "2.0", "id": 1, "result": {"tools": [{
+            "name": "get_weather",
+            "inputSchema": {"type": "object",
+                            "properties": {"unit": {"type": "string", "enum": ["c", "f"]}},
+                            "required": ["unit"]},
+        }]}}))
+        action, resp, info = g.check_c2s(
+            line({"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                  "params": {"name": "get_weather", "arguments": {"unit": "kelvin"}}}))
+        self.assertEqual(action, "block")
+        self.assertEqual(json.loads(resp)["error"]["data"]["reason"], "schema_violation")
+
+    def test_gate_forwards_when_schema_missing(self):
+        g = declared_gate()
+        action, _, _ = g.check_c2s(
+            line({"jsonrpc": "2.0", "id": 5, "method": "tools/call",
+                  "params": {"name": "web_search", "arguments": {"query": "x"}}}))
+        self.assertEqual(action, "forward")
+
+    def test_schema_scan_failure_forwards_original_and_logs_marker(self):
+        frame = line({"jsonrpc": "2.0", "id": 4, "method": "tools/call",
+                      "params": {"name": "web_search", "arguments": {}}})
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "s.jsonl"
+            log = SessionLog(path)
+            dst = _KeepOpen()
+            with mock.patch("glassport.tap._schema_problems", side_effect=RuntimeError("scan failed")):
+                pump(io.BytesIO(frame), dst, log, "c2s", gate=declared_gate())
+            log.close()
+            self.assertEqual(dst.getvalue(), frame)
+            marker = json.loads(path.read_text())["gate"]
+            self.assertEqual(marker["action"], "gate_skipped")
+            self.assertEqual(marker["reason"], "schema_scan_error")
+
 
 if __name__ == "__main__":
     unittest.main()
