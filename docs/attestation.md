@@ -33,10 +33,16 @@ signature verification; it is never a required runtime dependency.
 
 Missing, malformed, expired, or invalid attestations are blocked with the
 existing JSON-RPC error code `-32000` and `error.data.reason` set to
-`attestation_failed`, subject to the existing enforcement override.
+`attestation_failed`, subject to the existing enforcement override. A call
+whose parameters cannot be serialized into the signing payload (for example
+`NaN`/`Infinity`, which `json` accepts on input but the payload rejects, or
+excessive nesting) is treated as an invalid attestation and blocked the same
+way; the caller controls that input, so it must not open a bypass.
 
 When crypto is unavailable, verification is skipped, and the other boundary
 checks still run. If forwarded, the frame is logged with `gate_skipped` and
 reason `attestation_unavailable`. An unexpected attestation-check exception
 forwards the original frame with reason `attestation_check_error`, consistent
-with Glassport's fail-open relay contract. Neither marker means authenticated.
+with Glassport's fail-open relay contract, after the remaining idempotency,
+taint, schema, and PII checks have run; any of those can still block the call.
+Neither marker means authenticated.

@@ -441,28 +441,40 @@ class Gate:
         if name in declared:
             forward_info = None
             if self.enforce_attestation:
+                att = None
+                sig_ok = None
                 try:
                     from glassport.attestation import (
                         check_meta, signing_payload, verify_signature)
                     params = frame.get("params") or {}
                     meta = params.get("_meta")
                     att = check_meta(meta)
-                    sig_ok = None
                     if att.present and att.well_formed and not att.expired:
-                        sig_ok = verify_signature(
-                            signing_payload(params), meta[ATTESTATION_KEY]["sig"],
-                            self.attestation_pubkey_b64)
+                        try:
+                            payload = signing_payload(params)
+                        except (ValueError, TypeError, RecursionError):
+                            # The caller chose a frame that cannot be signed
+                            # (non-finite numbers, excessive nesting); that
+                            # is a failed attestation, not a scanner fault.
+                            sig_ok = False
+                        else:
+                            sig_ok = verify_signature(
+                                payload, meta[ATTESTATION_KEY]["sig"],
+                                self.attestation_pubkey_b64)
                         if sig_ok is None:
                             # Unavailable verification does not disable the
                             # remaining taint/schema/PII boundary checks.
                             forward_info = {"action": "gate_skipped", "tool": name,
                                             "reason": "attestation_unavailable"}
                 except Exception:
-                    return ("forward", None,
-                            {"action": "gate_skipped", "tool": name,
-                             "reason": "attestation_check_error"})
-                if not att.present or not att.well_formed or att.expired \
-                        or sig_ok is False:
+                    # Fail open, visibly, but keep the remaining boundary
+                    # checks: a scanner fault must not skip them.
+                    att = None
+                    forward_info = {"action": "gate_skipped", "tool": name,
+                                    "reason": "attestation_check_error"}
+                if att is not None and (
+                        not att.present or not att.well_formed or att.expired
+                        or sig_ok is False):
                     if not self._enforcement_on():
                         return ("forward", None,
                                 {"action": "gate_disabled", "tool": name,
