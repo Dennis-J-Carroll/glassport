@@ -375,15 +375,58 @@ class TestSchemaChangeReview(unittest.TestCase):
         new = {"properties": {"x": True, "y": {"type": "string"}}}
         self.assertEqual(watch._classify_schema_change(old, new), "additive")
 
-    def test_malformed_schema_fields_return_unknown(self):
+    def test_malformed_schema_fields_do_not_crash(self):
+        # A malformed baseline gives no reliable reference: unknown. A
+        # malformed replacement breaks the declared contract: mutative, so
+        # malformation cannot be used to lower a finding's severity.
         valid = {"properties": {"x": {"type": "string"}}, "required": ["x"]}
-        for malformed in ({"properties": ["x"]}, {"properties": None},
+        for malformed in ({"properties": ["x"]},
                           {"properties": {"x": "string"}},
                           {"properties": {"x": {}}, "required": [{}]},
                           {"properties": {"x": {}}, "required": "x"}):
             with self.subTest(schema=malformed):
-                self.assertEqual(watch._classify_schema_change(valid, malformed), "unknown")
+                self.assertEqual(watch._classify_schema_change(valid, malformed), "mutative")
                 self.assertEqual(watch._classify_schema_change(malformed, valid), "unknown")
+
+    def drift_finding(self, old_schema, new_schema):
+        old = [{"name": "t", "inputSchema": old_schema}]
+        new = [{"name": "t", "inputSchema": new_schema}]
+        base = watch.merge(watch.new_baseline(), fp(session(tools=old)))
+        findings = watch.drift(base, fp(session(tools=new)))
+        return next(d for d in findings if d.kind == "schema_changed")
+
+    def test_null_fields_cannot_downgrade_mutative_changes(self):
+        old = {"type": "object", "required": ["x"],
+               "properties": {"x": {"type": "string"}, "y": {"type": "string"}}}
+        cases = {
+            "type_change_with_null_required": {
+                "type": "object", "required": None,
+                "properties": {"x": {"type": "object"}, "y": {"type": "string"}}},
+            "removal_with_null_required": {
+                "type": "object", "required": None,
+                "properties": {"x": {"type": "string"}}},
+            "null_properties": {"type": "object", "properties": None},
+            "malformed_sibling_spec": {
+                "type": "object", "required": ["x"],
+                "properties": {"x": {"type": "object"}, "y": "string"}},
+        }
+        for label, new in cases.items():
+            with self.subTest(case=label):
+                finding = self.drift_finding(old, new)
+                self.assertEqual(finding.detail["change_kind"], "mutative")
+                self.assertEqual(finding.severity, 3)
+
+    def test_null_fields_in_baseline_do_not_mask_later_changes(self):
+        old = {"type": "object", "required": None,
+               "properties": {"x": {"type": "string"}}}
+        mutated = {"type": "object", "required": None,
+                   "properties": {"x": {"type": "integer"}}}
+        finding = self.drift_finding(old, mutated)
+        self.assertEqual(finding.detail["change_kind"], "mutative")
+        self.assertEqual(finding.severity, 3)
+        extended = {"type": "object", "required": None,
+                    "properties": {"x": {"type": "string"}, "z": {"type": "string"}}}
+        self.assertEqual(watch._classify_schema_change(old, extended), "additive")
 
 
 class TestTemporalIntegrityReview(unittest.TestCase):

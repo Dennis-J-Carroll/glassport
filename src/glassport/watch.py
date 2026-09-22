@@ -156,24 +156,37 @@ def _premature_list_changed(trace: InteractionTrace) -> bool:
     return False
 
 
+def _schema_fields(schema: dict) -> tuple[dict, list] | None:
+    """(properties, required) with null treated as absent, or None if malformed."""
+    props = schema.get("properties")
+    required = schema.get("required")
+    props = {} if props is None else props
+    required = [] if required is None else required
+    if not isinstance(props, dict) or not all(
+            isinstance(spec, (dict, bool)) for spec in props.values()):
+        return None
+    if not isinstance(required, list) or not all(
+            isinstance(name, str) for name in required):
+        return None
+    return props, required
+
+
 def _classify_schema_change(old: dict | None, new: dict | None) -> str:
     """additive: new optional properties, nothing removed or narrowed.
     mutative: a property removed, an existing property's declared type
-    or boolean schema changed, or a new required field appeared.
-    unknown: malformed fields or not enough information."""
+    or boolean schema changed, a new required field appeared, or the new
+    schema's properties/required fields are malformed (so malformation
+    cannot lower a change's severity).
+    unknown: a malformed baseline or not enough information."""
     if not isinstance(old, dict) or not isinstance(new, dict):
         return "unknown"
-    old_props = old.get("properties", {})
-    new_props = new.get("properties", {})
-    old_required = old.get("required", [])
-    new_required = new.get("required", [])
-    for props, required in ((old_props, old_required), (new_props, new_required)):
-        if not isinstance(props, dict) or not all(
-                isinstance(spec, (dict, bool)) for spec in props.values()):
-            return "unknown"
-        if not isinstance(required, list) or not all(
-                isinstance(name, str) for name in required):
-            return "unknown"
+    old_fields = _schema_fields(old)
+    if old_fields is None:
+        return "unknown"
+    new_fields = _schema_fields(new)
+    if new_fields is None:
+        return "mutative"
+    (old_props, old_required), (new_props, new_required) = old_fields, new_fields
     if set(old_props) - set(new_props):
         return "mutative"
     for key, old_spec in old_props.items():
