@@ -51,7 +51,10 @@ Author: Dennis J. Carroll · 2026 (skeleton drafted with Claude)
 """
 from __future__ import annotations
 
-from glassport.detectors import find_taint, _schema_problems, _scan_pii, _redact
+from glassport.detectors import (
+    find_taint, _schema_problems, _scan_pii, _redact, neutralize_text,
+    _TAINT_PATTERNS,
+)
 
 import hashlib
 import json
@@ -237,6 +240,7 @@ class Gate:
         self._lock = threading.Lock()
         self._declared: set[str] | None = None   # None until tools/list seen
         self._declared_defs: dict[str, dict] = {}  # name -> full tool def
+        self._pending_reads: dict[Any, str] = {}  # jsonrpc id -> uri
         self._surface_known = threading.Event()
         self._hold_timeout = hold_timeout
         self.blocked_count = 0
@@ -333,6 +337,57 @@ class Gate:
                 self._declared_defs = defs
             self._surface_known.set()
 
+    def check_s2c(self, line: bytes
+                  ) -> tuple[str, bytes | None, dict | None]:
+        """Forward results, or rewrite tainted resources/read text in place.
+
+        A scan failure preserves the original response so the waiting client
+        still receives it. Results are never dropped by this check.
+        """
+        try:
+            frame = json.loads(line)
+        except (json.JSONDecodeError, ValueError, UnicodeDecodeError):
+            return ("forward", None, None)
+        if not isinstance(frame, dict) or "method" in frame:
+            return ("forward", None, None)
+        uri = None
+        try:
+            rid = frame.get("id")
+            with self._lock:
+                uri = self._pending_reads.pop(rid, None) if rid is not None else None
+            if uri is None:
+                return ("forward", None, None)
+            result = frame.get("result")
+            if not isinstance(result, dict):
+                return ("forward", None, None)
+            contents = result.get("contents")
+            if not isinstance(contents, list):
+                return ("forward", None, None)
+            changed = False
+            for item in contents:
+                if not isinstance(item, dict):
+                    continue
+                text = item.get("text")
+                if not isinstance(text, str):
+                    continue
+                hit = find_taint({"text": text})
+                if hit is not None:
+                    sanitized = neutralize_text(text)
+                    # Unicode neutralization preserves ASCII delimiters.
+                    # Reuse the detection pattern to remove those explicitly.
+                    for kind, pattern in _TAINT_PATTERNS:
+                        if kind == "role_switch_delimiter":
+                            sanitized = pattern.sub("[role delimiter removed]", sanitized)
+                    item["text"] = sanitized
+                    changed = True
+            if not changed:
+                return ("forward", None, None)
+            new_line = (json.dumps(frame, ensure_ascii=False) + "\n").encode("utf-8")
+        except Exception:
+            return ("forward", None,
+                    {"action": "quarantine_scan_error", "uri": uri})
+        return ("rewrite", new_line, {"action": "quarantined", "uri": uri})
+
     def check_c2s(self, line: bytes
                   ) -> tuple[str, bytes | None, dict | None]:
         """
@@ -345,7 +400,21 @@ class Gate:
             frame = json.loads(line)
         except (json.JSONDecodeError, ValueError, UnicodeDecodeError):
             return ("forward", None, None)   # not ours to judge
-        if not isinstance(frame, dict) or frame.get("method") != "tools/call":
+        if not isinstance(frame, dict):
+            return ("forward", None, None)
+        method = frame.get("method")
+        if method == "resources/read":
+            try:
+                rid = frame.get("id")
+                uri = (frame.get("params") or {}).get("uri")
+                if rid is not None and uri is not None:
+                    with self._lock:
+                        self._pending_reads[rid] = uri
+            except Exception:
+                return ("forward", None,
+                        {"action": "gate_skipped", "reason": "resource_tracking_error"})
+            return ("forward", None, None)
+        if method != "tools/call":
             return ("forward", None, None)
 
         name = (frame.get("params") or {}).get("name")
@@ -494,14 +563,17 @@ def pump(src, dst, log: SessionLog | None, direction: str,
          gate: Gate | None = None, client_write=None,
          dst_lock: threading.Lock | None = None) -> None:
     """
-    Read newline-delimited lines from src, write them unmodified to dst,
-    and tap each into the session log. Binary-safe; preserves the exact
-    bytes including the newline.
+    Read newline-delimited lines from src, relay them to dst, and tap each
+    into the session log. Binary-safe for untouched lines; a gate quarantine
+    is the one exception — see below.
 
     With a gate: c2s lines are checked before forwarding — a blocked
     line never reaches dst, and the synthesized error goes back to the
     client via client_write. s2c lines feed the gate's view of the
-    declared surface. dst_lock serializes client-bound writes so an
+    declared surface. A gate may also rewrite a resources/read result whose
+    text matches a taint signature before forwarding. Both the server's
+    original and the client's replacement are logged with distinct markers.
+    dst_lock serializes client-bound writes so an
     injected error can't interleave with a real server response.
     """
     try:
@@ -522,6 +594,19 @@ def pump(src, dst, log: SessionLog | None, direction: str,
                 gate_info = info   # e.g. gate_skipped fail-open
             elif gate is not None and direction == "s2c":
                 gate.observe_s2c(line)
+                try:
+                    s2c_action, s2c_new_line, s2c_info = gate.check_s2c(line)
+                except Exception:
+                    s2c_action, s2c_new_line, s2c_info = (
+                        "forward", None, {"action": "quarantine_scan_error"})
+                if s2c_action == "rewrite" and s2c_new_line is not None:
+                    if log is not None:
+                        log.record(direction, line, gate=s2c_info)
+                    line = s2c_new_line
+                    # The common log call below records the replacement once.
+                    gate_info = {**(s2c_info or {}), "action": "quarantine_replacement"}
+                elif s2c_info is not None:
+                    gate_info = s2c_info
             if dst_lock is not None:
                 with dst_lock:
                     dst.write(line)
