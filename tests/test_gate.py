@@ -475,6 +475,55 @@ class TestGateBoundaryChecks(unittest.TestCase):
             self.assertEqual(marker["action"], "gate_skipped")
             self.assertEqual(marker["reason"], "schema_scan_error")
 
+    def test_gate_blocks_after_repeated_identical_call(self):
+        g = Gate(idempotency_ttl=5.0, idempotency_max_repeats=2)
+        g.observe_s2c(line({"jsonrpc": "2.0", "id": 1,
+                            "result": {"tools": [{"name": "flaky_call"}]}}))
+        call_line = line({"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                          "params": {"name": "flaky_call", "arguments": {"x": 1}}})
+        self.assertEqual(g.check_c2s(call_line)[0], "forward")
+        self.assertEqual(g.check_c2s(call_line)[0], "forward")
+        action, resp, info = g.check_c2s(call_line)
+        self.assertEqual(action, "block")
+        self.assertEqual(json.loads(resp)["error"]["data"]["reason"], "retry_loop_exceeded")
+
+    def test_gate_does_not_block_distinct_calls(self):
+        g = Gate(idempotency_ttl=5.0, idempotency_max_repeats=1)
+        g.observe_s2c(line({"jsonrpc": "2.0", "id": 1,
+                            "result": {"tools": [{"name": "flaky_call"}]}}))
+        for i in range(5):
+            action, _, _ = g.check_c2s(
+                line({"jsonrpc": "2.0", "id": i + 2, "method": "tools/call",
+                      "params": {"name": "flaky_call", "arguments": {"x": i}}}))
+            self.assertEqual(action, "forward")
+
+    def test_idempotency_canonicalizes_keys_ignores_ids_and_expires(self):
+        g = Gate(idempotency_ttl=5.0, idempotency_max_repeats=1)
+        g.observe_s2c(TOOLS_LIST_RESULT)
+        def request(rid, args):
+            return line({"jsonrpc": "2.0", "id": rid, "method": "tools/call",
+                         "params": {"name": "web_search", "arguments": args}})
+        with mock.patch("glassport.tap.time.monotonic", side_effect=[10.0, 12.0, 16.0]):
+            self.assertEqual(g.check_c2s(request(1, {"a": 1, "b": 2}))[0], "forward")
+            self.assertEqual(g.check_c2s(request(2, {"b": 2, "a": 1}))[0], "block")
+            self.assertEqual(g.check_c2s(request(3, {"a": 1, "b": 2}))[0], "forward")
+        self.assertEqual(len(g._recent_calls), 1)
+
+    def test_idempotency_failure_forwards_original_and_logs_marker(self):
+        frame = line({"jsonrpc": "2.0", "id": 4, "method": "tools/call",
+                      "params": {"name": "web_search", "arguments": {}}})
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "s.jsonl"
+            log = SessionLog(path)
+            dst = _KeepOpen()
+            with mock.patch.object(Gate, "_idempotency_hit", side_effect=RuntimeError("hash failed")):
+                pump(io.BytesIO(frame), dst, log, "c2s", gate=declared_gate())
+            log.close()
+            self.assertEqual(dst.getvalue(), frame)
+            marker = json.loads(path.read_text())["gate"]
+            self.assertEqual(marker["action"], "gate_skipped")
+            self.assertEqual(marker["reason"], "idempotency_check_error")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -53,6 +53,7 @@ from __future__ import annotations
 
 from glassport.detectors import find_taint, _schema_problems
 
+import hashlib
 import json
 import os
 import shlex
@@ -63,6 +64,7 @@ import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 SCHEMA_VERSION = "0.1"
 DEFAULT_LOG_DIR = Path(os.environ.get("GLASSPORT_LOG_DIR",
@@ -229,13 +231,19 @@ class Gate:
     """
 
     def __init__(self, hold_timeout: float = 2.0,
-                 control_path: "Path | None" = None) -> None:
+                 control_path: "Path | None" = None,
+                 idempotency_ttl: float = 5.0,
+                 idempotency_max_repeats: int = 3) -> None:
         self._lock = threading.Lock()
         self._declared: set[str] | None = None   # None until tools/list seen
         self._declared_defs: dict[str, dict] = {}  # name -> full tool def
         self._surface_known = threading.Event()
         self._hold_timeout = hold_timeout
         self.blocked_count = 0
+        self.idempotency_ttl = idempotency_ttl
+        self.idempotency_max_repeats = idempotency_max_repeats
+        # request_hash -> (count, first_seen_monotonic)
+        self._recent_calls: dict[str, tuple[int, float]] = {}
         # Runtime enable/disable via an override file (M6 TUI control).
         # None (the default) means enforcement is unconditional. Only a
         # tap launched with `gate --controllable` sets this.
@@ -267,6 +275,22 @@ class Gate:
             "jsonrpc": "2.0", "id": rid,
             "error": {"code": -32000, "message": message, "data": data},
         }, ensure_ascii=False) + "\n").encode("utf-8")
+
+    def _idempotency_hit(self, name: str, arguments: Any) -> bool:
+        """Detect repeated canonical calls in a monotonic TTL window."""
+        now = time.monotonic()
+        key = hashlib.sha256(json.dumps(
+            {"name": name, "arguments": arguments},
+            sort_keys=True, default=str).encode("utf-8")).hexdigest()
+        with self._lock:
+            stale = [k for k, (_, ts) in self._recent_calls.items()
+                     if now - ts > self.idempotency_ttl]
+            for k in stale:
+                del self._recent_calls[k]
+            count, first_seen = self._recent_calls.get(key, (0, now))
+            count += 1
+            self._recent_calls[key] = (count, first_seen)
+            return count > self.idempotency_max_repeats
 
     def _enforcement_on(self) -> bool:
         """Consult the override file. Fail-closed: enforcement stays ON
@@ -339,8 +363,35 @@ class Gate:
                         {"action": "gate_skipped",
                          "reason": "no_surface_timeout", "tool": name})
         if name in declared:
+            arguments = (frame.get("params") or {}).get("arguments")
             try:
-                hit = find_taint((frame.get("params") or {}).get("arguments"))
+                repeat = self._idempotency_hit(name, arguments)
+            except Exception:
+                return ("forward", None,
+                        {"action": "gate_skipped", "tool": name,
+                         "reason": "idempotency_check_error"})
+            if repeat:
+                if not self._enforcement_on():
+                    return ("forward", None,
+                            {"action": "gate_disabled", "tool": name,
+                             "reason": "retry_loop_exceeded"})
+                self.blocked_count += 1
+                rid = frame.get("id")
+                response = self._block(
+                    rid, "retry_loop_exceeded", name,
+                    f"glassport gate: tools/call '{name}' blocked — "
+                    f"identical request repeated more than "
+                    f"{self.idempotency_max_repeats} times within "
+                    f"{self.idempotency_ttl}s",
+                    suggestion="This call is not idempotent-safe to retry "
+                               "blindly. Inspect the last result before "
+                               "retrying, or wait for the TTL window to "
+                               "pass.")
+                return ("block", response,
+                        {"action": "blocked", "tool": name,
+                         "reason": "retry_loop_exceeded"})
+            try:
+                hit = find_taint(arguments)
             except Exception:
                 return ("forward", None,
                         {"action": "gate_skipped", "tool": name,
@@ -367,8 +418,7 @@ class Gate:
             with self._lock:
                 schema = (self._declared_defs.get(name) or {}).get("inputSchema")
             try:
-                problems = list(_schema_problems(
-                    (frame.get("params") or {}).get("arguments"), schema))
+                problems = list(_schema_problems(arguments, schema))
             except Exception:
                 return ("forward", None,
                         {"action": "gate_skipped", "tool": name,
