@@ -51,6 +51,8 @@ Author: Dennis J. Carroll · 2026 (skeleton drafted with Claude)
 """
 from __future__ import annotations
 
+from glassport.detectors import find_taint
+
 import json
 import os
 import shlex
@@ -335,6 +337,31 @@ class Gate:
                         {"action": "gate_skipped",
                          "reason": "no_surface_timeout", "tool": name})
         if name in declared:
+            try:
+                hit = find_taint((frame.get("params") or {}).get("arguments"))
+            except Exception:
+                return ("forward", None,
+                        {"action": "gate_skipped", "tool": name,
+                         "reason": "taint_scan_error"})
+            if hit is not None:
+                pat_name, key_path, _snippet = hit
+                if not self._enforcement_on():
+                    return ("forward", None,
+                            {"action": "gate_disabled", "tool": name,
+                             "reason": "taint_detected"})
+                self.blocked_count += 1
+                rid = frame.get("id")
+                response = self._block(
+                    rid, "taint_detected", name,
+                    f"glassport gate: tools/call '{name}' blocked — "
+                    f"argument '{key_path}' contains a semantic taint "
+                    f"signature ({pat_name})",
+                    suggestion="Remove role-switching delimiters and "
+                               "zero-width characters from the argument "
+                               "and retry with plain text.")
+                return ("block", response,
+                        {"action": "blocked", "tool": name,
+                         "reason": "taint_detected"})
             return ("forward", None, None)
 
         if not self._enforcement_on():

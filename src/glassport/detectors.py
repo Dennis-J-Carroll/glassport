@@ -86,6 +86,42 @@ def _matches_type(value, type_name: str) -> bool:
     return True if py is None else isinstance(value, py)
 
 
+# Semantic taint checks injection shape, independently of secret content.
+_TAINT_PATTERNS: list[tuple[str, "re.Pattern[str]"]] = [
+    ("role_switch_delimiter",
+     re.compile(r"<\|\s*(system|assistant|user)\s*\|>|\[\s*SYSTEM\s*\]",
+                re.IGNORECASE)),
+    ("zero_width_obfuscation", re.compile(r"[\u200b-\u200d\ufeff]")),
+]
+
+
+def _flatten_strings(value: Any, path: str = "") -> Iterator[tuple[str, str]]:
+    """Yield (key_path, string_value) for each reachable string, depth-first."""
+    if isinstance(value, str):
+        yield (path or "$", value)
+    elif isinstance(value, dict):
+        for k, v in value.items():
+            yield from _flatten_strings(v, f"{path}.{k}" if path else k)
+    elif isinstance(value, list):
+        for i, v in enumerate(value):
+            yield from _flatten_strings(v, f"{path}[{i}]")
+
+
+def find_taint(args: Any) -> Optional[tuple[str, str, str]]:
+    """Return the first taint hit, scanning normalized delimiters but raw
+    zero-width characters (normalization would erase those)."""
+    for key_path, s in _flatten_strings(args):
+        if len(s) > MAX_SCAN_BYTES:
+            s = s[:MAX_SCAN_BYTES]
+        for name, pattern in _TAINT_PATTERNS:
+            haystack = (s if name == "zero_width_obfuscation"
+                        else _normalize_for_scan(s))
+            m = pattern.search(haystack)
+            if m:
+                return (name, key_path, m.group(0))
+    return None
+
+
 def _schema_problems(args, schema) -> Iterator[str]:
     """
     Top-level check of tools/call arguments against a declared inputSchema.
@@ -251,6 +287,25 @@ def fabricated_calls(trace: InteractionTrace) -> list[Annotation]:
             f"tools/call '{name}' is outside the declared surface",
             severity=3, category=HallucinationCategory.TOOL_USE,
             no_declaration_seen=not declared))
+    return out
+
+
+def semantic_taint(trace: InteractionTrace) -> list[Annotation]:
+    """Apply the live gate's taint check post-hoc, including ungated calls."""
+    out: list[Annotation] = []
+    for e in trace.events:
+        if e.kind != EventKind.TOOL_CALL:
+            continue
+        for name, args in _tool_call_parts(e):
+            hit = find_taint(args)
+            if hit is None:
+                continue
+            pat_name, key_path, _snippet = hit
+            out.append(_ann(
+                e, AnnotationKind.HALLUCINATION, pat_name,
+                f"tools/call '{name}' argument '{key_path}' contains a "
+                f"semantic taint signature ({pat_name})",
+                severity=3, category=HallucinationCategory.TOOL_USE))
     return out
 
 
@@ -1354,7 +1409,7 @@ def data_exfiltration(trace: InteractionTrace) -> list[Annotation]:
     return out
 
 
-DETECTORS = [fabricated_calls, context_violations, gate_actions,
+DETECTORS = [fabricated_calls, context_violations, gate_actions, semantic_taint,
              data_exfiltration]
 
 
