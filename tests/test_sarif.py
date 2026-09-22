@@ -421,5 +421,35 @@ class TestTaxonomyTags(unittest.TestCase):
         self.assertNotIn("asi", rule["properties"])
 
 
+class TestSeverityAndRedactionLocked(unittest.TestCase):
+    def test_all_three_sarif_levels_reachable_from_audit_severities(self):
+        for sev, expected in [("critical", "error"), ("high", "error"),
+                               ("medium", "warning"), ("low", "note"),
+                               ("note", "note"), ("info", "note")]:
+            self.assertEqual(sarif._sarif_level(sev), expected)
+
+    def test_all_three_sarif_levels_reachable_from_detector_severities(self):
+        for sev, expected in [(3, "error"), (2, "warning"), (1, "note")]:
+            self.assertEqual(sarif._sarif_level(sev), expected)
+
+    def test_secret_in_finding_detail_never_reaches_sarif_raw(self):
+        # format-valid Anthropic key (real prefix + high-entropy body) —
+        # "sk-ant-" + "A"*40 matches no pattern (wrong prefix, zero
+        # entropy) and isn't a secret under any scanner by design.
+        secret = "sk-ant-api03-" + "A" * 40 + "1234567890"
+        report = Report(
+            profile={"path": "x", "runtime": "python", "package_name": "",
+                     "version": "", "dependency_count": 0, "files_scanned": 1,
+                     "depth": {"ast": 1, "pattern": 0}},
+            findings=[Finding(rule="secret-hardcoded", severity="critical",
+                              path="src/x.py", line=1,
+                              detail=f"found key: {secret}")],
+            deductions=[{"rule": "secret-hardcoded", "severity": "critical",
+                        "points": 25, "hits": 1}],
+            score=75, grade="C")
+        doc = sarif.render_sarif(report)
+        self.assertNotIn(secret, doc)
+
+
 if __name__ == "__main__":
     unittest.main()
