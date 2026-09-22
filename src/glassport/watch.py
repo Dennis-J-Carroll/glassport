@@ -134,22 +134,31 @@ def _premature_list_changed(trace: InteractionTrace, tools_list_ts,
 def _classify_schema_change(old: dict | None, new: dict | None) -> str:
     """additive: new optional properties, nothing removed or narrowed.
     mutative: a property removed, an existing property's declared type
-    changed, or a new required field appeared. unknown: not enough
-    information."""
+    or boolean schema changed, or a new required field appeared.
+    unknown: malformed fields or not enough information."""
     if not isinstance(old, dict) or not isinstance(new, dict):
         return "unknown"
-    old_props = old.get("properties") or {}
-    new_props = new.get("properties") or {}
+    old_props = old.get("properties", {})
+    new_props = new.get("properties", {})
+    old_required = old.get("required", [])
+    new_required = new.get("required", [])
+    for props, required in ((old_props, old_required), (new_props, new_required)):
+        if not isinstance(props, dict) or not all(
+                isinstance(spec, (dict, bool)) for spec in props.values()):
+            return "unknown"
+        if not isinstance(required, list) or not all(
+                isinstance(name, str) for name in required):
+            return "unknown"
     if set(old_props) - set(new_props):
         return "mutative"
     for key, old_spec in old_props.items():
-        new_spec = new_props.get(key) or {}
-        if isinstance(old_spec, dict) and \
-                old_spec.get("type") != new_spec.get("type"):
+        new_spec = new_props[key]
+        if isinstance(old_spec, bool) or isinstance(new_spec, bool):
+            if old_spec != new_spec:
+                return "mutative"
+        elif old_spec.get("type") != new_spec.get("type"):
             return "mutative"
-    old_required = set(old.get("required") or [])
-    new_required = set(new.get("required") or [])
-    if new_required - old_required:
+    if set(new_required) - set(old_required):
         return "mutative"
     if set(new_props) - set(old_props):
         return "additive"

@@ -6,6 +6,8 @@ against the merged baseline of every prior session; watch_dir() runs the
 whole pipeline over a directory of tap logs, grouped by server identity.
 Pure stdlib, run with:  python3 -m unittest tests.test_watch
 """
+from __future__ import annotations
+
 import json
 import tempfile
 import unittest
@@ -349,6 +351,39 @@ class TestSchemaChangeClassification(unittest.TestCase):
         f = next(d for d in findings if d.kind == "schema_changed")
         self.assertEqual(f.detail["change_kind"], "mutative")
         self.assertEqual(f.severity, 3)
+
+
+class TestSchemaChangeReview(unittest.TestCase):
+    def test_boolean_property_changes_are_reported_without_crashing(self):
+        for old_spec, new_spec in (({"type": "string"}, True),
+                                   ({"type": "string"}, False),
+                                   (True, {"type": "string"}),
+                                   (False, True), (True, False)):
+            with self.subTest(old=old_spec, new=new_spec):
+                old = [{"name": "t", "inputSchema": {
+                    "type": "object", "properties": {"x": old_spec}}}]
+                new = [{"name": "t", "inputSchema": {
+                    "type": "object", "properties": {"x": new_spec}}}]
+                base = watch.merge(watch.new_baseline(), fp(session(tools=old)))
+                findings = watch.drift(base, fp(session(tools=new)))
+                finding = next(d for d in findings if d.kind == "schema_changed")
+                self.assertEqual(finding.detail["change_kind"], "mutative")
+                self.assertEqual(finding.severity, 3)
+
+    def test_unchanged_boolean_property_allows_additive_classification(self):
+        old = {"properties": {"x": True}}
+        new = {"properties": {"x": True, "y": {"type": "string"}}}
+        self.assertEqual(watch._classify_schema_change(old, new), "additive")
+
+    def test_malformed_schema_fields_return_unknown(self):
+        valid = {"properties": {"x": {"type": "string"}}, "required": ["x"]}
+        for malformed in ({"properties": ["x"]}, {"properties": None},
+                          {"properties": {"x": "string"}},
+                          {"properties": {"x": {}}, "required": [{}]},
+                          {"properties": {"x": {}}, "required": "x"}):
+            with self.subTest(schema=malformed):
+                self.assertEqual(watch._classify_schema_change(valid, malformed), "unknown")
+                self.assertEqual(watch._classify_schema_change(malformed, valid), "unknown")
 
 
 if __name__ == "__main__":
