@@ -178,7 +178,7 @@ class SessionLog:
             frame, raw = None, None
             try:
                 frame = json.loads(text)
-            except (json.JSONDecodeError, ValueError):
+            except (json.JSONDecodeError, ValueError, RecursionError):
                 raw = text
             with self._lock:
                 self._seq += 1
@@ -194,7 +194,14 @@ class SessionLog:
                     entry["gate"] = gate
                 if metadata is not None:
                     entry["sse_meta"] = metadata
-                self._fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
+                try:
+                    serialized = json.dumps(entry, ensure_ascii=False)
+                except RecursionError:
+                    # Parsed but too deep to re-encode: keep the wire text
+                    # rather than silently dropping the entry.
+                    entry["frame"], entry["raw"] = None, text
+                    serialized = json.dumps(entry, ensure_ascii=False)
+                self._fh.write(serialized + "\n")
         except Exception:
             pass  # logging is best-effort; the relay is sacred
 
@@ -367,7 +374,8 @@ class Gate:
         """Harvest tool declarations from server output. Never raises."""
         try:
             frame = json.loads(line)
-        except (json.JSONDecodeError, ValueError, UnicodeDecodeError):
+        except (json.JSONDecodeError, ValueError, UnicodeDecodeError,
+                RecursionError):
             return
         if not isinstance(frame, dict):
             return
@@ -441,6 +449,19 @@ class Gate:
         """
         try:
             frame = json.loads(line)
+        except RecursionError:
+            # Too deep for this parser, yet an iterative parser on the server
+            # (V8's JSON.parse) may accept it and run a call the gate never
+            # read. While enforcing, drop it; its id is unreadable, so no
+            # error response can be addressed.
+            if not self._enforcement_on():
+                return ("forward", None,
+                        {"action": "gate_disabled", "tool": None,
+                         "reason": "frame_too_deep"})
+            self.blocked_count += 1
+            return ("block", None,
+                    {"action": "blocked", "tool": None,
+                     "reason": "frame_too_deep"})
         except (json.JSONDecodeError, ValueError, UnicodeDecodeError):
             return ("forward", None, None)   # not ours to judge
         if not isinstance(frame, dict):
@@ -699,7 +720,15 @@ def pump(src, dst, log: SessionLog | None, direction: str,
         for line in iter(src.readline, b""):
             gate_info = None   # marker for forwarded-but-noteworthy frames
             if gate is not None and direction == "c2s":
-                action, response, info = gate.check_c2s(line)
+                try:
+                    action, response, info = gate.check_c2s(line)
+                except Exception:
+                    # Fail open, visibly: an unexpected gate fault must not
+                    # stop the relay. Caller-chosen shapes are handled inside
+                    # check_c2s, so this is for defects, not attacker input.
+                    action, response, info = (
+                        "forward", None,
+                        {"action": "gate_skipped", "reason": "gate_check_error"})
                 if action == "block" and info is not None:
                     if log is not None:
                         log.record(direction, line, gate=info)

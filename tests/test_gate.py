@@ -949,6 +949,85 @@ class TestGateHostileShapes(unittest.TestCase):
         pump(io.BytesIO(bad + ok), dst, None, "c2s", gate=declared_gate())
         self.assertEqual(dst.getvalue(), ok)   # bad blocked, relay alive
 
+    # Past the JSON parser's own depth limit. An iterative parser on the
+    # server (V8's JSON.parse) may still accept such a frame.
+    UNPARSEABLE_DEPTH = 200_000
+
+    def test_frame_too_deep_to_parse_is_blocked_not_forwarded(self):
+        deep = self.deep_call(self.UNPARSEABLE_DEPTH)
+        self.assertFalse(_parses(deep))
+        g = declared_gate()
+        action, response, info = g.check_c2s(deep)
+        self.assertEqual(action, "block")
+        self.assertIsNone(response)   # id unreadable: nothing to address
+        self.assertEqual(info, {"action": "blocked", "tool": None,
+                                "reason": "frame_too_deep"})
+        self.assertEqual(g.blocked_count, 1)
+        with tempfile.TemporaryDirectory() as tmp:
+            action, _, info = self.disabled_gate(tmp).check_c2s(deep)
+        self.assertEqual(action, "forward")
+        self.assertEqual(info["action"], "gate_disabled")
+        self.assertEqual(info["reason"], "frame_too_deep")
+
+    def pump_logged(self, raw: bytes, direction: str, gate: Gate):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "s.jsonl"
+            log = SessionLog(path)
+            dst = _KeepOpen()
+            pump(io.BytesIO(raw), dst, log, direction, gate=gate)
+            log.close()
+            lines = path.read_text().splitlines()
+        return dst.getvalue(), [json.loads(entry) for entry in lines], lines
+
+    def test_too_deep_client_frame_is_dropped_logged_and_relay_survives(self):
+        deep = self.deep_call(self.UNPARSEABLE_DEPTH)
+        ok = self.call("weather")
+        out, entries, lines = self.pump_logged(deep + ok, "c2s", declared_gate())
+        self.assertEqual(out, ok)
+        self.assertEqual(len(entries), 2)
+        self.assertEqual(entries[0]["gate"]["reason"], "frame_too_deep")
+        self.assertIsNone(entries[0]["frame"])
+        self.assertEqual(entries[0]["raw"], deep.decode().rstrip("\n"))
+        self.assertEqual(entries[1]["frame"]["id"], 22)
+        detectors.annotate(from_mcp_session(lines))   # readable downstream
+
+    def test_too_deep_server_frame_is_relayed_and_relay_survives(self):
+        deep = ('{"jsonrpc":"2.0","id":7,"result":' + "[" * self.UNPARSEABLE_DEPTH
+                + "]" * self.UNPARSEABLE_DEPTH + "}\n").encode()
+        out, entries, _ = self.pump_logged(deep + TOOLS_LIST_RESULT, "s2c", Gate())
+        self.assertEqual(out, deep + TOOLS_LIST_RESULT)   # s2c never dropped
+        self.assertEqual(len(entries), 2)
+        self.assertEqual(entries[0]["gate"]["action"], "quarantine_scan_error")
+        self.assertIsNotNone(entries[0]["raw"])
+
+    def test_unexpected_gate_fault_forwards_original_and_relay_survives(self):
+        first, second = self.call("one"), self.call("two")
+        with mock.patch.object(Gate, "check_c2s", side_effect=RuntimeError("gate bug")):
+            out, entries, _ = self.pump_logged(first + second, "c2s", declared_gate())
+        self.assertEqual(out, first + second)
+        self.assertEqual([e["gate"] for e in entries],
+                         [{"action": "gate_skipped", "reason": "gate_check_error"}] * 2)
+
+    def test_log_keeps_entry_when_frame_cannot_be_reserialized(self):
+        real_dumps = json.dumps
+
+        def dumps(obj, *args, **kwargs):
+            if isinstance(obj, dict) and obj.get("frame") is not None:
+                raise RecursionError("too deep to encode")
+            return real_dumps(obj, *args, **kwargs)
+
+        raw = self.call("weather")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "s.jsonl"
+            log = SessionLog(path)
+            with mock.patch.object(json, "dumps", side_effect=dumps):
+                log.record("c2s", raw, gate={"action": "blocked"})
+            log.close()
+            entry = json.loads(path.read_text())
+        self.assertIsNone(entry["frame"])
+        self.assertEqual(entry["raw"], raw.decode().rstrip("\n"))
+        self.assertEqual(entry["gate"], {"action": "blocked"})
+
 
 if __name__ == "__main__":
     unittest.main()
