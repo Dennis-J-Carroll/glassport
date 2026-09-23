@@ -217,6 +217,14 @@ class TestExfiltrationParity(unittest.TestCase):
 
 
 class TestFullSemanticParity(unittest.TestCase):
+    def test_every_registered_detector_has_a_streaming_twin(self):
+        # annotate() replays default_detectors() whenever DETECTORS is the
+        # default, so a batch pass with no streaming twin would silently
+        # never run — and batch/stream parity checks cannot catch that.
+        from glassport.incremental import default_detectors
+        self.assertEqual([d.__name__ for d in detectors.DETECTORS],
+                         [d.name for d in default_detectors()])
+
     def test_all_builtin_detectors_and_raw_evidence(self):
         from tests.test_streaming import HOSTILE
         TestFabricatedParity.assert_parity(self, HOSTILE, detectors.annotate, None)

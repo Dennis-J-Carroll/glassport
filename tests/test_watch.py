@@ -6,6 +6,8 @@ against the merged baseline of every prior session; watch_dir() runs the
 whole pipeline over a directory of tap logs, grouped by server identity.
 Pure stdlib, run with:  python3 -m unittest tests.test_watch
 """
+from __future__ import annotations
+
 import json
 import tempfile
 import unittest
@@ -145,12 +147,16 @@ class TestDrift(unittest.TestCase):
 
     def test_schema_change_sev2(self):
         base = self.baseline_from(fp(session(calls=CLEAN)))
+        # removes "query"/"limit" and adds "q" -> a removed property, so
+        # Task 8's classifier correctly calls this mutative (severity 3),
+        # not the flat severity-2 every schema change got pre-Task-8.
         changed = [{"name": "web_search",
                     "inputSchema": {"type": "object",
                                     "properties": {"q": {"type": "string"}}}}]
         findings = watch.drift(base, fp(session(tools=changed)))
         f = next(d for d in findings if d.kind == "schema_changed")
-        self.assertEqual(f.severity, 2)
+        self.assertEqual(f.severity, 3)
+        self.assertEqual(f.detail["change_kind"], "mutative")
         self.assertIn("web_search", f.explanation)
 
     def test_new_fabricated_tool_sev3(self):
@@ -233,6 +239,260 @@ class TestWatchDir(unittest.TestCase):
             for rows in groups.values():
                 # each server's first session is its own baseline
                 self.assertEqual(rows[0]["findings"], [])
+
+
+class TestJSDDrift(unittest.TestCase):
+    def baseline_from(self, *fps):
+        base = watch.new_baseline()
+        for f in fps:
+            watch.merge(base, f)
+        return base
+
+    def test_tool_call_counts_present_in_fingerprint(self):
+        f = fp(session(calls=(("search", {}), ("search", {}), ("fetch", {}))))
+        self.assertEqual(f["tool_call_counts"], {"search": 2, "fetch": 1})
+
+    def test_jsd_drift_flagged_on_vocabulary_shift(self):
+        history = [fp(session(calls=(("query_database", {}),) * 10))
+                   for _ in range(5)]
+        base = self.baseline_from(*history)
+        shifted = fp(session(calls=(("execute_powershell", {}),) * 10))
+        findings = watch.drift(base, shifted)
+        jsd = [d for d in findings if d.kind == "jsd_drift"]
+        self.assertEqual(len(jsd), 1)
+        self.assertGreater(jsd[0].detail["jsd"], 0.5)
+        self.assertEqual(jsd[0].severity, 3)
+
+    def test_jsd_drift_absent_on_stable_vocabulary(self):
+        history = [fp(session(calls=(("query_database", {}),) * 10))
+                   for _ in range(5)]
+        base = self.baseline_from(*history)
+        stable = fp(session(calls=(("query_database", {}),) * 10))
+        findings = watch.drift(base, stable)
+        self.assertEqual([d for d in findings if d.kind == "jsd_drift"], [])
+
+
+class TestTemporalIntegrity(unittest.TestCase):
+    def test_fingerprint_captures_ttl_fields(self):
+        lines = handshake(tools=[{"name": "search"}])[:4] + [
+            L(5, "s2c", {"jsonrpc": "2.0", "id": 2,
+                        "result": {"tools": [{"name": "search"}],
+                                   "ttlMs": 60000, "cacheScope": "public"}}),
+        ]
+        f = fp(lines)
+        self.assertEqual(f["tools_list_ttl_ms"], 60000)
+        self.assertEqual(f["tools_list_cache_scope"], "public")
+
+    def test_premature_list_changed_flagged(self):
+        lines = [
+            json.dumps({"schema_version": "0.1", "seq": 1,
+                        "ts": "2026-01-01T00:00:00+00:00", "dir": "c2s",
+                        "frame": {"jsonrpc": "2.0", "id": 1,
+                                  "method": "tools/list"}}),
+            json.dumps({"schema_version": "0.1", "seq": 2,
+                        "ts": "2026-01-01T00:00:01+00:00", "dir": "s2c",
+                        "frame": {"jsonrpc": "2.0", "id": 1,
+                          "result": {"tools": [{"name": "search"}],
+                                     "ttlMs": 3600000}}}),  # 1 hour
+            json.dumps({"schema_version": "0.1", "seq": 3,
+                        "ts": "2026-01-01T00:00:06+00:00", "dir": "s2c",
+                        "frame": {"jsonrpc": "2.0",
+                                  "method": "notifications/tools/list_changed"}}),
+        ]
+        f = fp(lines)
+        self.assertTrue(f["premature_list_changed"])
+
+    def test_list_changed_after_ttl_expiry_not_flagged(self):
+        lines = [
+            json.dumps({"schema_version": "0.1", "seq": 1,
+                        "ts": "2026-01-01T00:00:00+00:00", "dir": "c2s",
+                        "frame": {"jsonrpc": "2.0", "id": 1,
+                                  "method": "tools/list"}}),
+            json.dumps({"schema_version": "0.1", "seq": 2,
+                        "ts": "2026-01-01T00:00:01+00:00", "dir": "s2c",
+                        "frame": {"jsonrpc": "2.0", "id": 1,
+                          "result": {"tools": [{"name": "search"}],
+                                     "ttlMs": 1000}}}),  # 1 second
+            json.dumps({"schema_version": "0.1", "seq": 3,
+                        "ts": "2026-01-01T00:00:05+00:00", "dir": "s2c",
+                        "frame": {"jsonrpc": "2.0",
+                                  "method": "notifications/tools/list_changed"}}),
+        ]
+        f = fp(lines)
+        self.assertFalse(f["premature_list_changed"])
+
+
+class TestSchemaChangeClassification(unittest.TestCase):
+    def baseline_from(self, *fps):
+        base = watch.new_baseline()
+        for f in fps:
+            watch.merge(base, f)
+        return base
+
+    def test_additive_schema_change_classified(self):
+        old = [{"name": "t", "inputSchema": {"type": "object",
+                "properties": {"a": {"type": "string"}}, "required": ["a"]}}]
+        new = [{"name": "t", "inputSchema": {"type": "object",
+                "properties": {"a": {"type": "string"}, "b": {"type": "string"}},
+                "required": ["a"]}}]
+        base = self.baseline_from(fp(session(tools=old)))
+        findings = watch.drift(base, fp(session(tools=new)))
+        f = next(d for d in findings if d.kind == "schema_changed")
+        self.assertEqual(f.detail["change_kind"], "additive")
+        self.assertEqual(f.severity, 2)
+
+    def test_mutative_schema_change_classified(self):
+        old = [{"name": "t", "inputSchema": {"type": "object",
+                "properties": {"a": {"type": "string"}}, "required": ["a"]}}]
+        new = [{"name": "t", "inputSchema": {"type": "object",
+                "properties": {"a": {"type": "integer"}}, "required": ["a"]}}]
+        base = self.baseline_from(fp(session(tools=old)))
+        findings = watch.drift(base, fp(session(tools=new)))
+        f = next(d for d in findings if d.kind == "schema_changed")
+        self.assertEqual(f.detail["change_kind"], "mutative")
+        self.assertEqual(f.severity, 3)
+
+
+class TestSchemaChangeReview(unittest.TestCase):
+    def test_boolean_property_changes_are_reported_without_crashing(self):
+        for old_spec, new_spec in (({"type": "string"}, True),
+                                   ({"type": "string"}, False),
+                                   (True, {"type": "string"}),
+                                   (False, True), (True, False)):
+            with self.subTest(old=old_spec, new=new_spec):
+                old = [{"name": "t", "inputSchema": {
+                    "type": "object", "properties": {"x": old_spec}}}]
+                new = [{"name": "t", "inputSchema": {
+                    "type": "object", "properties": {"x": new_spec}}}]
+                base = watch.merge(watch.new_baseline(), fp(session(tools=old)))
+                findings = watch.drift(base, fp(session(tools=new)))
+                finding = next(d for d in findings if d.kind == "schema_changed")
+                self.assertEqual(finding.detail["change_kind"], "mutative")
+                self.assertEqual(finding.severity, 3)
+
+    def test_unchanged_boolean_property_allows_additive_classification(self):
+        old = {"properties": {"x": True}}
+        new = {"properties": {"x": True, "y": {"type": "string"}}}
+        self.assertEqual(watch._classify_schema_change(old, new), "additive")
+
+    def test_malformed_schema_fields_do_not_crash(self):
+        # A malformed baseline gives no reliable reference: unknown. A
+        # malformed replacement breaks the declared contract: mutative, so
+        # malformation cannot be used to lower a finding's severity.
+        valid = {"properties": {"x": {"type": "string"}}, "required": ["x"]}
+        for malformed in ({"properties": ["x"]},
+                          {"properties": {"x": "string"}},
+                          {"properties": {"x": {}}, "required": [{}]},
+                          {"properties": {"x": {}}, "required": "x"}):
+            with self.subTest(schema=malformed):
+                self.assertEqual(watch._classify_schema_change(valid, malformed), "mutative")
+                self.assertEqual(watch._classify_schema_change(malformed, valid), "unknown")
+
+    def drift_finding(self, old_schema, new_schema):
+        old = [{"name": "t", "inputSchema": old_schema}]
+        new = [{"name": "t", "inputSchema": new_schema}]
+        base = watch.merge(watch.new_baseline(), fp(session(tools=old)))
+        findings = watch.drift(base, fp(session(tools=new)))
+        return next(d for d in findings if d.kind == "schema_changed")
+
+    def test_null_fields_cannot_downgrade_mutative_changes(self):
+        old = {"type": "object", "required": ["x"],
+               "properties": {"x": {"type": "string"}, "y": {"type": "string"}}}
+        cases = {
+            "type_change_with_null_required": {
+                "type": "object", "required": None,
+                "properties": {"x": {"type": "object"}, "y": {"type": "string"}}},
+            "removal_with_null_required": {
+                "type": "object", "required": None,
+                "properties": {"x": {"type": "string"}}},
+            "null_properties": {"type": "object", "properties": None},
+            "malformed_sibling_spec": {
+                "type": "object", "required": ["x"],
+                "properties": {"x": {"type": "object"}, "y": "string"}},
+        }
+        for label, new in cases.items():
+            with self.subTest(case=label):
+                finding = self.drift_finding(old, new)
+                self.assertEqual(finding.detail["change_kind"], "mutative")
+                self.assertEqual(finding.severity, 3)
+
+    def test_null_fields_in_baseline_do_not_mask_later_changes(self):
+        old = {"type": "object", "required": None,
+               "properties": {"x": {"type": "string"}}}
+        mutated = {"type": "object", "required": None,
+                   "properties": {"x": {"type": "integer"}}}
+        finding = self.drift_finding(old, mutated)
+        self.assertEqual(finding.detail["change_kind"], "mutative")
+        self.assertEqual(finding.severity, 3)
+        extended = {"type": "object", "required": None,
+                    "properties": {"x": {"type": "string"}, "z": {"type": "string"}}}
+        self.assertEqual(watch._classify_schema_change(old, extended), "additive")
+
+
+class TestTemporalIntegrityReview(unittest.TestCase):
+    def entry(self, seq, second, direction, frame):
+        return json.dumps({"schema_version": "0.1", "seq": seq,
+                           "ts": f"2026-01-01T00:00:{second:02d}+00:00",
+                           "dir": direction, "frame": frame})
+
+    def listed(self, seq, second, rid, extra=None, method="tools/list"):
+        return [
+            self.entry(seq, second, "c2s", {"jsonrpc": "2.0", "id": rid, "method": method}),
+            self.entry(seq + 1, second + 1, "s2c", {"jsonrpc": "2.0", "id": rid,
+                       "result": {"tools": [{"name": "search"}], **(extra or {})}}),
+        ]
+
+    def changed(self, seq, second, direction="s2c"):
+        return self.entry(seq, second, direction, {
+            "jsonrpc": "2.0", "method": "notifications/tools/list_changed"})
+
+    def test_premature_finding_survives_following_refresh(self):
+        lines = self.listed(1, 0, 1, {"ttlMs": 60000}) + [self.changed(3, 6)]
+        self.assertTrue(fp(lines)["premature_list_changed"])
+        refreshed = lines + self.listed(4, 7, 2, {"ttlMs": 60000})
+        self.assertTrue(fp(refreshed)["premature_list_changed"])
+        base = watch.merge(watch.new_baseline(), fp(self.listed(1, 0, 1)))
+        self.assertIn("premature_list_changed", kinds(watch.drift(base, fp(refreshed))))
+
+    def test_omitted_cache_fields_clear_previous_declaration(self):
+        lines = self.listed(1, 0, 1, {"ttlMs": 60000, "cacheScope": "public"})
+        lines += self.listed(3, 7, 2) + [self.changed(5, 9)]
+        f = fp(lines)
+        self.assertIsNone(f["tools_list_ttl_ms"])
+        self.assertIsNone(f["tools_list_cache_scope"])
+        self.assertFalse(f["premature_list_changed"])
+
+    def test_each_notification_uses_its_preceding_ttl(self):
+        lines = self.listed(1, 0, 1, {"ttlMs": 1000}) + [self.changed(3, 5)]
+        lines += self.listed(4, 6, 2, {"ttlMs": 1000}) + [self.changed(6, 10)]
+        self.assertFalse(fp(lines)["premature_list_changed"])
+
+    def test_unrelated_result_does_not_reset_declaration_window(self):
+        lines = self.listed(1, 0, 1, {"ttlMs": 60000})
+        lines += self.listed(3, 5, 2, {"ttlMs": 0}, method="ping")
+        lines += [self.changed(5, 9)]
+        f = fp(lines)
+        self.assertTrue(f["premature_list_changed"])
+        self.assertEqual(f["tools_list_ttl_ms"], 60000)
+
+    def test_client_notification_is_not_a_server_surface_change(self):
+        lines = self.listed(1, 0, 1, {"ttlMs": 60000})
+        lines += [self.changed(3, 2, direction="c2s")]
+        self.assertFalse(fp(lines)["premature_list_changed"])
+
+    def test_malformed_timestamps_and_ttls_do_not_crash_analysis(self):
+        for timestamp in (None, 3, "bad", "2026-01-01T00:00:01"):
+            with self.subTest(timestamp=timestamp):
+                lines = self.listed(1, 0, 1, {"ttlMs": 60000})
+                listed = json.loads(lines[1])
+                listed["ts"] = timestamp
+                lines[1] = json.dumps(listed)
+                lines += [self.changed(3, 2)]
+                self.assertFalse(fp(lines)["premature_list_changed"])
+        for ttl in (True, "60000", [], -1, float("inf"), float("nan")):
+            with self.subTest(ttl=ttl):
+                lines = self.listed(1, 0, 1, {"ttlMs": ttl}) + [self.changed(3, 1)]
+                self.assertFalse(fp(lines)["premature_list_changed"])
 
 
 if __name__ == "__main__":

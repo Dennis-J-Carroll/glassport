@@ -170,5 +170,42 @@ class TestSummarizeErrorTaxonomy(unittest.TestCase):
         self.assertIn("search backend unavailable", out)
 
 
+class TestCliLoneSurrogates(unittest.TestCase):
+    """json.loads accepts "\\ud800", and the session log now keeps such
+    frames (ASCII-escaped) instead of dropping them. Printing them to a
+    real UTF-8 pipe must not crash the report mid-output."""
+
+    def run_cli(self, *argv: str):
+        import os
+        import subprocess
+        import sys
+        env = {**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parent.parent / "src")}
+        env.pop("PYTHONIOENCODING", None)
+        return subprocess.run([sys.executable, "-m", "glassport.tap", *argv],
+                              capture_output=True, env=env, timeout=60)
+
+    def session(self, tmp: str) -> Path:
+        hostile = {"schema_version": "0.1", "seq": 90, "ts": "t90", "dir": "c2s",
+                   "frame": {"jsonrpc": "2.0", "id": 90, "method": "tools/call",
+                             "params": {"name": "x\ud800",
+                                        "arguments": {"q": "\ud800"}}},
+                   "raw": None}
+        return write_session(tmp, handshake() + [json.dumps(hostile)])
+
+    def test_summarize_and_detect_print_escaped_surrogates(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = str(self.session(tmp))
+            for argv, ok_codes in ((("summarize", path), {0}),
+                                   (("summarize", "--json", path), {0}),
+                                   (("detect", path), {0, 1})):
+                with self.subTest(argv=argv[:-1]):
+                    proc = self.run_cli(*argv)
+                    self.assertNotIn(b"Traceback", proc.stderr, proc.stderr[-300:])
+                    self.assertIn(proc.returncode, ok_codes)
+                    if "--json" in argv:
+                        summary = json.loads(proc.stdout)
+                        self.assertIn("x\ud800", summary["called_tools"])
+
+
 if __name__ == "__main__":
     unittest.main()

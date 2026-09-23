@@ -131,6 +131,22 @@ RULES = [
          "Capability note: sockets or HTTP clients mean data can leave "
          "the machine. Pair with the tap's host fingerprinting (watch).",
          "Confirm the egress destinations match the declared purpose."),
+    Rule("tool-shadowing", "high", "tool_poisoning",
+         "Tool name collision across MCP servers",
+         "A tool name is declared identically by two or more MCP "
+         "servers in this registry scan. The MCP spec scopes tool-name "
+         "uniqueness to a single server and recommends prefixing with a "
+         "server identifier when aggregating — an unprefixed collision "
+         "lets a rogue server's tool silently shadow a trusted one.",
+         "Prefix tool names with a stable server identifier, or remove/"
+         "rename one of the colliding servers from the registry."),
+    Rule("unbounded-schema", "medium", "tool_poisoning",
+         "Tool schema allows unreviewed extra arguments",
+         "A tool's inputSchema sets additionalProperties: true (or "
+         "leaves it unset, equally permissive), allowing arbitrary "
+         "extra arguments beyond the documented schema.",
+         "Set additionalProperties: false and declare every argument "
+         "the tool actually accepts."),
     Rule("no-license", "info", "provenance",
          "No license file in the checkout",
          "Not a risk by itself; reduces accountability and makes "
@@ -449,6 +465,46 @@ def _iter_source_files(root: Path):
 # ─────────────────────────────────────────────────────────────────
 # The audit
 # ─────────────────────────────────────────────────────────────────
+def _finalize_findings(raw_hits: list[dict]
+                        ) -> tuple[list[Finding], list[dict], int, str]:
+    """Group raw hits into Finding objects (one per rule+file), compute
+    per-rule deductions, and derive score/grade. Shared by audit_path
+    and audit_tool_registry so both use one scoring formula."""
+    grouped: dict[tuple[str, str], Finding] = {}
+    for h in raw_hits:
+        rule = RULES_BY_ID[h["rule"]]
+        key = (h["rule"], h["path"])
+        if key in grouped:
+            grouped[key].count += 1
+        else:
+            grouped[key] = Finding(
+                rule=rule.id,
+                severity=h.get("severity", rule.severity),
+                path=h["path"], line=h["line"], detail=h["detail"],
+                fix=rule.fix)
+    order = {"critical": 0, "high": 1, "medium": 2, "low": 3,
+             "note": 4, "info": 5}
+    findings = sorted(grouped.values(),
+                      key=lambda f: (order[f.severity], f.rule, f.path))
+
+    worst_by_rule: dict[str, str] = {}
+    counts_by_rule: dict[str, int] = {}
+    for f in findings:
+        counts_by_rule[f.rule] = counts_by_rule.get(f.rule, 0) + f.count
+        if f.rule not in worst_by_rule or \
+                order[f.severity] < order[worst_by_rule[f.rule]]:
+            worst_by_rule[f.rule] = f.severity
+    deductions = [{"rule": r, "severity": s, "points": WEIGHTS[s],
+                   "hits": counts_by_rule[r]}
+                  for r, s in sorted(worst_by_rule.items(),
+                                     key=lambda kv: -WEIGHTS[kv[1]])
+                  if WEIGHTS[s] > 0]
+
+    score = max(0, 100 - sum(d["points"] for d in deductions))
+    grade = next((g for floor, g in GRADES if score >= floor), "F")
+    return findings, deductions, score, grade
+
+
 def audit_path(path: str | Path) -> Report:
     root = Path(path).expanduser().resolve()
     base = root if root.is_dir() else root.parent
@@ -508,39 +564,7 @@ def audit_path(path: str | Path) -> Report:
         raw_hits.append({"rule": "no-license", "path": ".", "line": 0,
                          "detail": "no LICENSE/COPYING file found"})
 
-    # aggregate: one Finding per (rule, file); one deduction per rule
-    grouped: dict[tuple[str, str], Finding] = {}
-    for h in raw_hits:
-        rule = RULES_BY_ID[h["rule"]]
-        key = (h["rule"], h["path"])
-        if key in grouped:
-            grouped[key].count += 1
-        else:
-            grouped[key] = Finding(
-                rule=rule.id,
-                severity=h.get("severity", rule.severity),
-                path=h["path"], line=h["line"], detail=h["detail"],
-                fix=rule.fix)
-    order = {"critical": 0, "high": 1, "medium": 2, "low": 3,
-             "note": 4, "info": 5}
-    findings = sorted(grouped.values(),
-                      key=lambda f: (order[f.severity], f.rule, f.path))
-
-    worst_by_rule: dict[str, str] = {}
-    counts_by_rule: dict[str, int] = {}
-    for f in findings:
-        counts_by_rule[f.rule] = counts_by_rule.get(f.rule, 0) + f.count
-        if f.rule not in worst_by_rule or \
-                order[f.severity] < order[worst_by_rule[f.rule]]:
-            worst_by_rule[f.rule] = f.severity
-    deductions = [{"rule": r, "severity": s, "points": WEIGHTS[s],
-                   "hits": counts_by_rule[r]}
-                  for r, s in sorted(worst_by_rule.items(),
-                                     key=lambda kv: -WEIGHTS[kv[1]])
-                  if WEIGHTS[s] > 0]
-
-    score = max(0, 100 - sum(d["points"] for d in deductions))
-    grade = next((g for floor, g in GRADES if score >= floor), "F")
+    findings, deductions, score, grade = _finalize_findings(raw_hits)
 
     runtime = ("mixed" if n_py and (n_js or meta["package_name"]) else
                "python" if n_py else
@@ -556,6 +580,50 @@ def audit_path(path: str | Path) -> Report:
     }
     return Report(profile=profile, findings=findings,
                   deductions=deductions, score=score, grade=grade)
+
+
+def audit_tool_registry(session_paths: list[Path]) -> Report:
+    """Cross-server static audit: tool-name shadowing and unbounded
+    schemas, read from a set of tap session logs (each log's declared
+    tools/list surface IS the registry entry for that server)."""
+    from glassport.adapters.mcp_session import from_mcp_session_file
+
+    raw_hits: list[dict] = []
+    seen_names: dict[str, str] = {}   # tool name -> first session path seen
+    for path in session_paths:
+        trace = from_mcp_session_file(path)
+        server = next((a for a in trace.actors
+                        if a.metadata.get("role") == "mcp_server"), None)
+        if server is None:
+            continue
+        for t in server.metadata.get("tools") or []:
+            if not isinstance(t, dict) or "name" not in t:
+                continue
+            name = t["name"]
+            prior = seen_names.get(name)
+            if prior is not None and prior != str(path):
+                raw_hits.append({
+                    "rule": "tool-shadowing", "path": str(path), "line": 0,
+                    "severity": RULES_BY_ID["tool-shadowing"].severity,
+                    "detail": f"tool '{name}' also declared by {prior}"})
+            else:
+                seen_names[name] = str(path)
+            schema = t.get("inputSchema")
+            if isinstance(schema, dict) and \
+                    schema.get("additionalProperties", True) is True:
+                raw_hits.append({
+                    "rule": "unbounded-schema", "path": str(path), "line": 0,
+                    "severity": RULES_BY_ID["unbounded-schema"].severity,
+                    "detail": f"tool '{name}' schema allows "
+                              f"additionalProperties"})
+
+    findings, deductions, score, grade = _finalize_findings(raw_hits)
+    profile = {"path": "<tool registry>", "runtime": "registry",
+               "package_name": "", "version": "", "dependency_count": 0,
+               "files_scanned": len(session_paths),
+               "depth": {"ast": 0, "pattern": 0}}
+    return Report(profile=profile, findings=findings, deductions=deductions,
+                  score=score, grade=grade)
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -678,6 +746,21 @@ def main(argv: list[str]) -> int:
     as_sarif = "--sarif" in args
     if as_sarif:
         args.remove("--sarif")
+    if "--registry" in args:
+        idx = args.index("--registry")
+        session_paths = [Path(p) for p in args[idx + 1:]]
+        if not session_paths:
+            print("usage: audit.py --registry <session1.jsonl> [session2.jsonl ...]",
+                  file=sys.stderr)
+            return 2
+        report = audit_tool_registry(session_paths)
+        if as_sarif:
+            from glassport.sarif import render_sarif
+            print(render_sarif(report))
+        else:
+            print(render_json(report) if as_json else render_text(report))
+        return 1 if any(f.severity in ("critical", "high")
+                        for f in report.findings) else 0
     # H2.03 opt-in network enrichment. Off by default; the core audit below is
     # unchanged and offline. --provenance-refresh / --provenance-cache imply it.
     provenance = "--provenance" in args

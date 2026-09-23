@@ -86,13 +86,59 @@ def _matches_type(value, type_name: str) -> bool:
     return True if py is None else isinstance(value, py)
 
 
-def _schema_problems(args, schema) -> Iterator[str]:
+# Semantic taint checks injection shape, independently of secret content.
+_TAINT_PATTERNS: list[tuple[str, "re.Pattern[str]"]] = [
+    # Role markers and model chat-template special tokens (ChatML, Llama 2/3,
+    # Gemma, GPT end-of-text). These are reserved token spellings, not prose.
+    # No two \s* may be adjacent: the optional closing "/" is (?:/\s*)?, so a
+    # second whitespace run can only follow a literal "/" (a bare \s*/?\s*
+    # backtracked quadratically on "[" plus a long whitespace run).
+    ("role_switch_delimiter",
+     re.compile(r"<\|\s*(?:system|assistant|user|im_start|im_end|im_sep"
+                r"|start_header_id|end_header_id|eot_id|begin_of_text"
+                r"|endoftext)\s*\|>"
+                r"|\[\s*SYSTEM\s*\]|\[\s*(?:/\s*)?INST\s*\]"
+                r"|<<\s*(?:/\s*)?SYS\s*>>|<\s*(?:start|end)_of_turn\s*>",
+                re.IGNORECASE)),
+    ("zero_width_obfuscation", re.compile(r"[\u200b-\u200d\ufeff]")),
+]
+
+
+def _flatten_strings(value: Any, path: str = "") -> Iterator[tuple[str, str]]:
+    """Yield (key_path, string_value) for each reachable string, depth-first."""
+    if isinstance(value, str):
+        yield (path or "$", value)
+    elif isinstance(value, dict):
+        for k, v in value.items():
+            yield from _flatten_strings(v, f"{path}.{k}" if path else k)
+    elif isinstance(value, list):
+        for i, v in enumerate(value):
+            yield from _flatten_strings(v, f"{path}[{i}]")
+
+
+def find_taint(args: Any) -> Optional[tuple[str, str, str]]:
+    """Return the first taint hit, scanning normalized delimiters but raw
+    zero-width characters (normalization would erase those)."""
+    for key_path, s in _flatten_strings(args):
+        if len(s) > MAX_SCAN_BYTES:
+            s = s[:MAX_SCAN_BYTES]
+        for name, pattern in _TAINT_PATTERNS:
+            haystack = (s if name == "zero_width_obfuscation"
+                        else _normalize_for_scan(s))
+            m = pattern.search(haystack)
+            if m:
+                return (name, key_path, m.group(0))
+    return None
+
+
+def _schema_problems(args, schema, _depth: int = 0) -> Iterator[str]:
     """
-    Top-level check of tools/call arguments against a declared inputSchema.
-    Deliberately a subset of JSON Schema (required, top-level property
-    types, additionalProperties: false) — enough to catch an agent
-    inventing arguments, with zero dependencies.
+    Subset of JSON Schema: required, property types, additionalProperties:
+    false, enum, and nested objects capped at depth 2. Deliberately excludes
+    pattern/format/$ref: never execute a server-supplied regular expression.
     """
+    if _depth > 2:
+        return
     if not isinstance(schema, dict) or schema.get("type", "object") != "object":
         return
     if not isinstance(args, dict):
@@ -118,6 +164,16 @@ def _schema_problems(args, schema) -> Iterator[str]:
         if types and not any(_matches_type(value, t) for t in types):
             yield (f"argument '{key}' is {type(value).__name__}, "
                    f"schema expects {declared_type}")
+            continue
+        enum = spec.get("enum")
+        if isinstance(enum, list) and value not in enum:
+            yield (f"argument '{key}' value {value!r} is not one of the "
+                   f"schema's enum {enum!r}")
+        if isinstance(value, dict) and spec.get("type") == "object":
+            for sub in _schema_problems(value, spec, _depth + 1):
+                # Keep nested paths contiguous (e.g. coords.lat) in diagnostics.
+                yield sub.replace("argument '", f"argument '{key}.", 1)
+
 
 
 def _tool_call_parts(event: Event):
@@ -144,6 +200,46 @@ def fabricated_calls(trace: InteractionTrace) -> list[Annotation]:
     return replay(trace, [FabricatedCallsDetector()])
 
 
+def semantic_taint(trace: InteractionTrace) -> list[Annotation]:
+    """Apply the live gate's taint check post-hoc, including ungated calls."""
+    from glassport.incremental import SemanticTaintDetector, replay
+    return replay(trace, [SemanticTaintDetector()])
+
+
+def _taint_for_event(e: Event) -> list[Annotation]:
+    out: list[Annotation] = []
+    if e.kind != EventKind.TOOL_CALL:
+        return out
+    for name, args in _tool_call_parts(e):
+        hit = find_taint(args)
+        if hit is None:
+            continue
+        pat_name, key_path, _snippet = hit
+        out.append(_ann(
+            e, AnnotationKind.HALLUCINATION, pat_name,
+            f"tools/call '{name}' argument '{key_path}' contains a "
+            f"semantic taint signature ({pat_name})",
+            severity=3, category=HallucinationCategory.TOOL_USE))
+    return out
+
+
+# Why a gate block happened, keyed by the marker's data.reason. None is the
+# original M5 block: a call naming a tool outside the declared surface.
+_GATE_BLOCK_WHY = {
+    None: "outside the declared surface",
+    "pii_exfiltration": "its params carried a credential",
+    "taint_detected": "its params carried a prompt-injection delimiter",
+    "schema_violation": "its arguments violated the declared inputSchema",
+    "retry_loop_exceeded": "an identical call repeated past the retry limit",
+    "attestation_failed": "caller attestation was missing, expired, or invalid",
+    "params_too_deep": "its params were nested too deeply to inspect",
+    "params_too_large": "its params exceeded the inspection size limit",
+    "batch_unsupported": "JSON-RPC batch refused; no element was forwarded",
+    "uninspectable_frame": "the gate could not parse it unambiguously",
+    "frame_too_deep": "it was nested too deeply to parse",
+}
+
+
 def gate_actions(trace: InteractionTrace) -> list[Annotation]:
     """Observed gate records; classification remains separate from enforcement."""
     return [a for e in trace.events for a in _gate_actions_for_event(e)]
@@ -155,24 +251,63 @@ def _gate_actions_for_event(e: Event) -> list[Annotation]:
     if not isinstance(g, dict):
         return []
     if g.get("action") == "blocked":
+        reason = g.get("reason")
+        tool = g.get("tool")
+        why = _GATE_BLOCK_WHY.get(reason) if isinstance(reason, str) or reason is None else None
+        if why is None:   # strict-mode faults and future reasons
+            why = f"a required check could not complete ({reason})"
+        what = f"tools/call '{tool}'" if tool is not None else "a client frame"
         out.append(_ann(
             e, AnnotationKind.INFO, "gate_blocked",
-            f"gate blocked tools/call '{g.get('tool')}' — outside the "
-            f"declared surface; the server never saw this frame",
-            severity=1, tool=g.get("tool")))
+            f"gate blocked {what} — {why}; the server never saw this frame",
+            severity=1, tool=tool, reason=reason))
     elif g.get("action") == "injected":
         out.append(_ann(
             e, AnnotationKind.INFO, "gate_injected_response",
-            f"error response synthesized by the gate for blocked call "
-            f"'{g.get('tool')}'; the server never sent this frame",
+            f"error response synthesized by the gate for "
+            + (f"blocked call '{g.get('tool')}'" if g.get("tool") is not None
+               else "a blocked client frame")
+            + "; the server never sent this frame",
             severity=1, tool=g.get("tool")))
+    elif g.get("action") == "quarantined":
+        reduced = " (delivered in reduced form)" if g.get("reduced") else ""
+        out.append(_ann(
+            e, AnnotationKind.INFO, "gate_quarantined",
+            f"gate neutralized prompt-injection text in a resources/read "
+            f"reply for '{g.get('uri')}'{reduced}; the client never saw "
+            f"this original", severity=1, uri=g.get("uri")))
+    elif g.get("action") == "quarantine_replacement":
+        out.append(_ann(
+            e, AnnotationKind.INFO, "gate_quarantine_replacement",
+            f"neutralized resources/read reply the client received in "
+            f"place of the original", severity=1, uri=g.get("uri")))
+    elif g.get("action") in ("quarantine_dropped", "quarantine_withheld"):
+        verb = ("withheld (strict mode)" if g.get("action") == "quarantine_withheld"
+                else "dropped")
+        out.append(_ann(
+            e, AnnotationKind.INFO, "gate_" + g["action"],
+            f"gate {verb} a server frame it could not safely deliver "
+            f"({g.get('reason') or 'quarantine'}); the client never saw it",
+            severity=1, reason=g.get("reason"), uri=g.get("uri")))
     elif g.get("action") == "gate_skipped":
+        # The gate records the first fault as `reason` and any later
+        # ones in `also_skipped`; surface all of them, since a config
+        # reason (attestation_unavailable) can precede a scanner fault.
+        reason = g.get("reason")
+        also = g.get("also_skipped")
+        also = [r for r in also if isinstance(r, str)] if isinstance(also, list) else []
+        if reason in (None, "no_surface_timeout") and not also:
+            why = ("no tools/list response arrived within the hold "
+                   "window, so this call was forwarded unenforced")
+        else:
+            skipped = ", ".join(str(r) for r in (reason, *also) if r is not None)
+            why = (f"these checks could not run ({skipped}), so it was "
+                   f"forwarded without them")
         out.append(_ann(
             e, AnnotationKind.INFO, "gate_skipped",
-            f"gate failed open for tools/call '{g.get('tool')}' — "
-            f"no tools/list response arrived within the hold window, "
-            f"so this call was forwarded unenforced",
-            severity=1, tool=g.get("tool"), reason=g.get("reason")))
+            f"gate failed open for tools/call '{g.get('tool')}' — {why}",
+            severity=1, tool=g.get("tool"), reason=reason,
+            also_skipped=also))
     return out
 
 
@@ -396,9 +531,11 @@ PII_PATTERNS: list[PIIPattern] = [
         lambda s: _calculate_entropy(s) > 3.0, "generic API key/secret"),
     PIIPattern("ssn", 3, re.compile(r"(?<!\d)(\d{3}-\d{2}-\d{4})(?!\d)"),
         _validate_ssn, "US Social Security Number"),
+    # Alphanumeric boundaries, not just digit ones: a Luhn-valid run inside a
+    # hex identifier (progress token, request id) is not a card number.
     PIIPattern("credit_card", 3, re.compile(
-        r"(?<!\d)(4[0-9]{12}(?:[0-9]{3})?|5[1-5][0-9]{14}|"
-        r"3[47][0-9]{13}|6(?:011|5[0-9]{2})[0-9]{12})(?!\d)"),
+        r"(?<![0-9A-Za-z])(4[0-9]{12}(?:[0-9]{3})?|5[1-5][0-9]{14}|"
+        r"3[47][0-9]{13}|6(?:011|5[0-9]{2})[0-9]{12})(?![0-9A-Za-z])"),
         _luhn_check, "credit card number (Luhn)"),
     PIIPattern("iban", 3, re.compile(
         r"(?<![A-Z0-9])([A-Z]{2}\d{2}[A-Z0-9]{11,30})(?![A-Z0-9])"),
@@ -1272,7 +1409,7 @@ def _exfiltration_for_event(e: Event, declared: set[str],
     return out
 
 
-DETECTORS = [fabricated_calls, context_violations, gate_actions,
+DETECTORS = [fabricated_calls, context_violations, gate_actions, semantic_taint,
              data_exfiltration]
 _DEFAULT_DETECTORS = tuple(DETECTORS)
 

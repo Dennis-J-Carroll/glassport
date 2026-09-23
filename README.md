@@ -22,6 +22,10 @@ A passive stdio and Streamable HTTP proxy and behavioral analysis toolkit for th
 See what an MCP server <em>actually does</em>, not just what it declares.
 </p>
 
+<p align="center">
+  <img src="docs/screenshots/console.png" alt="glassport web console replaying a gated MCP session: blocked calls in red, gate actions and findings below" width="900">
+</p>
+
 ---
 
 ## Contents
@@ -228,7 +232,12 @@ score:    9/100 (F)
 ```bash
 $ glassport tui          # session picker → live dashboard
 $ glassport tui ~/.glassport/sessions/<file>.jsonl
+$ glassport serve --http # the same view in a browser (127.0.0.1 only)
 ```
+
+<p align="center">
+  <img src="docs/screenshots/tui.png" alt="glassport tui showing a gated session timeline and findings" width="820">
+</p>
 
 ### 7. Let the agent query its own history
 
@@ -383,6 +392,10 @@ JWTs are detected by default — and the `eyJ…` pattern is now gated by the `j
 
 `report.py` renders a self-contained static HTML page from a trace:
 
+<p align="center">
+  <img src="docs/screenshots/report.png" alt="glassport session report: verdict, declared vs called surface, and a timeline with gate blocks and a quarantined resource read" width="720">
+</p>
+
 - **Verdict** — `CLEAN` / `WORTH A LOOK` / `SHOULD NOT HAPPEN` / `HOSTILE OR HALLUCINATED`
 - **Surface** — declared tools vs. called tools; fabricated calls highlighted
 - **Timeline** — every wire event in sequence, request/response pairs linked, JSON payloads in collapsible `<details>` blocks, detector annotations inline
@@ -424,7 +437,7 @@ When observation has earned enough trust, swap `wrap` for `gate` in your MCP con
 "args": ["gate", "--", "npx", "exa-mcp-server"]
 ```
 
-The gate blocks exactly one thing: a `tools/call` naming a tool outside the server's declared surface. The request never reaches the server; the client gets a synthesized JSON-RPC error (code `-32000`) whose `error.data` carries `{"glassport": "gate_blocked"}` — the gate's voice is always distinguishable from the server's.
+The gate inspects every client-to-server frame before the server sees it, and every `resources/read` reply before the client sees it. A blocked request never reaches the server; the client gets a synthesized JSON-RPC error (code `-32000`) whose `error.data` carries `{"glassport": "gate_blocked", "reason": ...}` — the gate's voice is always distinguishable from the server's.
 
 ```
 ... tools/call "shadow_tool" →
@@ -432,9 +445,31 @@ The gate blocks exactly one thing: a `tools/call` naming a tool outside the serv
    'shadow_tool' blocked — not in the declared tool surface", ...}}
 ```
 
-The session log records both realities: the blocked frame is logged with `"gate": {"action": "blocked"}` (the server never saw it) and the synthesized error with `{"action": "injected"}` (the server never sent it). `summarize`, `report`, and `watch` all understand the markers — gate actions appear in the HTML report as green INFO annotations, distinct from the red findings the blocked call still earns.
+| Blocked (`data.reason`) | When |
+|---|---|
+| *(none)* | a `tools/call` names a tool outside the declared surface |
+| `pii_exfiltration` | any `params` field (arguments, `_meta`, …) carries a credential: private keys, provider API keys, … |
+| `taint_detected` | any `params` field carries a role delimiter or chat-template token (`<\|system\|>`, `<\|im_start\|>`, `[INST]`, `<start_of_turn>`, …) or zero-width obfuscation |
+| `schema_violation` | arguments violate the tool's declared `inputSchema` |
+| `retry_loop_exceeded` | an identical call repeats past the retry limit |
+| `attestation_failed` | opt-in caller attestation is missing, expired, or invalid ([docs/attestation.md](docs/attestation.md)) |
+| `params_too_deep`, `params_too_large` | params nested or sized beyond what the gate can inspect in full |
+| `batch_unsupported` | a JSON-RPC batch — refused whole, no element forwarded |
+| `uninspectable_frame`, `frame_too_deep` | a line the gate cannot parse unambiguously (malformed, duplicate keys, invalid UTF-8, …) — never forwarded unread |
 
-**The gate only enforces what the wire has proven.** Until a `tools/list` response has crossed the pipe there is no declaration to enforce, so early calls are forwarded (and the passive detectors still flag them). The latest `tools/list` result is the contract — a server that re-declares a smaller surface shrinks what it may be called to do.
+On the way back, a `resources/read` reply carrying injected delimiters is **quarantined**: the client receives a copy with the delimiters neutralized, and server lines the gate cannot inspect are dropped.
+
+<p align="center">
+  <img src="docs/screenshots/detect.png" alt="glassport detect listing gate blocks with their reasons for a demo session" width="900">
+</p>
+
+The session log records both realities: a blocked frame is logged with `"gate": {"action": "blocked", "reason": ...}` (the server never saw it) and the synthesized error with `{"action": "injected"}` (the server never sent it); a quarantine logs the original and the replacement. `summarize`, `detect`, `report`, and `watch` all understand the markers — gate actions appear as INFO annotations naming the reason, distinct from the findings the blocked call still earns.
+
+**The gate only enforces what the wire has proven.** Until a `tools/list` response has crossed the pipe there is no declaration to enforce: an early call is held briefly, then forwarded with a `gate_skipped` marker — but the credential, taint, and attestation checks still run on it. The latest `tools/list` result is the contract — a server that re-declares a smaller surface shrinks what it may be called to do.
+
+**Fail-open, visibly — or strict.** If a check cannot run, the default gate forwards the frame and logs a `gate_skipped` marker naming every check it skipped. `glassport gate --strict -- <server>` blocks instead. Passive `wrap` mode never alters a byte.
+
+The screenshots in this README are regenerated from a real gated session by `python scripts/readme_screenshots.py` (demo server and client in `scripts/readme_demo.py`).
 
 **The gate also runs over HTTP:**
 

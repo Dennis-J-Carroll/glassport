@@ -51,8 +51,17 @@ Author: Dennis J. Carroll · 2026 (skeleton drafted with Claude)
 """
 from __future__ import annotations
 
+from glassport.attestation import ATTESTATION_KEY, validate_public_key
+from glassport.detectors import (
+    MAX_SCAN_BYTES, find_taint, _schema_problems, _scan_pii, _redact,
+    neutralize_text, _TAINT_PATTERNS,
+)
+
+import hashlib
 import json
+import math
 import os
+import secrets
 import shlex
 import signal
 import subprocess
@@ -61,6 +70,7 @@ import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 SCHEMA_VERSION = "0.1"
 DEFAULT_LOG_DIR = Path(os.environ.get("GLASSPORT_LOG_DIR",
@@ -69,6 +79,108 @@ DEFAULT_LOG_DIR = Path(os.environ.get("GLASSPORT_LOG_DIR",
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+# tools/call arguments nested deeper than this are blocked before any
+# scanner runs: the scanners recurse, and a caller-chosen RecursionError
+# must not become a fail-open skip of the credential check. Real tool
+# schemas are a handful of levels deep.
+MAX_ARGUMENT_DEPTH = 64
+
+
+def _lenient_int(digits: str) -> int | str:
+    """parse_int hook: CPython refuses integer literals past
+    sys.get_int_max_str_digits() (4300), which V8 accepts. Keep such a
+    literal as its digit string so the frame stays inspectable instead of
+    becoming a parser differential the gate cannot judge."""
+    try:
+        return int(digits)
+    except ValueError:
+        return digits
+
+
+def _unique_object(pairs: list) -> dict:
+    """object_pairs_hook: refuse duplicate keys. Parsers disagree on which
+    duplicate wins (V8 and CPython keep the last, some keep the first, serde
+    derives reject), so a frame with one is ambiguous and the gate would be
+    judging a different message than the peer receives."""
+    obj = dict(pairs)
+    if len(obj) != len(pairs):
+        raise ValueError("duplicate object key")
+    return obj
+
+
+def _loads(data: bytes) -> Any:
+    """json.loads for gate decisions: tolerant of oversized integers, strict
+    about duplicate keys (both are parser differentials)."""
+    return json.loads(data, parse_int=_lenient_int, object_pairs_hook=_unique_object)
+
+
+def _nesting_exceeds(value: Any, limit: int) -> bool:
+    """True when dict/list nesting in `value` goes deeper than `limit`
+    (a bare container is depth 1). Iterative, so it cannot itself hit the
+    recursion limit it guards against."""
+    stack = [(value, 1)]
+    while stack:
+        node, depth = stack.pop()
+        if isinstance(node, dict):
+            children = node.values()
+        elif isinstance(node, list):
+            children = node
+        else:
+            continue
+        if depth > limit:
+            return True
+        stack.extend((child, depth + 1) for child in children)
+    return False
+
+
+def _dumps_strict_json(obj: Any) -> str:
+    """ASCII json.dumps that never emits Infinity/-Infinity/NaN, which are
+    not JSON: strict parsers (V8's JSON.parse) reject the whole message.
+    json.loads reads an overflowing literal such as 1e400 as inf; it is
+    re-emitted as 1e999, which parses back to the same infinity. NaN (which
+    json.loads also accepts) becomes null. Mutates non-finite floats in
+    `obj`; the walk is iterative, so peer-sized nesting cannot overflow it."""
+    text = json.dumps(obj, ensure_ascii=True)
+    if "Infinity" not in text and "NaN" not in text:
+        return text
+    token = "\x00glassport-" + secrets.token_hex(8)   # unguessable by the peer
+    literals = {token + "p": "1e999", token + "m": "-1e999", token + "n": "null"}
+    stack = [obj]
+    while stack:
+        node = stack.pop()
+        pairs = node.items() if isinstance(node, dict) else enumerate(node)
+        for key, value in list(pairs):
+            if isinstance(value, float) and not math.isfinite(value):
+                node[key] = token + ("p" if value > 0 else "m" if value < 0 else "n")
+            elif isinstance(value, (dict, list)):
+                stack.append(value)
+    text = json.dumps(obj, ensure_ascii=True)
+    for sentinel, literal in literals.items():
+        text = text.replace(json.dumps(sentinel, ensure_ascii=True), literal)
+    return text
+
+
+def _minimal_read_response(rid: Any, contents: list) -> bytes:
+    """A resources/read response carrying only the string fields a client
+    renders from each content item. Used when the server's full frame is
+    too deep to re-encode; shallow by construction."""
+    kept = [{k: v for k, v in item.items()
+             if k in ("uri", "mimeType", "text", "blob") and isinstance(v, str)}
+            for item in contents if isinstance(item, dict)]
+    return (json.dumps({"jsonrpc": "2.0", "id": rid, "result": {"contents": kept}},
+                       ensure_ascii=True) + "\n").encode("utf-8")
+
+
+def _note_skip(info: dict | None, tool: str | None, reason: str) -> dict:
+    """Record a fail-open check fault on the forward marker. The first
+    fault keeps the `reason` field; later ones append to `also_skipped`,
+    so the log shows every check that could not run."""
+    if info is None:
+        return {"action": "gate_skipped", "tool": tool, "reason": reason}
+    info.setdefault("also_skipped", []).append(reason)
+    return info
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -170,7 +282,20 @@ class SessionLog:
                 if wire_bytes is not None:
                     import base64
                     entry["wire_b64"] = base64.b64encode(wire_bytes).decode("ascii")
-                self._fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
+                try:
+                    serialized = json.dumps(entry, ensure_ascii=False)
+                except RecursionError:
+                    # Parsed but too deep to re-encode: keep the wire text
+                    # rather than silently dropping the entry.
+                    entry["frame"], entry["raw"] = None, text
+                    serialized = json.dumps(entry, ensure_ascii=False)
+                try:
+                    serialized.encode("utf-8")
+                except UnicodeEncodeError:
+                    # json.loads accepts lone surrogates ("\\ud800") that
+                    # UTF-8 cannot carry: escape this entry, never drop it.
+                    serialized = json.dumps(entry, ensure_ascii=True)
+                self._fh.write(serialized + "\n")
                 return entry
         except Exception:
             return None  # logging is best-effort; the relay is sacred
@@ -264,12 +389,31 @@ class Gate:
     """
 
     def __init__(self, hold_timeout: float = 2.0,
-                 control_path: "Path | None" = None) -> None:
+                 control_path: "Path | None" = None,
+                 idempotency_ttl: float = 5.0,
+                 idempotency_max_repeats: int = 3,
+                 enforce_attestation: bool = False,
+                 attestation_pubkey_b64: str | None = None,
+                 strict: bool = False) -> None:
+        if enforce_attestation:
+            validate_public_key(attestation_pubkey_b64)
+        # Fault policy. False (default): a check that cannot run fails open
+        # with a logged gate_skipped marker. True (opt-in, `gate --strict`):
+        # it blocks instead, naming the fault in data.reason.
+        self.strict = strict
         self._lock = threading.Lock()
         self._declared: set[str] | None = None   # None until tools/list seen
+        self._declared_defs: dict[str, dict] = {}  # name -> full tool def
+        self._pending_reads: dict[Any, str] = {}  # jsonrpc id -> uri
         self._surface_known = threading.Event()
         self._hold_timeout = hold_timeout
         self.blocked_count = 0
+        self.idempotency_ttl = idempotency_ttl
+        self.idempotency_max_repeats = idempotency_max_repeats
+        # request_hash -> (count, first_seen_monotonic)
+        self._recent_calls: dict[str, tuple[int, float]] = {}
+        self.enforce_attestation = enforce_attestation
+        self.attestation_pubkey_b64 = attestation_pubkey_b64
         # Runtime enable/disable via an override file (M6 TUI control).
         # None (the default) means enforcement is unconditional. Only a
         # tap launched with `gate --controllable` sets this.
@@ -281,6 +425,133 @@ class Gate:
         # accidents and cross-user actors; every call forwarded while
         # disabled still carries a "gate_disabled" marker in the log.
         self.control_path = control_path
+
+    def _error_object(self, rid, reason: str, tool: str | None, message: str,
+                      suggestion: str | None = None, **extra_data) -> dict | None:
+        """The JSON-RPC error object behind _block, or None when `rid` is
+        unaddressable (see _block)."""
+        if rid is None or isinstance(rid, bool) or not isinstance(rid, (str, int, float)):
+            return None
+        if isinstance(rid, float) and not math.isfinite(rid):
+            return None
+        data = {"glassport": "gate_blocked", "reason": reason, **extra_data}
+        if tool is not None:
+            data["tool"] = tool
+        if suggestion is not None:
+            data["suggestion"] = suggestion
+        return {"jsonrpc": "2.0", "id": rid,
+                "error": {"code": -32000, "message": message, "data": data}}
+
+    def _strict_block(self, frame: dict, tool: str | None, skipped: dict
+                      ) -> tuple[str, bytes | None, dict | None]:
+        """Strict mode: a check that could not run blocks the call. The first
+        fault is the reason; any later ones travel in also_skipped."""
+        reasons = [skipped.get("reason"), *skipped.get("also_skipped", [])]
+        reasons = [r for r in reasons if isinstance(r, str)] or ["gate_check_error"]
+        extra = {"also_skipped": reasons[1:]} if len(reasons) > 1 else {}
+        self.blocked_count += 1
+        response = self._block(
+            frame.get("id"), reasons[0], tool,
+            f"glassport gate: tools/call '{tool}' blocked — strict mode: "
+            f"{', '.join(reasons)} could not run",
+            suggestion="Retry later; the gate could not complete its checks.",
+            **extra)
+        return ("block", response,
+                {"action": "blocked", "tool": tool, "reason": reasons[0], **extra})
+
+    def fault_verdict(self, line: bytes) -> tuple[str, bytes | None, dict | None]:
+        """Decision for a line whose check_c2s raised. Default: forward the
+        original bytes with a gate_skipped marker (fail open, visibly).
+        Strict and enforcing: block, answering the request id if one can be
+        read. Never raises."""
+        forward = ("forward", None,
+                   {"action": "gate_skipped", "reason": "gate_check_error"})
+        if not self.strict:
+            return forward
+        try:
+            if not self._enforcement_on():
+                return forward
+        except Exception:
+            pass   # strict: an unreadable override keeps enforcement on
+        response = None
+        try:
+            frame = _loads(line)
+            if isinstance(frame, dict):
+                response = self._block(
+                    frame.get("id"), "gate_check_error", None,
+                    "glassport gate: request blocked — strict mode: the gate "
+                    "check failed")
+        except Exception:
+            response = None
+        self.blocked_count += 1
+        return ("block", response,
+                {"action": "blocked", "tool": None, "reason": "gate_check_error"})
+
+    def _block_batch(self, batch: list) -> tuple[str, bytes | None, dict | None]:
+        """JSON-RPC batches are refused whole while enforcing: MCP 2025-06-18
+        removed batching, and checking elements one by one would mean
+        splitting a byte-faithful relay. No element is ever forwarded. Each
+        addressable request gets a -32000 batch_unsupported error, returned
+        together as one batch response; notifications, client replies,
+        unaddressable ids, and nested arrays get nothing, and a batch with no
+        addressable request gets no response at all."""
+        if not self._enforcement_on():
+            return ("forward", None,
+                    {"action": "gate_disabled", "tool": None,
+                     "reason": "batch_unsupported"})
+        self.blocked_count += 1
+        errors = []
+        for element in batch:
+            if isinstance(element, dict) and "method" in element:
+                err = self._error_object(
+                    element.get("id"), "batch_unsupported", None,
+                    "glassport gate: JSON-RPC batch requests are not supported; "
+                    "no request in this batch was forwarded",
+                    suggestion="Send each request as its own message.")
+                if err is not None:
+                    errors.append(err)
+        response = ((json.dumps(errors, ensure_ascii=True) + "\n").encode("utf-8")
+                    if errors else None)
+        return ("block", response,
+                {"action": "blocked", "tool": None, "reason": "batch_unsupported"})
+
+    def _block(self, rid, reason: str, tool: str | None, message: str,
+               suggestion: str | None = None, **extra_data) -> bytes | None:
+        """Build the synthesized JSON-RPC error for any gate block.
+
+        All gate blocks reuse -32000 and distinguish checks via data.reason.
+        Callers build suggestions from known structured values, never from
+        matched payload content.
+
+        Only a JSON-RPC id (string or finite number) is echoed. A notification
+        (no id) gets nothing back, and so does a caller-built container,
+        boolean, or non-finite number: such a request is unaddressable, and
+        re-encoding a deeply nested id could itself overflow and turn the
+        block into a fail-open forward.
+        """
+        err = self._error_object(rid, reason, tool, message, suggestion, **extra_data)
+        if err is None:
+            return None
+        # ASCII-escaped: the message quotes caller text, which may hold lone
+        # surrogates that UTF-8 cannot encode; the resulting exception would
+        # otherwise turn a block into a fail-open forward.
+        return (json.dumps(err, ensure_ascii=True) + "\n").encode("utf-8")
+
+    def _idempotency_hit(self, name: str, arguments: Any) -> bool:
+        """Detect repeated canonical calls in a monotonic TTL window."""
+        now = time.monotonic()
+        key = hashlib.sha256(json.dumps(
+            {"name": name, "arguments": arguments},
+            sort_keys=True, default=str).encode("utf-8")).hexdigest()
+        with self._lock:
+            stale = [k for k, (_, ts) in self._recent_calls.items()
+                     if now - ts > self.idempotency_ttl]
+            for k in stale:
+                del self._recent_calls[k]
+            count, first_seen = self._recent_calls.get(key, (0, now))
+            count += 1
+            self._recent_calls[key] = (count, first_seen)
+            return count > self.idempotency_max_repeats
 
     def _enforcement_on(self) -> bool:
         """Consult the override file. Fail-closed: enforcement stays ON
@@ -300,27 +571,165 @@ class Gate:
             if st.st_uid != os.getuid() or (st.st_mode & 0o022):
                 return True
             data = json.loads(p.read_text(encoding="utf-8"))
-        except (OSError, ValueError, UnicodeDecodeError):
+        except (OSError, ValueError, UnicodeDecodeError, RecursionError):
             return True
         if not isinstance(data, dict):
             return True
-        return bool(data.get("enforce", True))
+        # Only a literal JSON false disables enforcement; null, 0, "", [] and
+        # {} are falsy but are not the documented {"enforce": false}.
+        return data.get("enforce", True) is not False
 
     def observe_s2c(self, line: bytes) -> None:
         """Harvest tool declarations from server output. Never raises."""
         try:
-            frame = json.loads(line)
-        except (json.JSONDecodeError, ValueError, UnicodeDecodeError):
+            frame = _loads(line)
+        except (json.JSONDecodeError, ValueError, UnicodeDecodeError,
+                RecursionError):
             return
         if not isinstance(frame, dict):
             return
         result = frame.get("result")
         if isinstance(result, dict) and isinstance(result.get("tools"), list):
-            names = {t["name"] for t in result["tools"]
-                     if isinstance(t, dict) and "name" in t}
+            # string names only: an unhashable server-sent name used to
+            # raise here, ending the s2c relay and leaving no surface
+            defs = {t["name"]: t for t in result["tools"]
+                    if isinstance(t, dict) and isinstance(t.get("name"), str)}
             with self._lock:
-                self._declared = names
+                self._declared = set(defs)
+                self._declared_defs = defs
             self._surface_known.set()
+
+    def _take_pending_read(self, rid: Any) -> str | None:
+        """Pop the uri of the resources/read this reply answers, for the log
+        marker only. A boolean id never pops: True == 1 in Python, so a
+        {"id": true} primer used to consume pending read 1 (A9)."""
+        if rid is None or isinstance(rid, bool):
+            return None
+        try:
+            with self._lock:
+                return self._pending_reads.pop(rid, None)
+        except TypeError:   # unhashable id: answers no tracked request
+            return None
+
+    def _uninspectable_s2c(self, reason: str
+                           ) -> tuple[str, bytes | None, dict | None]:
+        """A server line the gate cannot read may be a resources/read reply
+        whose text a client parser (V8) would still accept, and its id is
+        unreadable. While enforcing it is dropped, not released."""
+        if not self._enforcement_on():
+            return ("forward", None, {"action": "gate_disabled", "reason": reason})
+        return ("drop", None, {"action": "quarantine_dropped", "reason": reason})
+
+    def check_s2c(self, line: bytes
+                  ) -> tuple[str, bytes | None, dict | None]:
+        """Forward results, or rewrite tainted resources/read text in place.
+
+        A scan failure preserves the original response so the waiting client
+        still receives it. Readable results are never dropped by this check;
+        unreadable lines are (see _uninspectable_s2c). Blank lines pass.
+        """
+        if not line.strip():
+            return ("forward", None, None)
+        try:
+            frame = _loads(line)
+        except RecursionError:
+            return self._uninspectable_s2c("frame_too_deep")
+        except (json.JSONDecodeError, ValueError, UnicodeDecodeError):
+            return self._uninspectable_s2c("uninspectable_frame")
+        if isinstance(frame, list):
+            # the gate refuses client batches, so a server batch answers
+            # nothing legitimate; it could smuggle a read reply past the scan
+            return self._uninspectable_s2c("batch_unsupported")
+        if not isinstance(frame, dict):
+            return self._uninspectable_s2c("uninspectable_frame")
+        if "method" in frame:
+            return ("forward", None, None)
+        uri = None
+        rid = None
+        try:
+            rid = frame.get("id")
+            uri = self._take_pending_read(rid)
+            result = frame.get("result")
+            if not isinstance(result, dict):
+                return ("forward", None, None)
+            contents = result.get("contents")
+            if not isinstance(contents, list):
+                return ("forward", None, None)
+            # A `contents` array is the shape of a resources/read result (tool
+            # results use `content`). Scan it whatever its id: MCP SDKs
+            # normalize response ids (TS Number(id), Python int(str)), so "1",
+            # 1.0 or true all reach request 1, and correlating on the pending
+            # id let a mismatched id carry unneutralized text (A8).
+            if uri is None:
+                uri = next((item.get("uri") for item in contents
+                            if isinstance(item, dict)
+                            and isinstance(item.get("uri"), str)), None)
+            changed = False
+            for item in contents:
+                if not isinstance(item, dict):
+                    continue
+                text = item.get("text")
+                if not isinstance(text, str):
+                    continue
+                # detection reads only the first MAX_SCAN_BYTES; a longer text
+                # is neutralized whole rather than trusted past the cap (A4)
+                if len(text) > MAX_SCAN_BYTES or find_taint({"text": text}) is not None:
+                    sanitized = neutralize_text(text)
+                    # Unicode neutralization preserves ASCII delimiters.
+                    # Reuse the detection pattern to remove those explicitly.
+                    for kind, pattern in _TAINT_PATTERNS:
+                        if kind == "role_switch_delimiter":
+                            sanitized = pattern.sub("[role delimiter removed]", sanitized)
+                    item["text"] = sanitized
+                    changed = True
+            if not changed:
+                return ("forward", None, None)
+            # ASCII-escaped so a lone surrogate in any sibling field cannot
+            # fail the encode and release the unneutralized original.
+            try:
+                new_line = (_dumps_strict_json(frame) + "\n").encode("utf-8")
+            except RecursionError:
+                # The server sized this structure; near the parser's depth
+                # limit it can parse but not re-encode. Deliver only the
+                # neutralized contents instead of releasing the original. A
+                # container id could itself be too deep to encode (and TS
+                # clients read Number([[1]]) as 1), so such a reply is dropped.
+                if isinstance(rid, bool) or not isinstance(rid, (str, int, float)):
+                    return ("drop", None,
+                            {"action": "quarantine_dropped", "uri": uri,
+                             "reason": "unencodable_reply"})
+                new_line = _minimal_read_response(rid, contents)
+                return ("rewrite", new_line,
+                        {"action": "quarantined", "uri": uri, "reduced": True})
+        except Exception:
+            if self.strict and self._enforcement_on():
+                # strict: never release a read reply the quarantine could
+                # not finish; answer its id with an error, or drop it
+                withheld = self._block(
+                    rid, "quarantine_scan_error", None,
+                    "glassport gate: resource content withheld — strict mode: "
+                    "the quarantine scan failed")
+                if withheld is None:
+                    return ("drop", None, {"action": "quarantine_dropped",
+                                           "uri": uri, "reason": "quarantine_scan_error"})
+                return ("rewrite", withheld, {"action": "quarantine_withheld", "uri": uri})
+            return ("forward", None,
+                    {"action": "quarantine_scan_error", "uri": uri})
+        return ("rewrite", new_line, {"action": "quarantined", "uri": uri})
+
+    def _uninspectable_c2s(self, reason: str
+                           ) -> tuple[str, bytes | None, dict | None]:
+        """A client line the gate cannot read (too deep, malformed,
+        invalid UTF-8, \\r-joined messages a
+        universal-newline server splits, or a bare non-object value) may still
+        parse on the server and run a call the gate never read. While
+        enforcing it is dropped; its id is unreadable, so no error response
+        can be addressed."""
+        if not self._enforcement_on():
+            return ("forward", None,
+                    {"action": "gate_disabled", "tool": None, "reason": reason})
+        self.blocked_count += 1
+        return ("block", None, {"action": "blocked", "tool": None, "reason": reason})
 
     def check_c2s(self, line: bytes
                   ) -> tuple[str, bytes | None, dict | None]:
@@ -330,29 +739,263 @@ class Gate:
         sends `response` (bytes, or None for id-less calls) back to the
         client, and logs `info` on the blocked entry.
         """
+        if not line.strip():
+            return ("forward", None, None)   # blank lines carry no message
         try:
-            frame = json.loads(line)
+            frame = _loads(line)
+        except RecursionError:
+            return self._uninspectable_c2s("frame_too_deep")
         except (json.JSONDecodeError, ValueError, UnicodeDecodeError):
-            return ("forward", None, None)   # not ours to judge
-        if not isinstance(frame, dict) or frame.get("method") != "tools/call":
+            return self._uninspectable_c2s("uninspectable_frame")
+        if isinstance(frame, list):
+            return self._block_batch(frame)
+        if not isinstance(frame, dict):
+            return self._uninspectable_c2s("uninspectable_frame")
+        method = frame.get("method")
+        if method == "resources/read":
+            try:
+                rid = frame.get("id")
+                uri = (frame.get("params") or {}).get("uri")
+                if rid is not None and uri is not None:
+                    with self._lock:
+                        self._pending_reads[rid] = uri
+            except Exception:
+                return ("forward", None,
+                        {"action": "gate_skipped", "reason": "resource_tracking_error"})
+            return ("forward", None, None)
+        if method != "tools/call":
             return ("forward", None, None)
 
-        name = (frame.get("params") or {}).get("name")
+        # MCP tools/call params are an object with a string name. Any other
+        # shape carries no declared tool: it falls through to the
+        # undeclared-surface block instead of raising (an unhashable name
+        # used to crash the relay) or reaching a positional-params server.
+        params = frame.get("params")
+        if not isinstance(params, dict):
+            params = {}
+        name = params.get("name")
+        if not isinstance(name, str):
+            name = None
         with self._lock:
             declared = self._declared
+        surface_missing = False
         if declared is None:
             # pipelined client: hold the call until the tools/list
             # response lands; the s2c pump will wake us via observe_s2c
             self._surface_known.wait(timeout=self._hold_timeout)
             with self._lock:
                 declared = self._declared
-            if declared is None:
-                # server never declared a surface — fail open, visibly
-                return ("forward", None,
-                        {"action": "gate_skipped",
-                         "reason": "no_surface_timeout", "tool": name})
-        if name in declared:
-            return ("forward", None, None)
+            surface_missing = declared is None
+        if surface_missing or name in declared:
+            # With no declared surface only the undeclared-tool and schema
+            # checks are impossible: fail open for those, visibly, but still
+            # run attestation, depth, idempotency, taint, and PII.
+            forward_info = ({"action": "gate_skipped",
+                             "reason": "no_surface_timeout", "tool": name}
+                            if surface_missing else None)
+            if self.enforce_attestation:
+                att = None
+                sig_ok = None
+                try:
+                    from glassport.attestation import (
+                        check_meta, signing_payload, verify_signature)
+                    meta = params.get("_meta")
+                    att = check_meta(meta)
+                    if att.present and att.well_formed and not att.expired:
+                        try:
+                            payload = signing_payload(params)
+                        except (ValueError, TypeError, RecursionError):
+                            # The caller chose a frame that cannot be signed
+                            # (non-finite numbers, excessive nesting); that
+                            # is a failed attestation, not a scanner fault.
+                            sig_ok = False
+                        else:
+                            sig_ok = verify_signature(
+                                payload, meta[ATTESTATION_KEY]["sig"],
+                                self.attestation_pubkey_b64)
+                        if sig_ok is None:
+                            # Unavailable verification does not disable the
+                            # remaining taint/schema/PII boundary checks.
+                            forward_info = _note_skip(
+                                forward_info, name, "attestation_unavailable")
+                except Exception:
+                    # Fail open, visibly, but keep the remaining boundary
+                    # checks: a scanner fault must not skip them.
+                    att = None
+                    forward_info = _note_skip(
+                        forward_info, name, "attestation_check_error")
+                if att is not None and (
+                        not att.present or not att.well_formed or att.expired
+                        or sig_ok is False):
+                    if not self._enforcement_on():
+                        return ("forward", None,
+                                {"action": "gate_disabled", "tool": name,
+                                 "reason": "attestation_failed"})
+                    self.blocked_count += 1
+                    rid = frame.get("id")
+                    response = self._block(
+                        rid, "attestation_failed", name,
+                        f"glassport gate: tools/call '{name}' blocked — "
+                        f"caller attestation missing, malformed, expired, "
+                        f"or invalid",
+                        suggestion=f"Include a valid {ATTESTATION_KEY} "
+                                   f"entry in params._meta, signed with "
+                                   f"the configured key.")
+                    return ("block", response,
+                            {"action": "blocked", "tool": name,
+                             "reason": "attestation_failed"})
+            arguments = params.get("arguments")
+            # Taint and PII cover every params field, not just arguments:
+            # _meta and any sibling reach the server too (A2). The params
+            # object adds one level around arguments, which keep their
+            # MAX_ARGUMENT_DEPTH allowance.
+            extras = {k: v for k, v in params.items()
+                      if k not in ("name", "arguments")}
+            if _nesting_exceeds(params, MAX_ARGUMENT_DEPTH + 1):
+                if not self._enforcement_on():
+                    return ("forward", None,
+                            {"action": "gate_disabled", "tool": name,
+                             "reason": "params_too_deep"})
+                self.blocked_count += 1
+                rid = frame.get("id")
+                response = self._block(
+                    rid, "params_too_deep", name,
+                    f"glassport gate: tools/call '{name}' blocked — "
+                    f"params nested deeper than {MAX_ARGUMENT_DEPTH} "
+                    f"levels cannot be inspected safely",
+                    suggestion=f"Flatten the arguments to at most "
+                               f"{MAX_ARGUMENT_DEPTH} levels of nesting.")
+                return ("block", response,
+                        {"action": "blocked", "tool": name,
+                         "reason": "params_too_deep"})
+            try:
+                blob = json.dumps(params, ensure_ascii=False, default=str)
+            except Exception:
+                blob = None
+                forward_info = _note_skip(forward_info, name, "pii_scan_error")
+            # The scanners inspect at most MAX_SCAN_BYTES per blob/string;
+            # anything past that cap would pass unread, so it is refused (A3/A4).
+            if blob is not None and len(blob) > MAX_SCAN_BYTES:
+                if not self._enforcement_on():
+                    return ("forward", None,
+                            {"action": "gate_disabled", "tool": name,
+                             "reason": "params_too_large"})
+                self.blocked_count += 1
+                rid = frame.get("id")
+                response = self._block(
+                    rid, "params_too_large", name,
+                    f"glassport gate: tools/call '{name}' blocked — params "
+                    f"exceed the {MAX_SCAN_BYTES}-character inspection limit",
+                    suggestion="Send large content by reference (a resource "
+                               "URI) rather than inline in the call.")
+                return ("block", response,
+                        {"action": "blocked", "tool": name,
+                         "reason": "params_too_large"})
+            # A check that faults is skipped visibly, but the remaining
+            # checks still run: one scanner error must not waive the rest.
+            try:
+                repeat = self._idempotency_hit(name, arguments)
+            except Exception:
+                repeat = False
+                forward_info = _note_skip(forward_info, name, "idempotency_check_error")
+            if repeat:
+                if not self._enforcement_on():
+                    return ("forward", None,
+                            {"action": "gate_disabled", "tool": name,
+                             "reason": "retry_loop_exceeded"})
+                self.blocked_count += 1
+                rid = frame.get("id")
+                response = self._block(
+                    rid, "retry_loop_exceeded", name,
+                    f"glassport gate: tools/call '{name}' blocked — "
+                    f"identical request repeated more than "
+                    f"{self.idempotency_max_repeats} times within "
+                    f"{self.idempotency_ttl}s",
+                    suggestion="This call is not idempotent-safe to retry "
+                               "blindly. Inspect the last result before "
+                               "retrying, or wait for the TTL window to "
+                               "pass.")
+                return ("block", response,
+                        {"action": "blocked", "tool": name,
+                         "reason": "retry_loop_exceeded"})
+            field = "argument"
+            try:
+                hit = find_taint(arguments)
+                if hit is None:
+                    hit = find_taint(extras)
+                    field = "params field"
+            except Exception:
+                hit = None
+                forward_info = _note_skip(forward_info, name, "taint_scan_error")
+            if hit is not None:
+                pat_name, key_path, _snippet = hit
+                if not self._enforcement_on():
+                    return ("forward", None,
+                            {"action": "gate_disabled", "tool": name,
+                             "reason": "taint_detected"})
+                self.blocked_count += 1
+                rid = frame.get("id")
+                response = self._block(
+                    rid, "taint_detected", name,
+                    f"glassport gate: tools/call '{name}' blocked — "
+                    f"{field} '{key_path}' contains a semantic taint "
+                    f"signature ({pat_name})",
+                    suggestion="Remove role-switching delimiters and "
+                               "zero-width characters from the argument "
+                               "and retry with plain text.")
+                return ("block", response,
+                        {"action": "blocked", "tool": name,
+                         "reason": "taint_detected"})
+            with self._lock:
+                schema = (self._declared_defs.get(name) or {}).get("inputSchema")
+            try:
+                problems = list(_schema_problems(arguments, schema))
+            except Exception:
+                problems = []
+                forward_info = _note_skip(forward_info, name, "schema_scan_error")
+            if problems:
+                if not self._enforcement_on():
+                    return ("forward", None,
+                            {"action": "gate_disabled", "tool": name,
+                             "reason": "schema_violation"})
+                self.blocked_count += 1
+                rid = frame.get("id")
+                response = self._block(
+                    rid, "schema_violation", name,
+                    f"glassport gate: tools/call '{name}' blocked — "
+                    f"{problems[0]}",
+                    suggestion=f"Fix the argument and retry: {problems[0]}")
+                return ("block", response,
+                        {"action": "blocked", "tool": name,
+                         "reason": "schema_violation"})
+            try:
+                pii_hits = ([(pat, val) for pat, val in _scan_pii(blob)
+                             if pat.severity == 3] if blob is not None else [])
+            except Exception:
+                pii_hits = []
+                forward_info = _note_skip(forward_info, name, "pii_scan_error")
+            if pii_hits:
+                if not self._enforcement_on():
+                    return ("forward", None,
+                            {"action": "gate_disabled", "tool": name,
+                             "reason": "pii_exfiltration"})
+                pat, val = pii_hits[0]
+                self.blocked_count += 1
+                rid = frame.get("id")
+                response = self._block(
+                    rid, "pii_exfiltration", name,
+                    f"glassport gate: tools/call '{name}' blocked — "
+                    f"params contain {pat.description}: "
+                    f"{_redact(val, pat.category)}",
+                    suggestion="Remove the credential/secret from the "
+                               "argument before retrying; this tool call "
+                               "will not be forwarded with it present.")
+                return ("block", response,
+                        {"action": "blocked", "tool": name,
+                         "reason": "pii_exfiltration"})
+            if self.strict and forward_info is not None and self._enforcement_on():
+                return self._strict_block(frame, name, forward_info)
+            return ("forward", None, forward_info)
 
         if not self._enforcement_on():
             # would have been blocked; forward, but say so in the log
@@ -362,19 +1005,13 @@ class Gate:
 
         self.blocked_count += 1
         rid = frame.get("id")
-        response = None
-        if rid is not None:
-            response = (json.dumps({
-                "jsonrpc": "2.0", "id": rid,
-                "error": {
-                    "code": -32000,
-                    "message": (f"glassport gate: tools/call '{name}' "
-                                f"blocked — not in the declared tool "
-                                f"surface"),
-                    "data": {"glassport": "gate_blocked", "tool": name,
-                             "declared": sorted(declared)},
-                },
-            }, ensure_ascii=False) + "\n").encode("utf-8")
+        suggestion = (f"Call one of the declared tools: "
+                      f"{', '.join(sorted(declared))}") if declared else None
+        response = self._block(
+            rid, "gate_blocked", name,
+            f"glassport gate: tools/call '{name}' blocked — not in the "
+            f"declared tool surface",
+            suggestion=suggestion, declared=sorted(declared))
         info = {"action": "blocked", "tool": name,
                 "declared": sorted(declared)}
         return ("block", response, info)
@@ -387,21 +1024,36 @@ def pump(src, dst, log: SessionLog | None, direction: str,
          gate: Gate | None = None, client_write=None,
          dst_lock: threading.Lock | None = None) -> None:
     """
-    Read newline-delimited lines from src, write them unmodified to dst,
-    and tap each into the session log. Binary-safe; preserves the exact
-    bytes including the newline.
+    Read newline-delimited lines from src, relay them to dst, and tap each
+    into the session log. Binary-safe for untouched lines; a gate quarantine
+    is the one exception — see below.
 
     With a gate: c2s lines are checked before forwarding — a blocked
     line never reaches dst, and the synthesized error goes back to the
     client via client_write. s2c lines feed the gate's view of the
-    declared surface. dst_lock serializes client-bound writes so an
+    declared surface. A gate may also rewrite a resources/read result whose
+    text matches a taint signature before forwarding. Both the server's
+    original and the client's replacement are logged with distinct markers.
+    dst_lock serializes client-bound writes so an
     injected error can't interleave with a real server response.
     """
     try:
         for line in iter(src.readline, b""):
             gate_info = None   # marker for forwarded-but-noteworthy frames
             if gate is not None and direction == "c2s":
-                action, response, info = gate.check_c2s(line)
+                try:
+                    action, response, info = gate.check_c2s(line)
+                except Exception:
+                    # An unexpected gate fault must not stop the relay. By
+                    # default it fails open, visibly; `gate --strict` blocks.
+                    # Caller-chosen shapes are handled inside check_c2s, so
+                    # this is for defects, not attacker input.
+                    try:
+                        action, response, info = gate.fault_verdict(line)
+                    except Exception:
+                        action, response, info = (
+                            "forward", None,
+                            {"action": "gate_skipped", "reason": "gate_check_error"})
                 if action == "block" and info is not None:
                     if log is not None:
                         log.record(direction, line, gate=info)
@@ -414,7 +1066,37 @@ def pump(src, dst, log: SessionLog | None, direction: str,
                     continue
                 gate_info = info   # e.g. gate_skipped fail-open
             elif gate is not None and direction == "s2c":
-                gate.observe_s2c(line)
+                try:
+                    gate.observe_s2c(line)
+                except Exception:
+                    # never let a surface-harvest defect stop the s2c relay
+                    gate_info = {"action": "gate_skipped",
+                                 "reason": "surface_observe_error"}
+                try:
+                    s2c_action, s2c_new_line, s2c_info = gate.check_s2c(line)
+                except Exception:
+                    strict_now = getattr(gate, "strict", False)
+                    try:
+                        strict_now = strict_now and gate._enforcement_on()
+                    except Exception:
+                        pass   # strict: an unreadable override keeps enforcing
+                    s2c_action, s2c_new_line, s2c_info = (
+                        ("drop", None, {"action": "quarantine_dropped",
+                                        "reason": "quarantine_scan_error"})
+                        if strict_now
+                        else ("forward", None, {"action": "quarantine_scan_error"}))
+                if s2c_action == "drop":
+                    if log is not None:
+                        log.record(direction, line, gate=s2c_info)
+                    continue
+                if s2c_action == "rewrite" and s2c_new_line is not None:
+                    if log is not None:
+                        log.record(direction, line, gate=s2c_info)
+                    line = s2c_new_line
+                    # The common log call below records the replacement once.
+                    gate_info = {**(s2c_info or {}), "action": "quarantine_replacement"}
+                elif s2c_info is not None:
+                    gate_info = s2c_info
             if dst_lock is not None:
                 with dst_lock:
                     dst.write(line)
@@ -849,9 +1531,11 @@ glassport — passive MCP stdio proxy
                    glassport wrap --transport http --url <remote-mcp-url>
                         (passive MITM over MCP Streamable-HTTP; logs both
                          directions to the same JSONL as the stdio tap)
-  gate:            glassport gate [--controllable] [--log-dir DIR] -- <server command...>
+  gate:            glassport gate [--controllable] [--strict] [--log-dir DIR] -- <server command...>
                    (active: blocks tools/call outside the declared surface;
-                    --controllable lets `tui --gate-control` toggle it)
+                    --controllable lets `tui --gate-control` toggle it;
+                    --strict blocks when a check cannot run instead of
+                    forwarding with a logged gate_skipped marker)
                    glassport gate --transport http --url <remote-mcp-url>
                         (active MITM over MCP Streamable-HTTP: everything
                          `observe` does, plus the recorded would-blocks are
@@ -906,6 +1590,30 @@ glassport — passive MCP stdio proxy
 """
 
 
+def _escape_unencodable_output() -> None:
+    """Session logs can carry lone surrogates (json.loads accepts "\\ud800")
+    that a UTF-8 stdout cannot encode. Print them backslash-escaped, which
+    inside JSON output is still a valid escape, rather than crash mid-report.
+    A stream without reconfigure() (e.g. a test's StringIO) is left as is."""
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(errors="backslashreplace")
+        except (AttributeError, ValueError, OSError):
+            pass
+
+
+def _parse_gate_flags(argv: list[str]) -> tuple[list[str], bool, bool]:
+    """Strip leading `gate` flags in any order: (rest, controllable, strict)."""
+    controllable = strict = False
+    while argv and argv[0] in ("--controllable", "--strict"):
+        if argv[0] == "--controllable":
+            controllable = True
+        else:
+            strict = True
+        argv = argv[1:]
+    return argv, controllable, strict
+
+
 def main(argv: list[str]) -> int:
     if not argv or argv[0] in ("-h", "--help"):
         print(USAGE)
@@ -918,11 +1626,8 @@ def main(argv: list[str]) -> int:
     if argv[0] == "wrap":
         argv = argv[1:]
     elif argv[0] == "gate":
-        argv = argv[1:]
-        if argv and argv[0] == "--controllable":
-            gate_controllable = True
-            argv = argv[1:]
-        gate = Gate()
+        argv, gate_controllable, strict = _parse_gate_flags(argv[1:])
+        gate = Gate(strict=strict)
     if not argv:
         print(USAGE)
         return 2
@@ -936,6 +1641,7 @@ def main(argv: list[str]) -> int:
             print("usage: glassport summarize [--json|--sarif] <session.jsonl>",
                   file=sys.stderr)
             return 2
+        _escape_unencodable_output()
         return summarize(Path(args[0]), as_json=as_json, as_sarif=as_sarif)
 
     if argv[0] == "detect":
@@ -945,6 +1651,7 @@ def main(argv: list[str]) -> int:
         if len(args) != 1:
             print(USAGE)
             return 2
+        _escape_unencodable_output()
         return _cmd_detect(Path(args[0]), as_sarif=as_sarif)
 
     if argv[0] == "advise":
@@ -1032,6 +1739,12 @@ def main(argv: list[str]) -> int:
             # the HTTP gate has no such control surface. Refuse rather than
             # accept the flag and quietly enforce unconditionally anyway.
             print("glassport: --controllable applies to the stdio gate only",
+                  file=sys.stderr)
+            return 2
+        if gate is not None and gate.strict:
+            # Same reasoning for --strict: it configures the stdio Gate's
+            # fail-closed posture, which the HTTP gate never consults.
+            print("glassport: --strict applies to the stdio gate only",
                   file=sys.stderr)
             return 2
         from glassport.adapters.mcp_http import run_http_tap

@@ -48,6 +48,10 @@ tui = ["windows-curses; platform_system == 'Windows'"]
 # gate; `hypothesis` is provisioned here for the H2.06 property-based validator
 # tests (the dev-dep group is introduced in H1.08; those tests come later).
 dev = ["coverage", "hypothesis"]
+# Ed25519 verification for the optional com.glassport/attestation _meta
+# extension (Task 13). Never required: verify_signature() returns None
+# when this extra is absent, and Gate enforcement defaults to off.
+attestation = ["cryptography>=41"]
 
 [project.urls]
 Homepage = "https://github.com/Dennis-J-Carroll/glassport"

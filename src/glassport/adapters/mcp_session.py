@@ -265,6 +265,14 @@ class MCPTraceBuilder:
             # raw/unparseable wire line — preserve it as a MESSAGE so no
             # data is lost on import (Open design Q #2: don't drop on ingest)
             raw = entry.get("raw")
+            is_batch = raw is None and isinstance(frame, list)
+            if is_batch:
+                # a JSON-RPC batch (the gate refuses these): keep it as one
+                # MESSAGE so the wire record and its gate marker survive import
+                try:
+                    raw = json.dumps(frame, ensure_ascii=False)
+                except (RecursionError, ValueError):
+                    raw = "[JSON-RPC batch]"
             if raw is None:
                 return
             ev = Event(
@@ -274,7 +282,7 @@ class MCPTraceBuilder:
                 parts=[Part(kind=PartKind.TEXT, content=raw)],
                 parent_event_id=last_event_id,
                 metadata={"seq": entry.get("seq"), "unparsed": True,
-                          "dir": entry.get("dir")},
+                          "dir": entry.get("dir"), "batch": is_batch},
             )
             events.append(ev)
             self.last_event_id = ev.id
@@ -386,6 +394,14 @@ class MCPTraceBuilder:
             request = self._reply(pending, rid)
             parent_eid, call_name = request.event_id, request.tool_name
             reply_method = f"<{request.method}>" if request.method else None
+
+            # Cache fields describe this tools/list response only. An omitted
+            # field clears the prior promise; unrelated results cannot renew it.
+            if (request.method == "tools/list" and isinstance(result, dict)
+                    and isinstance(result.get("tools"), list) and error is None):
+                server.metadata["tools_list_ttl_ms"] = result.get("ttlMs")
+                server.metadata["tools_list_cache_scope"] = result.get("cacheScope")
+                server.metadata["tools_list_ts"] = ts
 
             # the initialize result carries the server's declared
             # capabilities and identity — stamp them on the server actor

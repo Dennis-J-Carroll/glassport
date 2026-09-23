@@ -29,9 +29,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 import sys
+from collections import Counter
 from dataclasses import asdict, dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Iterable
 
@@ -75,6 +78,131 @@ def _hosts_in(content) -> set[str]:
     return hosts
 
 
+def _jsd(p_counts: dict[str, int], q_counts: dict[str, int]) -> float:
+    """Jensen-Shannon Divergence, base 2, bounded [0, 1]. See
+    APPENDIX.md §6 for the derivation. 0.0 = identical distributions,
+    1.0 = disjoint support."""
+    vocab = sorted(set(p_counts) | set(q_counts))
+    if not vocab:
+        return 0.0
+    p_total = sum(p_counts.values()) or 1
+    q_total = sum(q_counts.values()) or 1
+    p = [p_counts.get(k, 0) / p_total for k in vocab]
+    q = [q_counts.get(k, 0) / q_total for k in vocab]
+    m = [(pi + qi) / 2 for pi, qi in zip(p, q)]
+
+    def kl(a: list[float], b: list[float]) -> float:
+        total = 0.0
+        for ai, bi in zip(a, b):
+            if ai <= 0.0 or bi <= 0.0:
+                continue
+            total += ai * math.log2(ai / bi)
+        return total
+
+    return (kl(p, m) + kl(q, m)) / 2.0
+
+
+JSD_DRIFT_THRESHOLD = 0.15
+JSD_MIN_CALLS = 5   # minimum total calls on both sides before scoring
+
+
+def _event_time(value) -> datetime | None:
+    """Parse a log timestamp without trusting its JSON type or format."""
+    if not isinstance(value, str):
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _premature_list_changed(trace: InteractionTrace) -> bool:
+    """Compare each server notification with its preceding declaration.
+
+    Replay in wire order: later refreshes cannot erase an earlier finding,
+    and omitted/invalid TTLs replace, rather than inherit, the old window.
+    Only responses paired with tools/list establish a cache window.
+    """
+    base, ttl_ms = None, None
+    for e in trace.events:
+        if e.metadata.get("method_replied_to") == "<tools/list>":
+            for part in e.parts:
+                if part.kind != PartKind.JSON or not isinstance(part.content, dict):
+                    continue
+                result = part.content.get("result")
+                if not isinstance(result, dict) or not isinstance(result.get("tools"), list):
+                    continue
+                candidate = result.get("ttlMs")
+                valid = (isinstance(candidate, (int, float))
+                         and not isinstance(candidate, bool) and candidate > 0
+                         and (not isinstance(candidate, float) or math.isfinite(candidate)))
+                base = _event_time(e.timestamp)
+                ttl_ms = candidate if valid else None
+                break
+        if (e.metadata.get("method") != "notifications/tools/list_changed"
+                or not e.metadata.get("server_initiated")
+                or not e.metadata.get("notification")):
+            continue
+        fired = _event_time(e.timestamp)
+        if base is None or ttl_ms is None or fired is None:
+            continue
+        try:
+            elapsed_ms = (fired - base).total_seconds() * 1000
+        except TypeError:
+            # Mixed offset-aware/naive timestamps do not prove elapsed time.
+            continue
+        if 0 <= elapsed_ms < ttl_ms:
+            return True
+    return False
+
+
+def _schema_fields(schema: dict) -> tuple[dict, list] | None:
+    """(properties, required) with null treated as absent, or None if malformed."""
+    props = schema.get("properties")
+    required = schema.get("required")
+    props = {} if props is None else props
+    required = [] if required is None else required
+    if not isinstance(props, dict) or not all(
+            isinstance(spec, (dict, bool)) for spec in props.values()):
+        return None
+    if not isinstance(required, list) or not all(
+            isinstance(name, str) for name in required):
+        return None
+    return props, required
+
+
+def _classify_schema_change(old: dict | None, new: dict | None) -> str:
+    """additive: new optional properties, nothing removed or narrowed.
+    mutative: a property removed, an existing property's declared type
+    or boolean schema changed, a new required field appeared, or the new
+    schema's properties/required fields are malformed (so malformation
+    cannot lower a change's severity).
+    unknown: a malformed baseline or not enough information."""
+    if not isinstance(old, dict) or not isinstance(new, dict):
+        return "unknown"
+    old_fields = _schema_fields(old)
+    if old_fields is None:
+        return "unknown"
+    new_fields = _schema_fields(new)
+    if new_fields is None:
+        return "mutative"
+    (old_props, old_required), (new_props, new_required) = old_fields, new_fields
+    if set(old_props) - set(new_props):
+        return "mutative"
+    for key, old_spec in old_props.items():
+        new_spec = new_props[key]
+        if isinstance(old_spec, bool) or isinstance(new_spec, bool):
+            if old_spec != new_spec:
+                return "mutative"
+        elif old_spec.get("type") != new_spec.get("type"):
+            return "mutative"
+    if set(new_required) - set(old_required):
+        return "mutative"
+    if set(new_props) - set(old_props):
+        return "additive"
+    return "unknown"
+
+
 def fingerprint(trace: InteractionTrace, source_name: str = "") -> dict:
     """Reduce a trace to a JSON-serializable, order-independent summary."""
     server_meta: dict = {}
@@ -102,6 +230,9 @@ def fingerprint(trace: InteractionTrace, source_name: str = "") -> dict:
                 hosts |= _hosts_in(p.content.get("output"))
 
     server_info = server_meta.get("server_info") or {}
+    tool_call_counts = dict(Counter(n for _, n in trace.called_tools()))
+    ttl_ms = server_meta.get("tools_list_ttl_ms")
+    cache_scope = server_meta.get("tools_list_cache_scope")
     timestamps = [e.timestamp for e in trace.events if e.timestamp]
     return {
         "fingerprint_version": FINGERPRINT_VERSION,
@@ -121,6 +252,12 @@ def fingerprint(trace: InteractionTrace, source_name: str = "") -> dict:
         "server_requests": sorted(server_requests),
         "hosts": sorted(hosts),
         "event_count": len(trace.events),
+        "tool_call_counts": tool_call_counts,
+        "tools_list_ttl_ms": ttl_ms,
+        "tools_list_cache_scope": cache_scope,
+        "schemas": {t["name"]: t.get("inputSchema") for t in declared_defs
+                    if isinstance(t, dict) and "name" in t},
+        "premature_list_changed": _premature_list_changed(trace),
         # a tail-only ingest dropped the head of the log; drift derived
         # from it is low-confidence and drift() prints a notice saying so
         "tail_only": bool(trace.metadata.get("tail_only")),
@@ -143,6 +280,8 @@ def new_baseline() -> dict:
         "server_names": set(),
         "server_versions": {},        # server name -> set of versions
         "last_declared": set(),       # most recent session's surface
+        "tool_call_counts_ever": {},   # tool name -> cumulative call count
+        "last_schemas": {},           # tool name -> most recent full schema
     }
 
 
@@ -151,6 +290,9 @@ def merge(baseline: dict, fp: dict) -> dict:
     baseline["sessions"] += 1
     baseline["declared_ever"] |= set(fp["declared_tools"])
     baseline["called_ever"] |= set(fp["called_tools"])
+    for tname, c in fp["tool_call_counts"].items():
+        baseline["tool_call_counts_ever"][tname] = \
+            baseline["tool_call_counts_ever"].get(tname, 0) + c
     baseline["fabricated_ever"] |= set(fp["fabricated_tools"])
     baseline["server_requests_ever"] |= set(fp["server_requests"])
     baseline["hosts_ever"] |= set(fp["hosts"])
@@ -164,6 +306,7 @@ def merge(baseline: dict, fp: dict) -> dict:
                 fp["server_name"], set()).add(fp["server_version"])
     if fp.get("declaration_known", bool(fp["declared_tools"])):
         baseline["last_declared"] = set(fp["declared_tools"])
+    baseline["last_schemas"].update(fp["schemas"])
     return baseline
 
 
@@ -201,12 +344,33 @@ def drift(baseline: dict, fp: dict) -> list[Drift]:
             d("removed_declared_tool", 1,
               f"'{name}' disappeared from the declared surface", tool=name)
 
+    baseline_calls = baseline["tool_call_counts_ever"]
+    session_calls = fp["tool_call_counts"]
+    if sum(baseline_calls.values()) >= JSD_MIN_CALLS and \
+            sum(session_calls.values()) >= JSD_MIN_CALLS:
+        jsd_score = _jsd(baseline_calls, session_calls)
+        if jsd_score > JSD_DRIFT_THRESHOLD:
+            severity = 3 if jsd_score > 0.5 else 2 if jsd_score > 0.3 else 1
+            d("jsd_drift", severity,
+              f"tool-call vocabulary distribution diverged from history "
+              f"(JSD={jsd_score:.3f}, threshold={JSD_DRIFT_THRESHOLD})",
+              jsd=round(jsd_score, 4))
+
     for name, h in sorted(fp["schema_hashes"].items()):
         seen = baseline["schema_hashes_seen"].get(name)
         if seen and h not in seen:
-            d("schema_changed", 2,
-              f"inputSchema for '{name}' changed since it was first declared",
-              tool=name, hash=h)
+            change_kind = _classify_schema_change(
+                baseline["last_schemas"].get(name), fp["schemas"].get(name))
+            severity = 3 if change_kind == "mutative" else 2
+            d("schema_changed", severity,
+              f"inputSchema for '{name}' changed since it was first "
+              f"declared ({change_kind})",
+              tool=name, hash=h, change_kind=change_kind)
+
+    if fp.get("premature_list_changed") and not fp.get("tail_only"):
+        d("premature_list_changed", 2,
+          "notifications/tools/list_changed fired before its preceding "
+          "tools/list declaration's ttlMs would have expired")
 
     for name in sorted(set(fp["fabricated_tools"])
                        - baseline["fabricated_ever"]):

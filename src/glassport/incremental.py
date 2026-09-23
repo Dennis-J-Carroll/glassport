@@ -95,7 +95,11 @@ class ContextDetector(StreamingDetector):
                 out.append(detectors._ann(
                     event, detectors.AnnotationKind.ANOMALY, "unknown_server_request",
                     f"server-initiated request '{method}' is not a known MCP client capability", severity=2))
-        if md.get("orphaned"):
+        # a quarantine replacement re-answers an id the logged original
+        # already answered; it is the delivered copy, not an orphan
+        gate_mark = md.get("gate")
+        if md.get("orphaned") and not (isinstance(gate_mark, dict) and gate_mark.get(
+                "action") == "quarantine_replacement"):
             out.append(detectors._ann(
                 event, detectors.AnnotationKind.ANOMALY, "orphaned_response",
                 f"response id={md.get('jsonrpc_id')} matched no request", severity=1))
@@ -107,6 +111,13 @@ class GateRecordsDetector(StreamingDetector):
 
     def on_event(self, event: Event, state: SessionState) -> list[Annotation]:
         return detectors._gate_actions_for_event(event)
+
+
+class SemanticTaintDetector(StreamingDetector):
+    name = "semantic_taint"
+
+    def on_event(self, event: Event, state: SessionState) -> list[Annotation]:
+        return detectors._taint_for_event(event)
 
 
 class DataExfiltrationDetector(StreamingDetector):
@@ -138,7 +149,7 @@ def default_detectors(pii_patterns=None) -> tuple[StreamingDetector, ...]:
     """The standard streaming detector set, optionally pinned to a frozen
     PII pattern snapshot. One fresh instance set per session."""
     return (FabricatedCallsDetector(), ContextDetector(), GateRecordsDetector(),
-            DataExfiltrationDetector(pii_patterns))
+            SemanticTaintDetector(), DataExfiltrationDetector(pii_patterns))
 
 
 class DetectorEngine:

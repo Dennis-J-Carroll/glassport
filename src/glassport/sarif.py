@@ -38,6 +38,23 @@ _STR_LEVEL = {"critical": "error", "high": "error", "medium": "warning",
               "low": "note", "note": "note", "info": "note"}
 _INT_LEVEL = {3: "error", 2: "warning", 1: "note"}
 
+# OWASP Agentic-AI Top 10 / CSA MAESTRO taxonomy, keyed by rule id (audit
+# Rule.id or detector subcategory string). Sparse by design — only rules
+# with a defensible, specific mapping get tagged.
+_TAXONOMY: dict[str, dict[str, str]] = {
+    "secret-hardcoded": {"asi": "ASI02", "maestro_layer": "data_operations"},
+    "tool-poisoning": {"asi": "ASI01", "maestro_layer": "agent_frameworks"},
+    "unicode-hidden": {"asi": "ASI01", "maestro_layer": "agent_frameworks"},
+    "shell-injection": {"asi": "ASI02", "maestro_layer": "tool_integration"},
+    "runtime-install": {"asi": "ASI04", "maestro_layer": "deployment_infra"},
+    "tool-shadowing": {"asi": "ASI04", "maestro_layer": "ecosystem"},
+    "unbounded-schema": {"asi": "ASI02", "maestro_layer": "tool_integration"},
+    "pii_exfiltration": {"asi": "ASI06", "maestro_layer": "data_operations"},
+    "unexpected_egress_host": {"asi": "ASI06", "maestro_layer": "data_operations"},
+    "role_switch_delimiter": {"asi": "ASI01", "maestro_layer": "agent_frameworks"},
+    "zero_width_obfuscation": {"asi": "ASI01", "maestro_layer": "agent_frameworks"},
+}
+
 
 def _sarif_level(severity: Union[str, int]) -> str:
     """Unified severity → SARIF level (error/warning/note). Total: a non-str/int
@@ -79,14 +96,16 @@ def _rule_object(rule_id: str, severity: str) -> dict:
     meta = RULES_BY_ID.get(rule_id)
     short = meta.title if meta else rule_id.replace("-", " ").title()
     full = meta.why if meta else short
+    props = {"tags": ["security", "mcp", "glassport"]
+             + ([meta.category] if meta else [])}
+    props.update(_TAXONOMY.get(rule_id, {}))
     obj = {
         "id": f"glassport/{rule_id}",
         "name": rule_id,
         "shortDescription": {"text": short},
         "fullDescription": {"text": full},
         "defaultConfiguration": {"level": _sarif_level(severity)},
-        "properties": {"tags": ["security", "mcp", "glassport"]
-                       + ([meta.category] if meta else [])},
+        "properties": props,
     }
     if meta and meta.fix:
         obj["help"] = {"text": meta.fix}
@@ -231,9 +250,13 @@ _RUNTIME_RULE_TEXT = {
     "unexpected_egress_host": "Tool call reached an undeclared host",
     "premature_call": "tools/call issued before notifications/initialized",
     "call_before_declaration": "tools/call before any tools/list was seen",
-    "gate_blocked": "Gate blocked a call outside the declared surface",
+    "gate_blocked": "Gate blocked a frame (see data.reason)",
     "gate_injected_response": "Gate synthesized the error reply",
-    "gate_skipped": "Gate forwarded a call (no surface declared yet)",
+    "gate_skipped": "Gate forwarded a frame a check could not run for",
+    "gate_quarantined": "Gate neutralized injected text in a resource reply",
+    "gate_quarantine_replacement": "Neutralized resource reply delivered",
+    "gate_quarantine_dropped": "Gate dropped a server frame it could not inspect",
+    "gate_quarantine_withheld": "Gate withheld a resource reply (strict mode)",
     "detector_error": "A detector raised during analysis",
 }
 
@@ -276,12 +299,14 @@ def _runtime_rule_object(ann) -> dict:
         short = "Secret or PII in tool-call arguments"
     else:
         short = sub.replace("_", " ").capitalize()
+    props = {"tags": ["glassport", "runtime", ann.kind.value]}
+    props.update(_TAXONOMY.get(sub, {}))
     return {
         "id": f"glassport/{sub}",
         "name": sub,
         "shortDescription": {"text": short},
         "defaultConfiguration": {"level": _sarif_level(ann.severity)},
-        "properties": {"tags": ["glassport", "runtime", ann.kind.value]},
+        "properties": props,
     }
 
 
