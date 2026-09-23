@@ -106,6 +106,17 @@ def _nesting_exceeds(value: Any, limit: int) -> bool:
     return False
 
 
+def _minimal_read_response(rid: Any, contents: list) -> bytes:
+    """A resources/read response carrying only the string fields a client
+    renders from each content item. Used when the server's full frame is
+    too deep to re-encode; shallow by construction."""
+    kept = [{k: v for k, v in item.items()
+             if k in ("uri", "mimeType", "text", "blob") and isinstance(v, str)}
+            for item in contents if isinstance(item, dict)]
+    return (json.dumps({"jsonrpc": "2.0", "id": rid, "result": {"contents": kept}},
+                       ensure_ascii=True) + "\n").encode("utf-8")
+
+
 def _note_skip(info: dict | None, tool: str | None, reason: str) -> dict:
     """Record a fail-open check fault on the forward marker. The first
     fault keeps the `reason` field; later ones append to `also_skipped`,
@@ -399,8 +410,10 @@ class Gate:
             return
         result = frame.get("result")
         if isinstance(result, dict) and isinstance(result.get("tools"), list):
+            # string names only: an unhashable server-sent name used to
+            # raise here, ending the s2c relay and leaving no surface
             defs = {t["name"]: t for t in result["tools"]
-                    if isinstance(t, dict) and "name" in t}
+                    if isinstance(t, dict) and isinstance(t.get("name"), str)}
             with self._lock:
                 self._declared = set(defs)
                 self._declared_defs = defs
@@ -411,10 +424,22 @@ class Gate:
         """Forward results, or rewrite tainted resources/read text in place.
 
         A scan failure preserves the original response so the waiting client
-        still receives it. Results are never dropped by this check.
+        still receives it. Readable results are never dropped by this check.
+        The one exception is a frame too deep to parse while a resources/read
+        is pending: it may be that response, an iterative client parser (V8)
+        would accept text the quarantine never saw, and its id is unreadable,
+        so it is dropped while enforcing ("drop") rather than released.
         """
         try:
             frame = json.loads(line)
+        except RecursionError:
+            with self._lock:
+                pending = bool(self._pending_reads)
+            if pending and self._enforcement_on():
+                return ("drop", None,
+                        {"action": "quarantine_dropped", "reason": "frame_too_deep"})
+            return ("forward", None,
+                    {"action": "quarantine_scan_error", "reason": "frame_too_deep"})
         except (json.JSONDecodeError, ValueError, UnicodeDecodeError):
             return ("forward", None, None)
         if not isinstance(frame, dict) or "method" in frame:
@@ -453,7 +478,15 @@ class Gate:
                 return ("forward", None, None)
             # ASCII-escaped so a lone surrogate in any sibling field cannot
             # fail the encode and release the unneutralized original.
-            new_line = (json.dumps(frame, ensure_ascii=True) + "\n").encode("utf-8")
+            try:
+                new_line = (json.dumps(frame, ensure_ascii=True) + "\n").encode("utf-8")
+            except RecursionError:
+                # The server sized this structure; near the parser's depth
+                # limit it can parse but not re-encode. Deliver only the
+                # neutralized contents instead of releasing the original.
+                new_line = _minimal_read_response(rid, contents)
+                return ("rewrite", new_line,
+                        {"action": "quarantined", "uri": uri, "reduced": True})
         except Exception:
             return ("forward", None,
                     {"action": "quarantine_scan_error", "uri": uri})
@@ -761,12 +794,21 @@ def pump(src, dst, log: SessionLog | None, direction: str,
                     continue
                 gate_info = info   # e.g. gate_skipped fail-open
             elif gate is not None and direction == "s2c":
-                gate.observe_s2c(line)
+                try:
+                    gate.observe_s2c(line)
+                except Exception:
+                    # never let a surface-harvest defect stop the s2c relay
+                    gate_info = {"action": "gate_skipped",
+                                 "reason": "surface_observe_error"}
                 try:
                     s2c_action, s2c_new_line, s2c_info = gate.check_s2c(line)
                 except Exception:
                     s2c_action, s2c_new_line, s2c_info = (
                         "forward", None, {"action": "quarantine_scan_error"})
+                if s2c_action == "drop":
+                    if log is not None:
+                        log.record(direction, line, gate=s2c_info)
+                    continue
                 if s2c_action == "rewrite" and s2c_new_line is not None:
                     if log is not None:
                         log.record(direction, line, gate=s2c_info)
