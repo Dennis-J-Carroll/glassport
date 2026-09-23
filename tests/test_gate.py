@@ -1227,5 +1227,44 @@ class TestGateHostileShapes(unittest.TestCase):
         self.assertNotIn("<|system|>", body["result"]["contents"][0]["text"])
 
 
+
+class TestGateAstraFindings(unittest.TestCase):
+    """Bypasses reported by the Astra consultation (A1-A10), each reproduced
+    before its fix. The gate here always enforces unless a test disables it."""
+
+    PEM = ("-----BEGIN PRIVATE KEY-----" + "A" * 32 + "-----END PRIVATE KEY-----")
+
+    def call(self, arguments, rid=2, **extra) -> bytes:
+        return line({"jsonrpc": "2.0", "id": rid, "method": "tools/call",
+                     "params": {"name": "web_search", "arguments": arguments, **extra}})
+
+    def control_gate(self, tmp, enforce_json: str) -> Gate:
+        g = Gate(control_path=Path(tmp) / "s.jsonl.gate")
+        g.observe_s2c(TOOLS_LIST_RESULT)
+        g.control_path.write_text('{"enforce": %s}' % enforce_json, encoding="utf-8")
+        g.control_path.chmod(0o600)
+        return g
+
+    def pump_out(self, raw: bytes, direction: str, gate: Gate):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "s.jsonl"
+            log = SessionLog(path)
+            dst, back = _KeepOpen(), []
+            pump(io.BytesIO(raw), dst, log, direction, gate=gate,
+                 client_write=back.append)
+            log.close()
+            entries = [json.loads(e) for e in path.read_text().splitlines()]
+        return dst.getvalue(), b"".join(back), entries
+
+    # A10
+    def test_override_requires_literal_false(self):
+        for value in ("null", "0", '""', "[]", "{}", '"false"', "0.0"):
+            with self.subTest(enforce=value), tempfile.TemporaryDirectory() as tmp:
+                g = self.control_gate(tmp, value)
+                self.assertTrue(g._enforcement_on())
+                self.assertEqual(g.check_c2s(self.call({"secret": self.PEM}))[0], "block")
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertFalse(self.control_gate(tmp, "false")._enforcement_on())
+
 if __name__ == "__main__":
     unittest.main()

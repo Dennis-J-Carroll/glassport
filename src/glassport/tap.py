@@ -397,7 +397,9 @@ class Gate:
             return True
         if not isinstance(data, dict):
             return True
-        return bool(data.get("enforce", True))
+        # Only a literal JSON false disables enforcement; null, 0, "", [] and
+        # {} are falsy but are not the documented {"enforce": false}.
+        return data.get("enforce", True) is not False
 
     def observe_s2c(self, line: bytes) -> None:
         """Harvest tool declarations from server output. Never raises."""
