@@ -472,6 +472,18 @@ class Gate:
                 self._declared_defs = defs
             self._surface_known.set()
 
+    def _take_pending_read(self, rid: Any) -> str | None:
+        """Pop the uri of the resources/read this reply answers, for the log
+        marker only. A boolean id never pops: True == 1 in Python, so a
+        {"id": true} primer used to consume pending read 1 (A9)."""
+        if rid is None or isinstance(rid, bool):
+            return None
+        try:
+            with self._lock:
+                return self._pending_reads.pop(rid, None)
+        except TypeError:   # unhashable id: answers no tracked request
+            return None
+
     def _uninspectable_s2c(self, reason: str
                            ) -> tuple[str, bytes | None, dict | None]:
         """A server line the gate cannot read may be a resources/read reply
@@ -508,16 +520,22 @@ class Gate:
         uri = None
         try:
             rid = frame.get("id")
-            with self._lock:
-                uri = self._pending_reads.pop(rid, None) if rid is not None else None
-            if uri is None:
-                return ("forward", None, None)
+            uri = self._take_pending_read(rid)
             result = frame.get("result")
             if not isinstance(result, dict):
                 return ("forward", None, None)
             contents = result.get("contents")
             if not isinstance(contents, list):
                 return ("forward", None, None)
+            # A `contents` array is the shape of a resources/read result (tool
+            # results use `content`). Scan it whatever its id: MCP SDKs
+            # normalize response ids (TS Number(id), Python int(str)), so "1",
+            # 1.0 or true all reach request 1, and correlating on the pending
+            # id let a mismatched id carry unneutralized text (A8).
+            if uri is None:
+                uri = next((item.get("uri") for item in contents
+                            if isinstance(item, dict)
+                            and isinstance(item.get("uri"), str)), None)
             changed = False
             for item in contents:
                 if not isinstance(item, dict):
@@ -544,7 +562,13 @@ class Gate:
             except RecursionError:
                 # The server sized this structure; near the parser's depth
                 # limit it can parse but not re-encode. Deliver only the
-                # neutralized contents instead of releasing the original.
+                # neutralized contents instead of releasing the original. A
+                # container id could itself be too deep to encode (and TS
+                # clients read Number([[1]]) as 1), so such a reply is dropped.
+                if isinstance(rid, bool) or not isinstance(rid, (str, int, float)):
+                    return ("drop", None,
+                            {"action": "quarantine_dropped", "uri": uri,
+                             "reason": "unencodable_reply"})
                 new_line = _minimal_read_response(rid, contents)
                 return ("rewrite", new_line,
                         {"action": "quarantined", "uri": uri, "reduced": True})
