@@ -105,6 +105,16 @@ def _nesting_exceeds(value: Any, limit: int) -> bool:
     return False
 
 
+def _note_skip(info: dict | None, tool: str | None, reason: str) -> dict:
+    """Record a fail-open check fault on the forward marker. The first
+    fault keeps the `reason` field; later ones append to `also_skipped`,
+    so the log shows every check that could not run."""
+    if info is None:
+        return {"action": "gate_skipped", "tool": tool, "reason": reason}
+    info.setdefault("also_skipped", []).append(reason)
+    return info
+
+
 # ─────────────────────────────────────────────────────────────────
 # Session logger — append-only JSONL, thread-safe, failure-isolated.
 # ─────────────────────────────────────────────────────────────────
@@ -490,14 +500,14 @@ class Gate:
                         if sig_ok is None:
                             # Unavailable verification does not disable the
                             # remaining taint/schema/PII boundary checks.
-                            forward_info = {"action": "gate_skipped", "tool": name,
-                                            "reason": "attestation_unavailable"}
+                            forward_info = _note_skip(
+                                forward_info, name, "attestation_unavailable")
                 except Exception:
                     # Fail open, visibly, but keep the remaining boundary
                     # checks: a scanner fault must not skip them.
                     att = None
-                    forward_info = {"action": "gate_skipped", "tool": name,
-                                    "reason": "attestation_check_error"}
+                    forward_info = _note_skip(
+                        forward_info, name, "attestation_check_error")
                 if att is not None and (
                         not att.present or not att.well_formed or att.expired
                         or sig_ok is False):
@@ -536,12 +546,13 @@ class Gate:
                 return ("block", response,
                         {"action": "blocked", "tool": name,
                          "reason": "arguments_too_deep"})
+            # A check that faults is skipped visibly, but the remaining
+            # checks still run: one scanner error must not waive the rest.
             try:
                 repeat = self._idempotency_hit(name, arguments)
             except Exception:
-                return ("forward", None,
-                        {"action": "gate_skipped", "tool": name,
-                         "reason": "idempotency_check_error"})
+                repeat = False
+                forward_info = _note_skip(forward_info, name, "idempotency_check_error")
             if repeat:
                 if not self._enforcement_on():
                     return ("forward", None,
@@ -565,9 +576,8 @@ class Gate:
             try:
                 hit = find_taint(arguments)
             except Exception:
-                return ("forward", None,
-                        {"action": "gate_skipped", "tool": name,
-                         "reason": "taint_scan_error"})
+                hit = None
+                forward_info = _note_skip(forward_info, name, "taint_scan_error")
             if hit is not None:
                 pat_name, key_path, _snippet = hit
                 if not self._enforcement_on():
@@ -592,9 +602,8 @@ class Gate:
             try:
                 problems = list(_schema_problems(arguments, schema))
             except Exception:
-                return ("forward", None,
-                        {"action": "gate_skipped", "tool": name,
-                         "reason": "schema_scan_error"})
+                problems = []
+                forward_info = _note_skip(forward_info, name, "schema_scan_error")
             if problems:
                 if not self._enforcement_on():
                     return ("forward", None,
@@ -615,9 +624,8 @@ class Gate:
                 pii_hits = [(pat, val) for pat, val in _scan_pii(blob)
                             if pat.severity == 3]
             except Exception:
-                return ("forward", None,
-                        {"action": "gate_skipped", "tool": name,
-                         "reason": "pii_scan_error"})
+                pii_hits = []
+                forward_info = _note_skip(forward_info, name, "pii_scan_error")
             if pii_hits:
                 if not self._enforcement_on():
                     return ("forward", None,
