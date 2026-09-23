@@ -99,9 +99,21 @@ def _lenient_int(digits: str) -> int | str:
         return digits
 
 
+def _unique_object(pairs: list) -> dict:
+    """object_pairs_hook: refuse duplicate keys. Parsers disagree on which
+    duplicate wins (V8 and CPython keep the last, some keep the first, serde
+    derives reject), so a frame with one is ambiguous and the gate would be
+    judging a different message than the peer receives."""
+    obj = dict(pairs)
+    if len(obj) != len(pairs):
+        raise ValueError("duplicate object key")
+    return obj
+
+
 def _loads(data: bytes) -> Any:
-    """json.loads for gate decisions: tolerant of oversized integers only."""
-    return json.loads(data, parse_int=_lenient_int)
+    """json.loads for gate decisions: tolerant of oversized integers, strict
+    about duplicate keys (both are parser differentials)."""
+    return json.loads(data, parse_int=_lenient_int, object_pairs_hook=_unique_object)
 
 
 def _nesting_exceeds(value: Any, limit: int) -> bool:
