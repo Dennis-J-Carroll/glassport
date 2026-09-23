@@ -460,7 +460,16 @@ class Gate:
         if method != "tools/call":
             return ("forward", None, None)
 
-        name = (frame.get("params") or {}).get("name")
+        # MCP tools/call params are an object with a string name. Any other
+        # shape carries no declared tool: it falls through to the
+        # undeclared-surface block instead of raising (an unhashable name
+        # used to crash the relay) or reaching a positional-params server.
+        params = frame.get("params")
+        if not isinstance(params, dict):
+            params = {}
+        name = params.get("name")
+        if not isinstance(name, str):
+            name = None
         with self._lock:
             declared = self._declared
         if declared is None:
@@ -482,7 +491,6 @@ class Gate:
                 try:
                     from glassport.attestation import (
                         check_meta, signing_payload, verify_signature)
-                    params = frame.get("params") or {}
                     meta = params.get("_meta")
                     att = check_meta(meta)
                     if att.present and att.well_formed and not att.expired:
@@ -528,7 +536,7 @@ class Gate:
                     return ("block", response,
                             {"action": "blocked", "tool": name,
                              "reason": "attestation_failed"})
-            arguments = (frame.get("params") or {}).get("arguments")
+            arguments = params.get("arguments")
             if _nesting_exceeds(arguments, MAX_ARGUMENT_DEPTH):
                 if not self._enforcement_on():
                     return ("forward", None,

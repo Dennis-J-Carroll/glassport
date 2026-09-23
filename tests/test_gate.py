@@ -914,6 +914,41 @@ class TestGateHostileShapes(unittest.TestCase):
         self.assertEqual(marker["reason"], "taint_scan_error")
         self.assertEqual(marker["also_skipped"], ["schema_scan_error"])
 
+    def raw_call(self, params_json: str) -> bytes:
+        return ('{"jsonrpc":"2.0","id":23,"method":"tools/call","params":%s}\n'
+                % params_json).encode()
+
+    def test_non_object_params_are_blocked_as_undeclared(self):
+        # Positional params could smuggle a declared name and arguments past
+        # every check if a server maps them; no shape may raise either.
+        for params in ('"web_search"', "3", "true",
+                       '["web_search", {"k": "%s"}]' % self.PEM.replace("\n", "\\n")):
+            with self.subTest(params=params):
+                g = declared_gate()
+                action, response, info = g.check_c2s(self.raw_call(params))
+                self.assertEqual(action, "block")
+                self.assertIsNone(info["tool"])
+                self.assertEqual(json.loads(response)["error"]["data"]["reason"],
+                                 "gate_blocked")
+
+    def test_non_string_tool_names_are_blocked_as_undeclared(self):
+        for name in ("{}", "[]", '["web_search"]', "3", "null"):
+            with self.subTest(name=name):
+                g = declared_gate()
+                action, response, info = g.check_c2s(
+                    self.raw_call('{"name": %s, "arguments": {}}' % name))
+                self.assertEqual(action, "block")
+                self.assertIsNone(info["tool"])
+                self.assertEqual(json.loads(response)["error"]["data"]["reason"],
+                                 "gate_blocked")
+
+    def test_unhashable_tool_name_does_not_stop_the_relay(self):
+        bad = self.raw_call('{"name": {}, "arguments": {}}')
+        ok = self.call("weather")
+        dst = _KeepOpen()
+        pump(io.BytesIO(bad + ok), dst, None, "c2s", gate=declared_gate())
+        self.assertEqual(dst.getvalue(), ok)   # bad blocked, relay alive
+
 
 if __name__ == "__main__":
     unittest.main()
