@@ -614,19 +614,21 @@ class Gate:
             name = None
         with self._lock:
             declared = self._declared
+        surface_missing = False
         if declared is None:
             # pipelined client: hold the call until the tools/list
             # response lands; the s2c pump will wake us via observe_s2c
             self._surface_known.wait(timeout=self._hold_timeout)
             with self._lock:
                 declared = self._declared
-            if declared is None:
-                # server never declared a surface — fail open, visibly
-                return ("forward", None,
-                        {"action": "gate_skipped",
-                         "reason": "no_surface_timeout", "tool": name})
-        if name in declared:
-            forward_info = None
+            surface_missing = declared is None
+        if surface_missing or name in declared:
+            # With no declared surface only the undeclared-tool and schema
+            # checks are impossible: fail open for those, visibly, but still
+            # run attestation, depth, idempotency, taint, and PII.
+            forward_info = ({"action": "gate_skipped",
+                             "reason": "no_surface_timeout", "tool": name}
+                            if surface_missing else None)
             if self.enforce_attestation:
                 att = None
                 sig_ok = None
