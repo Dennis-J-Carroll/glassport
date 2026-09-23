@@ -250,9 +250,13 @@ _RUNTIME_RULE_TEXT = {
     "unexpected_egress_host": "Tool call reached an undeclared host",
     "premature_call": "tools/call issued before notifications/initialized",
     "call_before_declaration": "tools/call before any tools/list was seen",
-    "gate_blocked": "Gate blocked a call outside the declared surface",
+    "gate_blocked": "Gate blocked a frame (see data.reason)",
     "gate_injected_response": "Gate synthesized the error reply",
-    "gate_skipped": "Gate forwarded a call (no surface declared yet)",
+    "gate_skipped": "Gate forwarded a frame a check could not run for",
+    "gate_quarantined": "Gate neutralized injected text in a resource reply",
+    "gate_quarantine_replacement": "Neutralized resource reply delivered",
+    "gate_quarantine_dropped": "Gate dropped a server frame it could not inspect",
+    "gate_quarantine_withheld": "Gate withheld a resource reply (strict mode)",
     "detector_error": "A detector raised during analysis",
 }
 

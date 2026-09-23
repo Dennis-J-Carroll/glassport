@@ -122,6 +122,13 @@ class _TraceBuilder:
             # raw/unparseable wire line — preserve it as a MESSAGE so no
             # data is lost on import (Open design Q #2: don't drop on ingest)
             raw = entry.get("raw")
+            if raw is None and isinstance(frame, list):
+                # a JSON-RPC batch (the gate refuses these): keep it as one
+                # MESSAGE so the wire record and its gate marker survive import
+                try:
+                    raw = json.dumps(frame, ensure_ascii=False)
+                except (RecursionError, ValueError):
+                    raw = "[JSON-RPC batch]"
             if raw is None:
                 return
             ev = Event(

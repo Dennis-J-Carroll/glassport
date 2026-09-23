@@ -286,7 +286,11 @@ def context_violations(trace: InteractionTrace) -> list[Annotation]:
                     f"server-initiated request '{method}' is not a known "
                     f"MCP client capability", severity=2))
 
-        if md.get("orphaned"):
+        # a quarantine replacement re-answers an id the logged original
+        # already answered; it is the delivered copy, not an orphan
+        gate_mark = md.get("gate")
+        if md.get("orphaned") and not (isinstance(gate_mark, dict) and gate_mark.get(
+                "action") == "quarantine_replacement"):
             out.append(_ann(
                 e, AnnotationKind.ANOMALY, "orphaned_response",
                 f"response id={md.get('jsonrpc_id')} matched no request",
@@ -329,6 +333,23 @@ def semantic_taint(trace: InteractionTrace) -> list[Annotation]:
     return out
 
 
+# Why a gate block happened, keyed by the marker's data.reason. None is the
+# original M5 block: a call naming a tool outside the declared surface.
+_GATE_BLOCK_WHY = {
+    None: "outside the declared surface",
+    "pii_exfiltration": "its params carried a credential",
+    "taint_detected": "its params carried a prompt-injection delimiter",
+    "schema_violation": "its arguments violated the declared inputSchema",
+    "retry_loop_exceeded": "an identical call repeated past the retry limit",
+    "attestation_failed": "caller attestation was missing, expired, or invalid",
+    "params_too_deep": "its params were nested too deeply to inspect",
+    "params_too_large": "its params exceeded the inspection size limit",
+    "batch_unsupported": "JSON-RPC batch refused; no element was forwarded",
+    "uninspectable_frame": "the gate could not parse it unambiguously",
+    "frame_too_deep": "it was nested too deeply to parse",
+}
+
+
 def gate_actions(trace: InteractionTrace) -> list[Annotation]:
     """
     Gate enforcement (M5) surfaced as INFO annotations — the record that
@@ -341,17 +362,42 @@ def gate_actions(trace: InteractionTrace) -> list[Annotation]:
         if not isinstance(g, dict):
             continue
         if g.get("action") == "blocked":
+            reason = g.get("reason")
+            tool = g.get("tool")
+            why = _GATE_BLOCK_WHY.get(reason) if isinstance(reason, str) or reason is None else None
+            if why is None:   # strict-mode faults and future reasons
+                why = f"a required check could not complete ({reason})"
+            what = f"tools/call '{tool}'" if tool is not None else "a client frame"
             out.append(_ann(
                 e, AnnotationKind.INFO, "gate_blocked",
-                f"gate blocked tools/call '{g.get('tool')}' — outside the "
-                f"declared surface; the server never saw this frame",
-                severity=1, tool=g.get("tool")))
+                f"gate blocked {what} — {why}; the server never saw this frame",
+                severity=1, tool=tool, reason=reason))
         elif g.get("action") == "injected":
             out.append(_ann(
                 e, AnnotationKind.INFO, "gate_injected_response",
                 f"error response synthesized by the gate for blocked call "
                 f"'{g.get('tool')}'; the server never sent this frame",
                 severity=1, tool=g.get("tool")))
+        elif g.get("action") == "quarantined":
+            reduced = " (delivered in reduced form)" if g.get("reduced") else ""
+            out.append(_ann(
+                e, AnnotationKind.INFO, "gate_quarantined",
+                f"gate neutralized prompt-injection text in a resources/read "
+                f"reply for '{g.get('uri')}'{reduced}; the client never saw "
+                f"this original", severity=1, uri=g.get("uri")))
+        elif g.get("action") == "quarantine_replacement":
+            out.append(_ann(
+                e, AnnotationKind.INFO, "gate_quarantine_replacement",
+                f"neutralized resources/read reply the client received in "
+                f"place of the original", severity=1, uri=g.get("uri")))
+        elif g.get("action") in ("quarantine_dropped", "quarantine_withheld"):
+            verb = ("withheld (strict mode)" if g.get("action") == "quarantine_withheld"
+                    else "dropped")
+            out.append(_ann(
+                e, AnnotationKind.INFO, "gate_" + g["action"],
+                f"gate {verb} a server frame it could not safely deliver "
+                f"({g.get('reason') or 'quarantine'}); the client never saw it",
+                severity=1, reason=g.get("reason"), uri=g.get("uri")))
         elif g.get("action") == "gate_skipped":
             # The gate records the first fault as `reason` and any later
             # ones in `also_skipped`; surface all of them, since a config
