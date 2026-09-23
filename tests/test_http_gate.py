@@ -891,6 +891,18 @@ class TestGateCLISurface(unittest.TestCase):
             with contextlib.redirect_stderr(io.StringIO()):
                 self.assertEqual(tap.main(args), 2, args)
 
+    def test_strict_over_http_is_refused_not_ignored(self):
+        """--strict configures the stdio Gate only; the HTTP gate must refuse
+        it rather than start without the fail-closed posture it asked for."""
+        import contextlib
+        import io
+        with mock.patch.object(tap, '_run_http_gate', return_value=0) as run:
+            with contextlib.redirect_stderr(io.StringIO()) as err:
+                self.assertEqual(tap.main(['gate', '--strict', '--transport', 'http',
+                                           '--url', 'http://127.0.0.1:1/mcp']), 2)
+        run.assert_not_called()
+        self.assertIn('--strict', err.getvalue())
+
     def test_passive_wrap_over_http_is_unchanged(self):
         """`wrap --transport http` must not acquire a gate by accident."""
         import contextlib

@@ -1741,6 +1741,12 @@ def main(argv: list[str]) -> int:
             print("glassport: --controllable applies to the stdio gate only",
                   file=sys.stderr)
             return 2
+        if gate is not None and gate.strict:
+            # Same reasoning for --strict: it configures the stdio Gate's
+            # fail-closed posture, which the HTTP gate never consults.
+            print("glassport: --strict applies to the stdio gate only",
+                  file=sys.stderr)
+            return 2
         from glassport.adapters.mcp_http import run_http_tap
         try:
             if gate is not None:
