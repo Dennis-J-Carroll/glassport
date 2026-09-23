@@ -384,6 +384,16 @@ class TestGateInTrace(unittest.TestCase):
         self.assertIn("credential", blocked["pii_exfiltration"])
         self.assertNotIn("declared surface", blocked["pii_exfiltration"])
         self.assertIn("batch", blocked["batch_unsupported"])       # now in the trace
+        injected = [a.explanation for a in anns if a.subcategory == "gate_injected_response"]
+        self.assertFalse(any("'None'" in text for text in injected), injected)
+
+    def test_batch_is_labelled_as_a_batch_in_report_and_tui(self):
+        from glassport import tui
+        trace, _, _ = self.gated_session()
+        (batch,) = [e for e in trace.events
+                    if e.metadata.get("batch") and e.metadata.get("dir") == "c2s"]
+        self.assertIn("batch", report_mod._event_label(batch).lower())
+        self.assertIn("batch", tui._event_label(batch).lower())
 
     def test_quarantine_is_visible_and_not_an_orphan(self):
         trace, anns, violations = self.gated_session()

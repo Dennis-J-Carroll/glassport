@@ -375,8 +375,10 @@ def gate_actions(trace: InteractionTrace) -> list[Annotation]:
         elif g.get("action") == "injected":
             out.append(_ann(
                 e, AnnotationKind.INFO, "gate_injected_response",
-                f"error response synthesized by the gate for blocked call "
-                f"'{g.get('tool')}'; the server never sent this frame",
+                f"error response synthesized by the gate for "
+                + (f"blocked call '{g.get('tool')}'" if g.get("tool") is not None
+                   else "a blocked client frame")
+                + "; the server never sent this frame",
                 severity=1, tool=g.get("tool")))
         elif g.get("action") == "quarantined":
             reduced = " (delivered in reduced form)" if g.get("reduced") else ""

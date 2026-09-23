@@ -82,6 +82,8 @@ def _clock(ts: str) -> str:
 
 def _event_label(event) -> str:
     md = event.metadata
+    if md.get("batch"):
+        return "JSON-RPC batch"
     if md.get("unparsed"):
         return "raw (unparsed line)"
     if event.kind == EventKind.TOOL_CALL:

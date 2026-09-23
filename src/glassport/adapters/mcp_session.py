@@ -122,7 +122,8 @@ class _TraceBuilder:
             # raw/unparseable wire line — preserve it as a MESSAGE so no
             # data is lost on import (Open design Q #2: don't drop on ingest)
             raw = entry.get("raw")
-            if raw is None and isinstance(frame, list):
+            is_batch = raw is None and isinstance(frame, list)
+            if is_batch:
                 # a JSON-RPC batch (the gate refuses these): keep it as one
                 # MESSAGE so the wire record and its gate marker survive import
                 try:
@@ -138,7 +139,7 @@ class _TraceBuilder:
                 parts=[Part(kind=PartKind.TEXT, content=raw)],
                 parent_event_id=last_event_id,
                 metadata={"seq": entry.get("seq"), "unparsed": True,
-                          "dir": entry.get("dir")},
+                          "dir": entry.get("dir"), "batch": is_batch},
             )
             events.append(ev)
             self.last_event_id = ev.id

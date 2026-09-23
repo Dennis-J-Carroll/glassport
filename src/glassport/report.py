@@ -126,6 +126,8 @@ def _event_label(e: Event) -> str:
                 label += " · ERROR"
         return label
     if e.kind == EventKind.MESSAGE:
+        if md.get("batch"):
+            return "JSON-RPC batch"
         if md.get("unparsed"):
             return "unparseable wire line"
         if md.get("responds_to"):
