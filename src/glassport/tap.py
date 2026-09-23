@@ -1165,6 +1165,18 @@ glassport — passive MCP stdio proxy
 """
 
 
+def _escape_unencodable_output() -> None:
+    """Session logs can carry lone surrogates (json.loads accepts "\\ud800")
+    that a UTF-8 stdout cannot encode. Print them backslash-escaped, which
+    inside JSON output is still a valid escape, rather than crash mid-report.
+    A stream without reconfigure() (e.g. a test's StringIO) is left as is."""
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(errors="backslashreplace")
+        except (AttributeError, ValueError, OSError):
+            pass
+
+
 def main(argv: list[str]) -> int:
     if not argv or argv[0] in ("-h", "--help"):
         print(USAGE)
@@ -1195,6 +1207,7 @@ def main(argv: list[str]) -> int:
             print("usage: glassport summarize [--json|--sarif] <session.jsonl>",
                   file=sys.stderr)
             return 2
+        _escape_unencodable_output()
         return summarize(Path(args[0]), as_json=as_json, as_sarif=as_sarif)
 
     if argv[0] == "detect":
@@ -1204,6 +1217,7 @@ def main(argv: list[str]) -> int:
         if len(args) != 1:
             print(USAGE)
             return 2
+        _escape_unencodable_output()
         return _cmd_detect(Path(args[0]), as_sarif=as_sarif)
 
     if argv[0] == "advise":
