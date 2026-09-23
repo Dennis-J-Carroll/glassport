@@ -21,7 +21,7 @@ from glassport.adapters.mcp_session import MCPTraceBuilder
 from glassport.detectors import snapshot_pii_patterns
 from glassport.incremental import DetectorEngine, default_detectors
 from glassport.session import SessionLimits
-from glassport.tap import open_session_log
+from glassport.tap import _now_iso, open_session_log
 
 
 @dataclass(frozen=True)
@@ -321,7 +321,9 @@ class HTTPLease:
                 frame = json.loads(payload.decode('utf-8', errors='replace').rstrip('\r\n'))
             except (ValueError, RecursionError, UnicodeError):
                 frame = None
-            entry = {'seq': context.seq, 'dir': direction, 'frame': frame,
+            # Stamp the wire clock too: declaration freshness (ttlMs) is
+            # measured on it, and a disk failure must not retire a surface.
+            entry = {'seq': context.seq, 'ts': _now_iso(), 'dir': direction, 'frame': frame,
                      'raw': payload.decode('utf-8', errors='replace'), 'http_observation': facts}
         else:
             entry = receipt

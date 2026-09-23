@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import asdict, dataclass
+from datetime import datetime
 import json
 from typing import Any
 
@@ -41,6 +42,24 @@ def event_frame(event: Event) -> dict:
     return {}
 
 
+_LIST_CHANGED = "notifications/tools/list_changed"
+
+
+def _wire_seconds(timestamp) -> float | None:
+    """Epoch seconds of an ISO 8601 wire timestamp with a zone, else None.
+
+    Declaration freshness is measured on the wire clock, never the local one,
+    so a live pass and a replay of the same log reach the same answer.
+    """
+    if not isinstance(timestamp, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed.timestamp() if parsed.tzinfo is not None else None
+
+
 class SessionState:
     """Facts after the most recently observed event; never retains event history.
 
@@ -71,6 +90,10 @@ class SessionState:
         self._next_cursor: str | None = None
         self.declaration_generation: int | None = None
         self._page_pending = False
+        # Wire-clock second after which the surface stops being authority
+        # (from ttlMs), and the earliest such bound across pending pages.
+        self.surface_expires_at: float | None = None
+        self._pages_expire_at: float | None = None
 
     @classmethod
     def from_trace(cls, trace):
@@ -121,6 +144,7 @@ class SessionState:
         self.surface = None
         self.tool_defs = {}
         self.surface_event_id = self.surface_seq = None
+        self.surface_expires_at = None
 
     def can_continue(self, cursor) -> bool:
         return (self.declaration_generation is not None and self._pages is not None
@@ -130,6 +154,7 @@ class SessionState:
         self._unknown_surface()
         self._pages = self._next_cursor = self.declaration_generation = None
         self._page_pending = False
+        self._pages_expire_at = None
 
     def observe(self, event: Event) -> None:
         """Fold one normalized event in wire order, without modifying evidence."""
@@ -145,6 +170,17 @@ class SessionState:
             self.limit_reasons.add("request_correlation_saturated")
         frame = event_frame(event)
         if md.get("declaration_correlation_lost"):
+            self._invalidate_declaration()
+        if self.surface_expires_at is not None:
+            now = _wire_seconds(event.timestamp)
+            if now is None or now > self.surface_expires_at:
+                # Stale: unknown, never empty. Retire only the current surface;
+                # a refresh already requested may still land and restore it.
+                self._unknown_surface()
+        if (event.kind == EventKind.MESSAGE and md.get("server_initiated")
+                and md.get("method") == _LIST_CHANGED):
+            # Only the server can retract its declaration. Any reply still in
+            # flight carries the old generation and is then ignored.
             self._invalidate_declaration()
         if event.kind == EventKind.MESSAGE and not md.get("server_initiated"):
             method = md.get("method")
@@ -194,6 +230,15 @@ class SessionState:
             return
         if request_cursor is None:
             self._pages = []
+            self._pages_expire_at = None
+        if isinstance(result, dict) and "ttlMs" in result:
+            ttl, sent = result["ttlMs"], _wire_seconds(event.timestamp)
+            if type(ttl) is not int or ttl < 0 or sent is None:
+                self._invalidate_declaration()   # an unreadable promise proves nothing
+                return
+            expires = sent + ttl / 1000
+            if self._pages_expire_at is None or expires < self._pages_expire_at:
+                self._pages_expire_at = expires
         combined = (self._pages or []) + tools
         tools = self._bounded_tools(combined)
         if tools is None or (next_cursor is not None and (
@@ -209,6 +254,7 @@ class SessionState:
         self._pages = self._next_cursor = None
         self.tool_defs = {t["name"]: t for t in tools}
         self.surface = frozenset(self.tool_defs)
+        self.surface_expires_at, self._pages_expire_at = self._pages_expire_at, None
         self.surface_event_id = event.id
         self.surface_seq = md.get("seq")
         if self.first_surface is None:
