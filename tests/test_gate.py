@@ -48,6 +48,17 @@ def declared_gate() -> Gate:
     return g
 
 
+
+def _require_posix_override(test: unittest.TestCase) -> None:
+    """Skip the rest of a test that exercises the enforcement override.
+
+    On non-POSIX the override file is inert by design (enforcement stays on;
+    see Gate._enforcement_on), so only the enforcing half of such a test
+    applies there. That inertness is locked by test_override_is_inert_off_posix.
+    """
+    if os.name != "posix":
+        test.skipTest("gate override requires POSIX uid/st_mode semantics")
+
 class TestGateDecisions(unittest.TestCase):
     def test_forwards_until_declaration_seen(self):
         # no tools/list ever arrives: after the hold timeout the gate
@@ -946,6 +957,8 @@ class TestGateHostileShapes(unittest.TestCase):
             declared_gate().check_c2s(self.deep_call(MAX_ARGUMENT_DEPTH, leaf="ok")),
             ("forward", None, None))
 
+    @unittest.skipUnless(os.name == "posix",
+                         "gate override requires POSIX uid/st_mode semantics")
     def test_deep_arguments_forward_with_marker_when_disabled(self):
         from glassport.tap import MAX_ARGUMENT_DEPTH
         with tempfile.TemporaryDirectory() as tmp:
@@ -1045,6 +1058,7 @@ class TestGateHostileShapes(unittest.TestCase):
         self.assertEqual(info, {"action": "blocked", "tool": None,
                                 "reason": "frame_too_deep"})
         self.assertEqual(g.blocked_count, 1)
+        _require_posix_override(self)
         with tempfile.TemporaryDirectory() as tmp:
             action, _, info = self.disabled_gate(tmp).check_c2s(deep)
         self.assertEqual(action, "forward")
@@ -1247,6 +1261,7 @@ class TestGateHostileShapes(unittest.TestCase):
         self.assertEqual(out, b"")
         self.assertEqual(entries[0]["gate"], {"action": "quarantine_dropped",
                                               "reason": "frame_too_deep"})
+        _require_posix_override(self)
         with tempfile.TemporaryDirectory() as tmp:
             g = self.pending_read_gate(self.disabled_gate(tmp))
             out, entries, _ = self.pump_logged(deep, "s2c", g)
@@ -1328,8 +1343,18 @@ class TestGateAstraFindings(unittest.TestCase):
                 g = self.control_gate(tmp, value)
                 self.assertTrue(g._enforcement_on())
                 self.assertEqual(g.check_c2s(self.call({"secret": self.PEM}))[0], "block")
+        _require_posix_override(self)
         with tempfile.TemporaryDirectory() as tmp:
             self.assertFalse(self.control_gate(tmp, "false")._enforcement_on())
+
+    @unittest.skipIf(os.name == "posix", "POSIX honours a well-formed override")
+    def test_override_is_inert_off_posix(self):
+        # No uid/permission proof is expressible here, so even a well-formed
+        # {"enforce": false} must leave enforcement on (fail closed).
+        with tempfile.TemporaryDirectory() as tmp:
+            g = self.control_gate(tmp, "false")
+            self.assertTrue(g._enforcement_on())
+            self.assertEqual(g.check_c2s(self.call({"secret": self.PEM}))[0], "block")
 
     # A5 / A6
     BIG = "1" * 5000   # past CPython's int_max_str_digits (4300)
@@ -1372,6 +1397,7 @@ class TestGateAstraFindings(unittest.TestCase):
                 self.assertEqual(entries[0]["gate"]["reason"], "uninspectable_frame")
         for blank in (b"\n", b"  \r\n"):
             self.assertEqual(declared_gate().check_c2s(blank), ("forward", None, None))
+        _require_posix_override(self)
         with tempfile.TemporaryDirectory() as tmp:
             action, _, info = self.control_gate(tmp, "false").check_c2s(self.UNINSPECTABLE[0])
         self.assertEqual((action, info["action"], info["reason"]),
@@ -1385,6 +1411,7 @@ class TestGateAstraFindings(unittest.TestCase):
                 out, _, entries = self.pump_out(raw + TOOLS_LIST_RESULT, "s2c", Gate())
                 self.assertEqual(out, TOOLS_LIST_RESULT)
         self.assertEqual(Gate().check_s2c(b"\n"), ("forward", None, None))
+        _require_posix_override(self)
         with tempfile.TemporaryDirectory() as tmp:
             action, _, info = self.control_gate(tmp, "false").check_s2c(self.UNINSPECTABLE[0])
         self.assertEqual((action, info["action"], info["reason"]),
@@ -1424,6 +1451,8 @@ class TestGateAstraFindings(unittest.TestCase):
                 self.assertEqual(declared_gate().check_c2s(line(batch)), ("block", None, {
                     "action": "blocked", "tool": None, "reason": "batch_unsupported"}))
 
+    @unittest.skipUnless(os.name == "posix",
+                         "gate override requires POSIX uid/st_mode semantics")
     def test_batch_forwarded_with_marker_when_disabled(self):
         with tempfile.TemporaryDirectory() as tmp:
             g = self.control_gate(tmp, "false")
@@ -1640,6 +1669,7 @@ class TestGateStrictMode(unittest.TestCase):
                              ("taint_scan_error", 8))
             action, _, info = declared_gate().check_c2s(self.call())
             self.assertEqual((action, info["reason"]), ("forward", "taint_scan_error"))
+            _require_posix_override(self)
             with tempfile.TemporaryDirectory() as tmp:   # explicit override wins
                 g = Gate(strict=True, control_path=Path(tmp) / "g")
                 g.observe_s2c(TOOLS_LIST_RESULT)
