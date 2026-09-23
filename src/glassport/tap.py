@@ -344,6 +344,50 @@ class Gate:
         # disabled still carries a "gate_disabled" marker in the log.
         self.control_path = control_path
 
+    def _error_object(self, rid, reason: str, tool: str | None, message: str,
+                      suggestion: str | None = None, **extra_data) -> dict | None:
+        """The JSON-RPC error object behind _block, or None when `rid` is
+        unaddressable (see _block)."""
+        if rid is None or isinstance(rid, bool) or not isinstance(rid, (str, int, float)):
+            return None
+        if isinstance(rid, float) and not math.isfinite(rid):
+            return None
+        data = {"glassport": "gate_blocked", "reason": reason, **extra_data}
+        if tool is not None:
+            data["tool"] = tool
+        if suggestion is not None:
+            data["suggestion"] = suggestion
+        return {"jsonrpc": "2.0", "id": rid,
+                "error": {"code": -32000, "message": message, "data": data}}
+
+    def _block_batch(self, batch: list) -> tuple[str, bytes | None, dict | None]:
+        """JSON-RPC batches are refused whole while enforcing: MCP 2025-06-18
+        removed batching, and checking elements one by one would mean
+        splitting a byte-faithful relay. No element is ever forwarded. Each
+        addressable request gets a -32000 batch_unsupported error, returned
+        together as one batch response; notifications, client replies,
+        unaddressable ids, and nested arrays get nothing, and a batch with no
+        addressable request gets no response at all."""
+        if not self._enforcement_on():
+            return ("forward", None,
+                    {"action": "gate_disabled", "tool": None,
+                     "reason": "batch_unsupported"})
+        self.blocked_count += 1
+        errors = []
+        for element in batch:
+            if isinstance(element, dict) and "method" in element:
+                err = self._error_object(
+                    element.get("id"), "batch_unsupported", None,
+                    "glassport gate: JSON-RPC batch requests are not supported; "
+                    "no request in this batch was forwarded",
+                    suggestion="Send each request as its own message.")
+                if err is not None:
+                    errors.append(err)
+        response = ((json.dumps(errors, ensure_ascii=True) + "\n").encode("utf-8")
+                    if errors else None)
+        return ("block", response,
+                {"action": "blocked", "tool": None, "reason": "batch_unsupported"})
+
     def _block(self, rid, reason: str, tool: str | None, message: str,
                suggestion: str | None = None, **extra_data) -> bytes | None:
         """Build the synthesized JSON-RPC error for any gate block.
@@ -358,22 +402,13 @@ class Gate:
         re-encoding a deeply nested id could itself overflow and turn the
         block into a fail-open forward.
         """
-        if rid is None or isinstance(rid, bool) or not isinstance(rid, (str, int, float)):
+        err = self._error_object(rid, reason, tool, message, suggestion, **extra_data)
+        if err is None:
             return None
-        if isinstance(rid, float) and not math.isfinite(rid):
-            return None
-        data = {"glassport": "gate_blocked", "reason": reason, **extra_data}
-        if tool is not None:
-            data["tool"] = tool
-        if suggestion is not None:
-            data["suggestion"] = suggestion
         # ASCII-escaped: the message quotes caller text, which may hold lone
         # surrogates that UTF-8 cannot encode; the resulting exception would
         # otherwise turn a block into a fail-open forward.
-        return (json.dumps({
-            "jsonrpc": "2.0", "id": rid,
-            "error": {"code": -32000, "message": message, "data": data},
-        }, ensure_ascii=True) + "\n").encode("utf-8")
+        return (json.dumps(err, ensure_ascii=True) + "\n").encode("utf-8")
 
     def _idempotency_hit(self, name: str, arguments: Any) -> bool:
         """Detect repeated canonical calls in a monotonic TTL window."""
@@ -463,7 +498,9 @@ class Gate:
         except (json.JSONDecodeError, ValueError, UnicodeDecodeError):
             return self._uninspectable_s2c("uninspectable_frame")
         if isinstance(frame, list):
-            return ("forward", None, None)
+            # the gate refuses client batches, so a server batch answers
+            # nothing legitimate; it could smuggle a read reply past the scan
+            return self._uninspectable_s2c("batch_unsupported")
         if not isinstance(frame, dict):
             return self._uninspectable_s2c("uninspectable_frame")
         if "method" in frame:
@@ -547,7 +584,7 @@ class Gate:
         except (json.JSONDecodeError, ValueError, UnicodeDecodeError):
             return self._uninspectable_c2s("uninspectable_frame")
         if isinstance(frame, list):
-            return ("forward", None, None)
+            return self._block_batch(frame)
         if not isinstance(frame, dict):
             return self._uninspectable_c2s("uninspectable_frame")
         method = frame.get("method")
