@@ -506,7 +506,8 @@ def _observe_sse(resp, wfile, lease, cap):
 
 
 def _gate_body_problem(body: bytes):
-    """(status, reason) when gate mode must refuse this POST body, else None.
+    """(status, reason, delivery code) when gate mode must refuse this POST
+    body, else None.
 
     Enforcement is only as good as the analyser's reading of the request. A
     body it cannot read as exactly one JSON object -- the same object any
@@ -517,9 +518,20 @@ def _gate_body_problem(body: bytes):
     try:
         frame = _loads(body.decode("utf-8"))
     except (UnicodeDecodeError, ValueError, RecursionError):
-        return 400, "request body is not one unambiguous JSON object"
+        return 400, "request body is not one unambiguous JSON object", "framing_rejected"
     if not isinstance(frame, dict):
-        return 400, "request body is not one JSON-RPC object"
+        return 400, "request body is not one JSON-RPC object", "framing_rejected"
+    if frame.get("method") == "tools/call":
+        # MCP makes tools/call a request: an id is required, and it must be a
+        # string or an integer (never null). Without one there is nothing to
+        # correlate or answer, so it is invalid input, not a policy block.
+        # Only fixed text is returned; nothing from the request is echoed.
+        if "id" not in frame:
+            return 400, "tools/call requires a request id", "invalid_mcp_request"
+        rid = frame["id"]
+        if not (type(rid) is int or type(rid) is str):
+            return (400, "tools/call id must be a string or an integer",
+                    "invalid_mcp_request")
     return None
 
 
@@ -645,9 +657,11 @@ def _make_handler(remote, log: SessionLog, observer=None, journal=None):
                     return None, False
                 head = self.rfile.read(length) if length else b""
                 problem = (_gate_body_problem(head) if len(head) == length
-                           else (400, "request body shorter than content-length"))
+                           else (400, "request body shorter than content-length",
+                                 "framing_rejected"))
                 if problem is not None:
-                    self._reject(*problem)
+                    status, why, self._refusal_code = problem
+                    self._reject(status, why)
                     return None, False
             else:
                 head = self.rfile.read(min(length, _MAX_LOGGED_BODY)) if length else b""
@@ -674,6 +688,7 @@ def _make_handler(remote, log: SessionLog, observer=None, journal=None):
             return _stream(), True
 
         def _relay(self, method: str) -> None:
+            self._refusal_code = "framing_rejected"
             self._observation_lease = None
             self._c2s_observation = None
             if gate_mode and not self._local_request_ok():
@@ -693,8 +708,10 @@ def _make_handler(remote, log: SessionLog, observer=None, journal=None):
             try:
                 body, ok = self._read_client_body()
                 if not ok:
-                    # Ambiguous framing: refused locally, never begun upstream.
-                    delivery = ("not_attempted", "framing_rejected", None)
+                    # Refused locally, never begun upstream: ambiguous framing,
+                    # or (gate mode) invalid MCP input such as an id-less call.
+                    delivery = ("not_attempted",
+                                getattr(self, "_refusal_code", "framing_rejected"), None)
                     if journal is not None:
                         epoch = _lease_epoch(self._observation_lease)
                         if epoch is not None:
