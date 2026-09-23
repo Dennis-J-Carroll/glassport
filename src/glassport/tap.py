@@ -316,9 +316,14 @@ class Gate:
                  idempotency_ttl: float = 5.0,
                  idempotency_max_repeats: int = 3,
                  enforce_attestation: bool = False,
-                 attestation_pubkey_b64: str | None = None) -> None:
+                 attestation_pubkey_b64: str | None = None,
+                 strict: bool = False) -> None:
         if enforce_attestation:
             validate_public_key(attestation_pubkey_b64)
+        # Fault policy. False (default): a check that cannot run fails open
+        # with a logged gate_skipped marker. True (opt-in, `gate --strict`):
+        # it blocks instead, naming the fault in data.reason.
+        self.strict = strict
         self._lock = threading.Lock()
         self._declared: set[str] | None = None   # None until tools/list seen
         self._declared_defs: dict[str, dict] = {}  # name -> full tool def
@@ -359,6 +364,51 @@ class Gate:
             data["suggestion"] = suggestion
         return {"jsonrpc": "2.0", "id": rid,
                 "error": {"code": -32000, "message": message, "data": data}}
+
+    def _strict_block(self, frame: dict, tool: str | None, skipped: dict
+                      ) -> tuple[str, bytes | None, dict | None]:
+        """Strict mode: a check that could not run blocks the call. The first
+        fault is the reason; any later ones travel in also_skipped."""
+        reasons = [skipped.get("reason"), *skipped.get("also_skipped", [])]
+        reasons = [r for r in reasons if isinstance(r, str)] or ["gate_check_error"]
+        extra = {"also_skipped": reasons[1:]} if len(reasons) > 1 else {}
+        self.blocked_count += 1
+        response = self._block(
+            frame.get("id"), reasons[0], tool,
+            f"glassport gate: tools/call '{tool}' blocked — strict mode: "
+            f"{', '.join(reasons)} could not run",
+            suggestion="Retry later; the gate could not complete its checks.",
+            **extra)
+        return ("block", response,
+                {"action": "blocked", "tool": tool, "reason": reasons[0], **extra})
+
+    def fault_verdict(self, line: bytes) -> tuple[str, bytes | None, dict | None]:
+        """Decision for a line whose check_c2s raised. Default: forward the
+        original bytes with a gate_skipped marker (fail open, visibly).
+        Strict and enforcing: block, answering the request id if one can be
+        read. Never raises."""
+        forward = ("forward", None,
+                   {"action": "gate_skipped", "reason": "gate_check_error"})
+        if not self.strict:
+            return forward
+        try:
+            if not self._enforcement_on():
+                return forward
+        except Exception:
+            pass   # strict: an unreadable override keeps enforcement on
+        response = None
+        try:
+            frame = _loads(line)
+            if isinstance(frame, dict):
+                response = self._block(
+                    frame.get("id"), "gate_check_error", None,
+                    "glassport gate: request blocked — strict mode: the gate "
+                    "check failed")
+        except Exception:
+            response = None
+        self.blocked_count += 1
+        return ("block", response,
+                {"action": "blocked", "tool": None, "reason": "gate_check_error"})
 
     def _block_batch(self, batch: list) -> tuple[str, bytes | None, dict | None]:
         """JSON-RPC batches are refused whole while enforcing: MCP 2025-06-18
@@ -518,6 +568,7 @@ class Gate:
         if "method" in frame:
             return ("forward", None, None)
         uri = None
+        rid = None
         try:
             rid = frame.get("id")
             uri = self._take_pending_read(rid)
@@ -574,6 +625,17 @@ class Gate:
                 return ("rewrite", new_line,
                         {"action": "quarantined", "uri": uri, "reduced": True})
         except Exception:
+            if self.strict and self._enforcement_on():
+                # strict: never release a read reply the quarantine could
+                # not finish; answer its id with an error, or drop it
+                withheld = self._block(
+                    rid, "quarantine_scan_error", None,
+                    "glassport gate: resource content withheld — strict mode: "
+                    "the quarantine scan failed")
+                if withheld is None:
+                    return ("drop", None, {"action": "quarantine_dropped",
+                                           "uri": uri, "reason": "quarantine_scan_error"})
+                return ("rewrite", withheld, {"action": "quarantine_withheld", "uri": uri})
             return ("forward", None,
                     {"action": "quarantine_scan_error", "uri": uri})
         return ("rewrite", new_line, {"action": "quarantined", "uri": uri})
@@ -854,6 +916,8 @@ class Gate:
                 return ("block", response,
                         {"action": "blocked", "tool": name,
                          "reason": "pii_exfiltration"})
+            if self.strict and forward_info is not None and self._enforcement_on():
+                return self._strict_block(frame, name, forward_info)
             return ("forward", None, forward_info)
 
         if not self._enforcement_on():
@@ -903,12 +967,16 @@ def pump(src, dst, log: SessionLog | None, direction: str,
                 try:
                     action, response, info = gate.check_c2s(line)
                 except Exception:
-                    # Fail open, visibly: an unexpected gate fault must not
-                    # stop the relay. Caller-chosen shapes are handled inside
-                    # check_c2s, so this is for defects, not attacker input.
-                    action, response, info = (
-                        "forward", None,
-                        {"action": "gate_skipped", "reason": "gate_check_error"})
+                    # An unexpected gate fault must not stop the relay. By
+                    # default it fails open, visibly; `gate --strict` blocks.
+                    # Caller-chosen shapes are handled inside check_c2s, so
+                    # this is for defects, not attacker input.
+                    try:
+                        action, response, info = gate.fault_verdict(line)
+                    except Exception:
+                        action, response, info = (
+                            "forward", None,
+                            {"action": "gate_skipped", "reason": "gate_check_error"})
                 if action == "block" and info is not None:
                     if log is not None:
                         log.record(direction, line, gate=info)
@@ -930,8 +998,16 @@ def pump(src, dst, log: SessionLog | None, direction: str,
                 try:
                     s2c_action, s2c_new_line, s2c_info = gate.check_s2c(line)
                 except Exception:
+                    strict_now = getattr(gate, "strict", False)
+                    try:
+                        strict_now = strict_now and gate._enforcement_on()
+                    except Exception:
+                        pass   # strict: an unreadable override keeps enforcing
                     s2c_action, s2c_new_line, s2c_info = (
-                        "forward", None, {"action": "quarantine_scan_error"})
+                        ("drop", None, {"action": "quarantine_dropped",
+                                        "reason": "quarantine_scan_error"})
+                        if strict_now
+                        else ("forward", None, {"action": "quarantine_scan_error"}))
                 if s2c_action == "drop":
                     if log is not None:
                         log.record(direction, line, gate=s2c_info)
@@ -1295,9 +1371,11 @@ glassport — passive MCP stdio proxy
                    glassport wrap --transport http --url <remote-mcp-url>
                         (passive MITM over MCP Streamable-HTTP; logs both
                          directions to the same JSONL as the stdio tap)
-  gate:            glassport gate [--controllable] [--log-dir DIR] -- <server command...>
+  gate:            glassport gate [--controllable] [--strict] [--log-dir DIR] -- <server command...>
                    (active: blocks tools/call outside the declared surface;
-                    --controllable lets `tui --gate-control` toggle it)
+                    --controllable lets `tui --gate-control` toggle it;
+                    --strict blocks when a check cannot run instead of
+                    forwarding with a logged gate_skipped marker)
   audit:           glassport audit <path> [--json|--sarif]
                         [--provenance [--provenance-cache DIR]
                          [--provenance-refresh]] | audit --rubric
@@ -1346,6 +1424,18 @@ def _escape_unencodable_output() -> None:
             pass
 
 
+def _parse_gate_flags(argv: list[str]) -> tuple[list[str], bool, bool]:
+    """Strip leading `gate` flags in any order: (rest, controllable, strict)."""
+    controllable = strict = False
+    while argv and argv[0] in ("--controllable", "--strict"):
+        if argv[0] == "--controllable":
+            controllable = True
+        else:
+            strict = True
+        argv = argv[1:]
+    return argv, controllable, strict
+
+
 def main(argv: list[str]) -> int:
     if not argv or argv[0] in ("-h", "--help"):
         print(USAGE)
@@ -1358,11 +1448,8 @@ def main(argv: list[str]) -> int:
     if argv[0] == "wrap":
         argv = argv[1:]
     elif argv[0] == "gate":
-        argv = argv[1:]
-        if argv and argv[0] == "--controllable":
-            gate_controllable = True
-            argv = argv[1:]
-        gate = Gate()
+        argv, gate_controllable, strict = _parse_gate_flags(argv[1:])
+        gate = Gate(strict=strict)
     if not argv:
         print(USAGE)
         return 2
