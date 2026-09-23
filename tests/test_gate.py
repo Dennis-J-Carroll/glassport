@@ -324,6 +324,26 @@ class TestGateInTrace(unittest.TestCase):
         self.assertEqual(ann.kind, AnnotationKind.INFO)
         self.assertIn("early_bird", ann.explanation)
 
+    def test_every_skipped_check_reaches_the_annotation(self):
+        # With crypto absent every frame's reason is attestation_unavailable;
+        # a scanner fault recorded after it must not vanish from analysis.
+        skipped = {"schema_version": "0.1", "seq": 6, "ts": "t6", "dir": "c2s",
+                   "frame": {"jsonrpc": "2.0", "id": 3, "method": "tools/call",
+                             "params": {"name": "web_search", "arguments": {}}},
+                   "raw": None,
+                   "gate": {"action": "gate_skipped", "tool": "web_search",
+                            "reason": "attestation_unavailable",
+                            "also_skipped": ["taint_scan_error", "pii_scan_error"]}}
+        trace = from_mcp_session(handshake() + [json.dumps(skipped)])
+        ann = next(a for a in detectors.gate_actions(trace)
+                   if a.subcategory == "gate_skipped")
+        self.assertEqual(ann.metadata["reason"], "attestation_unavailable")
+        self.assertEqual(ann.metadata["also_skipped"],
+                         ["taint_scan_error", "pii_scan_error"])
+        for reason in ("attestation_unavailable", "taint_scan_error", "pii_scan_error"):
+            self.assertIn(reason, ann.explanation)
+        self.assertNotIn("hold window", ann.explanation)   # not a timeout
+
     def test_annotate_includes_gate_actions(self):
         trace = from_mcp_session(gated_log_lines())
         anns = detectors.annotate(trace)

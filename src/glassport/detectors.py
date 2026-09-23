@@ -344,12 +344,24 @@ def gate_actions(trace: InteractionTrace) -> list[Annotation]:
                 f"'{g.get('tool')}'; the server never sent this frame",
                 severity=1, tool=g.get("tool")))
         elif g.get("action") == "gate_skipped":
+            # The gate records the first fault as `reason` and any later
+            # ones in `also_skipped`; surface all of them, since a config
+            # reason (attestation_unavailable) can precede a scanner fault.
+            reason = g.get("reason")
+            also = g.get("also_skipped")
+            also = [r for r in also if isinstance(r, str)] if isinstance(also, list) else []
+            if reason in (None, "no_surface_timeout") and not also:
+                why = ("no tools/list response arrived within the hold "
+                       "window, so this call was forwarded unenforced")
+            else:
+                skipped = ", ".join(str(r) for r in (reason, *also) if r is not None)
+                why = (f"these checks could not run ({skipped}), so it was "
+                       f"forwarded without them")
             out.append(_ann(
                 e, AnnotationKind.INFO, "gate_skipped",
-                f"gate failed open for tools/call '{g.get('tool')}' — "
-                f"no tools/list response arrived within the hold window, "
-                f"so this call was forwarded unenforced",
-                severity=1, tool=g.get("tool"), reason=g.get("reason")))
+                f"gate failed open for tools/call '{g.get('tool')}' — {why}",
+                severity=1, tool=g.get("tool"), reason=reason,
+                also_skipped=also))
     return out
 
 
