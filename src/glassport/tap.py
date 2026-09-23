@@ -1508,14 +1508,16 @@ def _run_http_gate(remote_url: str, log_dir: Path) -> int:
     the observe command guarantees about session isolation, bounded state and
     fail-open recording holds here unchanged.
     """
-    from glassport.adapters.mcp_http import _validate_remote, run_http_tap
+    from glassport.adapters.mcp_http import GATE_MAX_BODY, _validate_remote, run_http_tap
     from glassport.decision_journal import MODE_GATE, DecisionJournal
-    from glassport.http_sessions import HTTPObserver
+    from glassport.http_sessions import HTTPObserver, HTTPRegistryLimits
 
     # Validate before building anything, so a bad URL never leaves an observer
     # and a journal dangling behind an early return (as `observe` does).
     _validate_remote(remote_url)
-    observer = HTTPObserver(log_dir)
+    # Gate mode refuses any body its observer cannot fold whole, so the
+    # observer's frame limit is the enforcement inspection limit.
+    observer = HTTPObserver(log_dir, limits=HTTPRegistryLimits(max_frame_bytes=GATE_MAX_BODY))
     journal = DecisionJournal(log_dir / "decisions", observer, mode=MODE_GATE)
     run_http_tap(remote_url, log_dir, observer=observer, journal=journal)
     return 0
