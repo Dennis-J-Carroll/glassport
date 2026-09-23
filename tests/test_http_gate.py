@@ -72,6 +72,8 @@ class Upstream(BaseHTTPRequestHandler):
             frame = json.loads(raw)
         except ValueError:
             frame = {}
+        if not isinstance(frame, dict):
+            frame = {}   # a batch or scalar: record it, answer as a no-op
         with type(self).lock:
             type(self).calls.append({'method': frame.get('method'),
                                      'id': frame.get('id'), 'raw': raw})
@@ -158,9 +160,9 @@ class GateCase(unittest.TestCase):
         self.addCleanup(srv.shutdown)
         return f'http://127.0.0.1:{srv.server_address[1]}/mcp'
 
-    def proxy(self, mode=dj.MODE_GATE, remote=None):
+    def proxy(self, mode=dj.MODE_GATE, remote=None, limits=None):
         remote = remote or self.upstream()
-        self.observer = HTTPObserver(self.root / 'wire')
+        self.observer = HTTPObserver(self.root / 'wire', limits=limits)
         self.journal = dj.DecisionJournal(self.root / 'decisions', self.observer,
                                           mode=mode)
         ready, box = threading.Event(), []
@@ -466,9 +468,12 @@ class TestConservativeForwarding(GateCase):
         _, body = self.call('nope')
         self.assert_forwarded(body, before)
 
-    def test_malformed_request_body_forwards(self):
-        """An unparseable body folds to no event: nothing to decide over."""
-        self.proxy()
+    def test_malformed_request_body_forwards_in_observe_mode(self):
+        """An unparseable body folds to no event: nothing to decide over, so
+        observation forwards it. Gate mode refuses it instead (see
+        TestGateModeRejectsUninspectable): forwarding bytes the analyser could
+        not read let any undeclared call through by breaking the JSON."""
+        self.proxy(mode=dj.MODE_OBSERVE)
         self.handshake()
         before = self.upstream_calls()
         request = urllib.request.Request(
@@ -517,8 +522,12 @@ class TestConservativeForwarding(GateCase):
         self.assertFalse(intent['candidate_block'])
         self.assertFalse(delivery['enforced'])
 
-    def test_oversized_tools_call_body_forwards_in_full_and_does_not_hang(self):
-        """A c2s body over `_MAX_LOGGED_BODY` is only captured up to the cap
+    def test_oversized_tools_call_body_forwards_in_full_in_observe_mode(self):
+        """Observe mode only. Gate mode refuses a body its observer cannot
+        fold whole (413) -- forwarding it unproved was a bypass: padding any
+        undeclared call past the cap carried it upstream.
+
+        A c2s body over `_MAX_LOGGED_BODY` is only captured up to the cap
         for observation (`_read_client_body` in mcp_http.py), but the relay
         still forwards the request upstream IN FULL — via chunked
         transfer-encoding, since Content-Length is a hop header the proxy
@@ -543,7 +552,8 @@ class TestConservativeForwarding(GateCase):
         threading.Thread(target=srv.serve_forever, daemon=True).start()
         self.addCleanup(srv.server_close)
         self.addCleanup(srv.shutdown)
-        self.proxy(remote=f'http://127.0.0.1:{srv.server_address[1]}/mcp')
+        self.proxy(mode=dj.MODE_OBSERVE,
+                   remote=f'http://127.0.0.1:{srv.server_address[1]}/mcp')
         self.handshake()
         since = self.intent_watermark(self._handshake_request_count)
         before = self.upstream_calls()
@@ -612,6 +622,183 @@ class TestConservativeForwarding(GateCase):
         self.assertEqual(len(received), len(before) + 1)
         self.assertEqual(received[-1]['method'], 'tools/call')
         self.assertIsNone(received[-1]['id'])
+
+
+# ── gate mode never forwards a body it cannot read unambiguously ─────────
+
+UNDECLARED_CALL = {'jsonrpc': '2.0', 'id': 9, 'method': 'tools/call',
+                   'params': {'name': 'nope', 'arguments': {}}}
+
+
+class TestGateModeRejectsUninspectable(GateCase):
+    """Each shape wraps an undeclared tools/call the gate would block if it
+    could read it. Forwarding any of them unread is a bypass: the analyser
+    and the upstream parser would disagree about what was sent."""
+
+    def raw(self, data, extra=None):
+        headers = {'Content-Type': 'application/json',
+                   'Accept': 'application/json', 'Mcp-Session-Id': 'sess-1'}
+        headers.update(extra or {})
+        request = urllib.request.Request(self.url, data=data, headers=headers)
+        try:
+            with urllib.request.urlopen(request, timeout=10) as resp:
+                return resp.status, resp.read()
+        except urllib.error.HTTPError as exc:
+            return exc.code, exc.read()
+
+    def assert_refused(self, data, code, extra=None, mode=dj.MODE_GATE):
+        self.proxy(mode=mode)
+        self.handshake()
+        before = self.upstream_calls()
+        status, _ = self.raw(data, extra)
+        self.quiesce()
+        self.assertEqual(status, code)
+        self.assertEqual(self.upstream_calls(), before)
+
+    def test_batch_is_refused(self):
+        self.assert_refused(json.dumps([UNDECLARED_CALL]).encode(), 400)
+
+    def test_duplicate_keys_are_refused_in_either_order(self):
+        for names in (('search', 'nope'), ('nope', 'search')):
+            with self.subTest(names=names):
+                self.assert_refused(
+                    ('{"jsonrpc":"2.0","id":9,"method":"tools/call","params":'
+                     '{"name":"%s","name":"%s","arguments":{}}}' % names).encode(), 400)
+
+    def test_malformed_json_is_refused(self):
+        self.assert_refused(json.dumps(UNDECLARED_CALL).encode() + b' }junk', 400)
+
+    def test_invalid_utf8_is_refused(self):
+        self.assert_refused(json.dumps(UNDECLARED_CALL).encode().replace(
+            b'"nope"', b'"no\xffpe"'), 400)
+
+    def test_utf8_bom_is_refused(self):
+        self.assert_refused(b'\xef\xbb\xbf' + json.dumps(UNDECLARED_CALL).encode(), 400)
+
+    def test_non_object_and_empty_bodies_are_refused(self):
+        for data in (b'"tools/call"', b'null', b''):
+            with self.subTest(data=data):
+                self.assert_refused(data, 400)
+
+    def test_content_encoding_is_refused(self):
+        import gzip
+        self.assert_refused(gzip.compress(json.dumps(UNDECLARED_CALL).encode()),
+                            415, {'Content-Encoding': 'gzip'})
+
+    def test_body_over_inspection_cap_is_refused(self):
+        from glassport.adapters.mcp_http import GATE_MAX_BODY
+        frame = dict(UNDECLARED_CALL, params={
+            'name': 'nope', 'arguments': {'pad': 'x' * GATE_MAX_BODY}})
+        self.assert_refused(json.dumps(frame).encode(), 413)
+
+    def test_body_between_log_cap_and_gate_cap_is_analysed_and_blocked(self):
+        """The old 1 MB observation cap was the bypass: the gate must read
+        everything it forwards, so a large undeclared call is still proved."""
+        from glassport.adapters.mcp_http import GATE_MAX_BODY, _MAX_LOGGED_BODY
+        from glassport.http_sessions import HTTPRegistryLimits
+        self.proxy(limits=HTTPRegistryLimits(max_frame_bytes=GATE_MAX_BODY))
+        self.handshake()
+        before = self.upstream_calls()
+        _, body = self.call('nope', args={'pad': 'x' * (_MAX_LOGGED_BODY + 64_000)})
+        self.quiesce()
+        self.assert_blocked(body, before)
+
+    def test_large_declared_call_still_forwards_complete(self):
+        from glassport.adapters.mcp_http import GATE_MAX_BODY, _MAX_LOGGED_BODY
+        from glassport.http_sessions import HTTPRegistryLimits
+        self.proxy(limits=HTTPRegistryLimits(max_frame_bytes=GATE_MAX_BODY))
+        self.handshake()
+        before = self.upstream_calls()
+        pad = 'x' * (_MAX_LOGGED_BODY + 64_000)
+        status, _ = self.call('search', args={'pad': pad})
+        self.quiesce()
+        self.assertEqual(status, 200)
+        received = self.upstream_calls()
+        self.assertEqual(len(received), len(before) + 1)
+        self.assertIn(pad.encode(), received[-1]['raw'])
+
+    def test_cap_follows_the_observer_frame_limit(self):
+        """A body the observer would fold as incomplete is refused, not
+        forwarded unproved, even when it is under GATE_MAX_BODY."""
+        from glassport.http_sessions import HTTPRegistryLimits
+        self.proxy(limits=HTTPRegistryLimits(max_frame_bytes=10_000))
+        self.handshake()
+        before = self.upstream_calls()
+        status, _ = self.raw(json.dumps(dict(UNDECLARED_CALL, params={
+            'name': 'search', 'arguments': {'pad': 'x' * 20_000}})).encode())
+        self.quiesce()
+        self.assertEqual(status, 413)
+        self.assertEqual(self.upstream_calls(), before)
+
+    def test_cli_gate_observer_inspects_up_to_the_gate_cap(self):
+        from glassport.adapters.mcp_http import GATE_MAX_BODY
+        seen = {}
+
+        def fake_run(remote, log_dir, **kw):
+            seen['observer'] = kw['observer']
+        with mock.patch('glassport.adapters.mcp_http.run_http_tap', fake_run):
+            tap._run_http_gate('http://127.0.0.1:1/mcp', self.root)
+        self.assertEqual(seen['observer'].limits.max_frame_bytes, GATE_MAX_BODY)
+
+    def test_observe_mode_still_forwards_every_shape(self):
+        """Only enforcement changes: observation stays byte-transparent."""
+        for data, extra in ((json.dumps([UNDECLARED_CALL]).encode(), None),
+                            (b'{not json', None),
+                            (b'\xef\xbb\xbf' + json.dumps(UNDECLARED_CALL).encode(), None)):
+            with self.subTest(data=data[:20]):
+                self.setUp()
+                self.proxy(mode=dj.MODE_OBSERVE)
+                self.handshake()
+                before = self.upstream_calls()
+                self.raw(data, extra)
+                self.quiesce()
+                self.assertEqual(len(self.upstream_calls()), len(before) + 1)
+
+
+class TestGateModeOriginAndHost(GateCase):
+    """A loopback proxy must not be drivable by a web page (DNS rebinding):
+    both MCP transport revisions require Origin validation."""
+
+    def send(self, headers, mode=dj.MODE_GATE):
+        self.proxy(mode=mode)
+        before = self.upstream_calls()
+        base = {'Content-Type': 'application/json', 'Accept': 'application/json'}
+        base.update(headers(self.port()) if callable(headers) else headers)
+        request = urllib.request.Request(
+            self.url, data=json.dumps({'jsonrpc': '2.0', 'id': 1,
+                                       'method': 'tools/list'}).encode(),
+            headers=base)
+        try:
+            with urllib.request.urlopen(request, timeout=10) as resp:
+                status = resp.status
+        except urllib.error.HTTPError as exc:
+            status = exc.code
+        self.quiesce()
+        return status, len(self.upstream_calls()) - len(before)
+
+    def port(self):
+        return self.url.rsplit(':', 1)[1].split('/')[0]
+
+    def test_foreign_origin_is_refused(self):
+        for origin in ('http://evil.example', 'null', 'http://127.0.0.1:1'):
+            with self.subTest(origin=origin):
+                self.setUp()
+                self.assertEqual(self.send({'Origin': origin}), (403, 0))
+
+    def test_absent_or_loopback_origin_passes(self):
+        self.assertEqual(self.send({}), (200, 1))
+        for host in ('127.0.0.1', 'localhost'):
+            with self.subTest(host=host):
+                self.setUp()
+                self.assertEqual(self.send(
+                    lambda port: {'Origin': f'http://{host}:{port}'}), (200, 1))
+
+    def test_rebound_host_header_is_refused(self):
+        self.assertEqual(self.send({'Host': 'attacker.example'}), (403, 0))
+
+    def test_observe_mode_is_not_filtered(self):
+        self.assertEqual(self.send({'Origin': 'http://evil.example'},
+                                   mode=dj.MODE_OBSERVE), (200, 1))
 
 
 # ── matrix 8: the synthesized response is correlatable ───────────────────
@@ -746,7 +933,8 @@ class TestBlockUnderPressure(GateCase):
         with socket.create_connection(
                 ('127.0.0.1', int(self.url.rsplit(':', 1)[1].split('/')[0])),
                 timeout=5) as sock:
-            sock.sendall(b'POST /mcp HTTP/1.1\r\nHost: x\r\n'
+            authority = self.url.split('/')[2].encode()
+            sock.sendall(b'POST /mcp HTTP/1.1\r\nHost: ' + authority + b'\r\n'
                          b'Mcp-Session-Id: sess-1\r\n'
                          b'Content-Type: application/json\r\n'
                          b'Content-Length: ' + str(len(body)).encode()

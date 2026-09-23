@@ -16,9 +16,11 @@ Enforcement is off unless a journal in gate mode is supplied (`glassport gate
 --transport http`). With one, and ONLY then, a frame whose analysis proves a
 severity-3 tools/call against an observed declared surface is answered locally
 with a JSON-RPC error and never forwarded: no upstream connection is opened for
-it at all. Every other state — missing, partial or malformed declarations, a
-faulted detector pass, an unparseable or oversized body, a lost or stale epoch,
-a call with no JSON-RPC id — forwards, with the would-block recorded. Passive
+it at all. Missing *evidence* — missing, partial or malformed declarations, a
+faulted detector pass, a lost or stale epoch, a call with no JSON-RPC id —
+forwards, with the would-block recorded. A request gate mode cannot *read*
+(oversized, encoded, not exactly one unambiguous JSON object) or whose
+Host/Origin is not the loopback proxy is refused before connecting. Passive
 wrap and observation mode keep byte-for-byte identical behavior, because with
 `journal=None` (or a journal in observe mode) the enforcement branch is never
 reachable.
@@ -37,7 +39,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from glassport.tap import SessionLog, open_session_log
+from glassport.tap import SessionLog, _loads, open_session_log
 
 # hop-by-hop headers (RFC 7230 §6.1) plus Host/Content-Length, which the proxy
 # recomputes — never forwarded verbatim.
@@ -203,6 +205,12 @@ def _upstream_target(remote) -> str:
 _MAX_SSE_BUF = 256 * 1024  # cap per-event buffering to avoid unbounded growth
 _MAX_LOGGED_BODY = 1_000_000  # cap what a single request/response frame logs
 _RELAY_CHUNK = 65536          # stream bodies in bounded chunks, never all at once
+# Gate mode reads a whole POST body before deciding, and refuses (413) any
+# body larger than this rather than forward bytes it never analysed. Observe
+# and passive modes keep streaming past _MAX_LOGGED_BODY unchanged.
+GATE_MAX_BODY = 4 * 1024 * 1024
+_GATE_DRAIN_LIMIT = 4 * GATE_MAX_BODY
+_LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "[::1]")
 _HANDLER_TIMEOUT = 30         # drop a stalled client so it can't pin a thread
 
 
@@ -497,7 +505,33 @@ def _observe_sse(resp, wfile, lease, cap):
         raise
 
 
+def _gate_body_problem(body: bytes):
+    """(status, reason) when gate mode must refuse this POST body, else None.
+
+    Enforcement is only as good as the analyser's reading of the request. A
+    body it cannot read as exactly one JSON object -- the same object any
+    conforming upstream parser would read -- is refused, never forwarded:
+    batches, duplicate keys (first-wins vs last-wins parsers disagree), a
+    BOM, invalid UTF-8, trailing data, or a non-object.
+    """
+    try:
+        frame = _loads(body.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError, RecursionError):
+        return 400, "request body is not one unambiguous JSON object"
+    if not isinstance(frame, dict):
+        return 400, "request body is not one JSON-RPC object"
+    return None
+
+
 def _make_handler(remote, log: SessionLog, observer=None, journal=None):
+    # Refusing what cannot be inspected is enforcement; observation stays
+    # byte-transparent, so only a journal in gate mode arms these checks.
+    gate_mode = journal is not None and getattr(journal, "mode", None) == "gate"
+    # The cap must equal what the observer analyses: a body the observer
+    # would fold as incomplete can never be proved, so it would forward.
+    gate_cap = GATE_MAX_BODY if observer is None else min(
+        GATE_MAX_BODY, observer.limits.max_frame_bytes)
+
     class _ProxyHandler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
         # A stalled client (slowloris) must not pin a ThreadingHTTPServer thread
@@ -560,6 +594,23 @@ def _make_handler(remote, log: SessionLog, observer=None, journal=None):
             except Exception:
                 pass   # client hung up; the block already happened
 
+        def _local_request_ok(self) -> bool:
+            """Loopback proxies must not be drivable by a web page (DNS
+            rebinding): Host must name this proxy, and Origin, if sent, must
+            be this proxy's own origin. Non-browser clients send no Origin."""
+            bound, port = self.server.server_address[:2]
+            if not (bound.startswith("127.") or bound in ("::1", "localhost")):
+                return True   # explicitly exposed: the operator owns access
+            allowed = {f"{h}:{port}" for h in _LOOPBACK_HOSTS}
+            hosts = self.headers.get_all("Host") or []
+            if len(hosts) != 1 or hosts[0].strip().lower() not in allowed:
+                return False
+            origins = self.headers.get_all("Origin") or []
+            if not origins:
+                return True
+            return (len(origins) == 1
+                    and origins[0].strip().lower() in {"http://" + a for a in allowed})
+
         def _read_client_body(self):
             """Return (body_for_upstream, framing_ok). Rejects ambiguous framing
             (Transfer-Encoding, duplicate/invalid Content-Length) rather than
@@ -576,7 +627,30 @@ def _make_handler(remote, log: SessionLog, observer=None, journal=None):
                 self._reject(400, "invalid content-length")
                 return None, False
             length = int(cls[0]) if cls else 0
-            head = self.rfile.read(min(length, _MAX_LOGGED_BODY)) if length else b""
+            if gate_mode and self.command == "POST":
+                encoding = (self.headers.get("Content-Encoding") or "").strip().lower()
+                if encoding not in ("", "identity"):
+                    self._reject(415, "content-encoding not supported in gate mode")
+                    return None, False
+                if length > gate_cap:
+                    # Drain a bounded amount so the client can read the 413
+                    # instead of a reset; past that, just close.
+                    left = length if length <= _GATE_DRAIN_LIMIT else 0
+                    while left > 0:
+                        chunk = self.rfile.read(min(_RELAY_CHUNK, left))
+                        if not chunk:
+                            break
+                        left -= len(chunk)
+                    self._reject(413, "request body exceeds gate inspection limit")
+                    return None, False
+                head = self.rfile.read(length) if length else b""
+                problem = (_gate_body_problem(head) if len(head) == length
+                           else (400, "request body shorter than content-length"))
+                if problem is not None:
+                    self._reject(*problem)
+                    return None, False
+            else:
+                head = self.rfile.read(min(length, _MAX_LOGGED_BODY)) if length else b""
             rest = length - len(head)
             if getattr(self, "_observation_lease", None) is not None and head:
                 self._c2s_observation = _observe_call(
@@ -602,6 +676,9 @@ def _make_handler(remote, log: SessionLog, observer=None, journal=None):
         def _relay(self, method: str) -> None:
             self._observation_lease = None
             self._c2s_observation = None
+            if gate_mode and not self._local_request_ok():
+                self._reject(403, "origin or host not allowed")
+                return
             # Delivery phase flags. Recording reads them; nothing branches on
             # them, so the forwarded bytes are identical with journal=None.
             intent = None
