@@ -368,6 +368,17 @@ class TestPIIDetection(unittest.TestCase):
         anns = self.exfil({"id": "1234567812345678"})
         self.assertNotIn("pii_credit_card", subcats(anns))
 
+    def test_skips_luhn_digit_runs_inside_identifiers(self):
+        # a hex progress token / request id can hold a Luhn-valid digit run;
+        # it is an identifier, not a card (the gate now scans params._meta)
+        anns = self.exfil({"progressToken": "tok-142-d4948844505301c4"})
+        self.assertNotIn("pii_credit_card", subcats(anns))
+
+    def test_detects_card_between_separators(self):
+        for text in ("card: 4532015112830366.", "(4532015112830366)", "x_4532015112830366"):
+            with self.subTest(text=text):
+                self.assertIn("pii_credit_card", subcats(self.exfil({"note": text})))
+
     def test_redaction_is_non_reversible(self):
         secret = "sk-proj-A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8"
         anns = self.exfil({"api_key": secret})

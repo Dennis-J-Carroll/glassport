@@ -53,8 +53,8 @@ from __future__ import annotations
 
 from glassport.attestation import ATTESTATION_KEY, validate_public_key
 from glassport.detectors import (
-    find_taint, _schema_problems, _scan_pii, _redact, neutralize_text,
-    _TAINT_PATTERNS,
+    MAX_SCAN_BYTES, find_taint, _schema_problems, _scan_pii, _redact,
+    neutralize_text, _TAINT_PATTERNS,
 )
 
 import hashlib
@@ -543,8 +543,9 @@ class Gate:
                 text = item.get("text")
                 if not isinstance(text, str):
                     continue
-                hit = find_taint({"text": text})
-                if hit is not None:
+                # detection reads only the first MAX_SCAN_BYTES; a longer text
+                # is neutralized whole rather than trusted past the cap (A4)
+                if len(text) > MAX_SCAN_BYTES or find_taint({"text": text}) is not None:
                     sanitized = neutralize_text(text)
                     # Unicode neutralization preserves ASCII delimiters.
                     # Reuse the detection pattern to remove those explicitly.
@@ -705,23 +706,52 @@ class Gate:
                             {"action": "blocked", "tool": name,
                              "reason": "attestation_failed"})
             arguments = params.get("arguments")
-            if _nesting_exceeds(arguments, MAX_ARGUMENT_DEPTH):
+            # Taint and PII cover every params field, not just arguments:
+            # _meta and any sibling reach the server too (A2). The params
+            # object adds one level around arguments, which keep their
+            # MAX_ARGUMENT_DEPTH allowance.
+            extras = {k: v for k, v in params.items()
+                      if k not in ("name", "arguments")}
+            if _nesting_exceeds(params, MAX_ARGUMENT_DEPTH + 1):
                 if not self._enforcement_on():
                     return ("forward", None,
                             {"action": "gate_disabled", "tool": name,
-                             "reason": "arguments_too_deep"})
+                             "reason": "params_too_deep"})
                 self.blocked_count += 1
                 rid = frame.get("id")
                 response = self._block(
-                    rid, "arguments_too_deep", name,
+                    rid, "params_too_deep", name,
                     f"glassport gate: tools/call '{name}' blocked — "
-                    f"arguments nested deeper than {MAX_ARGUMENT_DEPTH} "
+                    f"params nested deeper than {MAX_ARGUMENT_DEPTH} "
                     f"levels cannot be inspected safely",
                     suggestion=f"Flatten the arguments to at most "
                                f"{MAX_ARGUMENT_DEPTH} levels of nesting.")
                 return ("block", response,
                         {"action": "blocked", "tool": name,
-                         "reason": "arguments_too_deep"})
+                         "reason": "params_too_deep"})
+            try:
+                blob = json.dumps(params, ensure_ascii=False, default=str)
+            except Exception:
+                blob = None
+                forward_info = _note_skip(forward_info, name, "pii_scan_error")
+            # The scanners inspect at most MAX_SCAN_BYTES per blob/string;
+            # anything past that cap would pass unread, so it is refused (A3/A4).
+            if blob is not None and len(blob) > MAX_SCAN_BYTES:
+                if not self._enforcement_on():
+                    return ("forward", None,
+                            {"action": "gate_disabled", "tool": name,
+                             "reason": "params_too_large"})
+                self.blocked_count += 1
+                rid = frame.get("id")
+                response = self._block(
+                    rid, "params_too_large", name,
+                    f"glassport gate: tools/call '{name}' blocked — params "
+                    f"exceed the {MAX_SCAN_BYTES}-character inspection limit",
+                    suggestion="Send large content by reference (a resource "
+                               "URI) rather than inline in the call.")
+                return ("block", response,
+                        {"action": "blocked", "tool": name,
+                         "reason": "params_too_large"})
             # A check that faults is skipped visibly, but the remaining
             # checks still run: one scanner error must not waive the rest.
             try:
@@ -749,8 +779,12 @@ class Gate:
                 return ("block", response,
                         {"action": "blocked", "tool": name,
                          "reason": "retry_loop_exceeded"})
+            field = "argument"
             try:
                 hit = find_taint(arguments)
+                if hit is None:
+                    hit = find_taint(extras)
+                    field = "params field"
             except Exception:
                 hit = None
                 forward_info = _note_skip(forward_info, name, "taint_scan_error")
@@ -765,7 +799,7 @@ class Gate:
                 response = self._block(
                     rid, "taint_detected", name,
                     f"glassport gate: tools/call '{name}' blocked — "
-                    f"argument '{key_path}' contains a semantic taint "
+                    f"{field} '{key_path}' contains a semantic taint "
                     f"signature ({pat_name})",
                     suggestion="Remove role-switching delimiters and "
                                "zero-width characters from the argument "
@@ -796,9 +830,8 @@ class Gate:
                         {"action": "blocked", "tool": name,
                          "reason": "schema_violation"})
             try:
-                blob = json.dumps(arguments, ensure_ascii=False, default=str)
-                pii_hits = [(pat, val) for pat, val in _scan_pii(blob)
-                            if pat.severity == 3]
+                pii_hits = ([(pat, val) for pat, val in _scan_pii(blob)
+                             if pat.severity == 3] if blob is not None else [])
             except Exception:
                 pii_hits = []
                 forward_info = _note_skip(forward_info, name, "pii_scan_error")
@@ -813,7 +846,7 @@ class Gate:
                 response = self._block(
                     rid, "pii_exfiltration", name,
                     f"glassport gate: tools/call '{name}' blocked — "
-                    f"argument contains {pat.description}: "
+                    f"params contain {pat.description}: "
                     f"{_redact(val, pat.category)}",
                     suggestion="Remove the credential/secret from the "
                                "argument before retrying; this tool call "

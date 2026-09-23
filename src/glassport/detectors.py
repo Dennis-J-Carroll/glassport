@@ -585,9 +585,11 @@ PII_PATTERNS: list[PIIPattern] = [
         lambda s: _calculate_entropy(s) > 3.0, "generic API key/secret"),
     PIIPattern("ssn", 3, re.compile(r"(?<!\d)(\d{3}-\d{2}-\d{4})(?!\d)"),
         _validate_ssn, "US Social Security Number"),
+    # Alphanumeric boundaries, not just digit ones: a Luhn-valid run inside a
+    # hex identifier (progress token, request id) is not a card number.
     PIIPattern("credit_card", 3, re.compile(
-        r"(?<!\d)(4[0-9]{12}(?:[0-9]{3})?|5[1-5][0-9]{14}|"
-        r"3[47][0-9]{13}|6(?:011|5[0-9]{2})[0-9]{12})(?!\d)"),
+        r"(?<![0-9A-Za-z])(4[0-9]{12}(?:[0-9]{3})?|5[1-5][0-9]{14}|"
+        r"3[47][0-9]{13}|6(?:011|5[0-9]{2})[0-9]{12})(?![0-9A-Za-z])"),
         _luhn_check, "credit card number (Luhn)"),
     PIIPattern("iban", 3, re.compile(
         r"(?<![A-Z0-9])([A-Z]{2}\d{2}[A-Z0-9]{11,30})(?![A-Z0-9])"),
