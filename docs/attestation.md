@@ -46,3 +46,10 @@ forwards the original frame with reason `attestation_check_error`, consistent
 with Glassport's fail-open relay contract, after the remaining idempotency,
 taint, schema, and PII checks have run; any of those can still block the call.
 Neither marker means authenticated.
+
+With the opt-in strict fault policy (`Gate(strict=True)`, CLI
+`glassport gate --strict`), both markers become blocks instead: the call is
+refused with `-32000` and `error.data.reason` set to `attestation_unavailable`
+or `attestation_check_error`. Enforcement also no longer depends on a
+declared tool surface: if no `tools/list` arrives within the hold window,
+attestation (and the credential and taint checks) still run on the call.
