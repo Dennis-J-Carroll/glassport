@@ -79,7 +79,7 @@ DELIVERY_OUTCOMES = frozenset({
 DELIVERY_CODES = frozenset({
     "not_begun", "framing_rejected", "connect_failed", "send_indeterminate",
     "response_indeterminate", "upstream_response", "body_transfer_failed",
-    "handler_aborted", "http_gate_blocked", "unspecified"})
+    "handler_aborted", "http_gate_blocked", "invalid_mcp_request", "unspecified"})
 
 # A candidate BLOCK computed alongside any of these is never enforced: each one
 # says the analysis pass that produced it was itself incomplete, so the

@@ -605,14 +605,15 @@ class TestConservativeForwarding(GateCase):
         self.assertIsNone(wire_entry['frame'], wire_entry)
         self.assertTrue(wire_entry['http_observation'].get('uninterpreted'))
 
-    def test_tools_call_shaped_notification_is_forwarded_not_blocked(self):
+    def test_tools_call_shaped_notification_is_forwarded_in_observe_mode(self):
         """No id means nothing to answer, and MCP has no such notification.
 
-        Blocking it would drop the frame with no error the client could ever
-        observe, so a non-conformant request is treated as malformed: forward,
-        and let the record show the would-block.
+        Observation forwards it and lets the record show the would-block.
+        Gate mode refuses it as invalid MCP input instead (see
+        TestGateModeRejectsInvalidCallIds): forwarding let an undeclared
+        operation reach upstream with nothing to correlate it to.
         """
-        self.proxy()
+        self.proxy(mode=dj.MODE_OBSERVE)
         self.handshake()
         before = self.upstream_calls()
         self.post({'jsonrpc': '2.0', 'method': 'tools/call',
@@ -922,6 +923,72 @@ class TestGateModeClientCannotRetireASession(GateCase):
                 self.assertEqual(self.raw(method, headers), 200)
                 self.quiesce()
                 self.assertEqual(len(self.upstream_calls()), before + 1)
+class TestGateModeRejectsInvalidCallIds(GateCase):
+    """MCP defines tools/call as a request: its id must be present and be a
+    string or an integer. Gate mode refuses any other shape as invalid MCP
+    input (400), distinct from a policy block, instead of forwarding an
+    operation it could not answer or correlate."""
+
+    def send(self, frame, mode=dj.MODE_GATE):
+        self.proxy(mode=mode)
+        self.handshake()
+        before = self.upstream_calls()
+        request = urllib.request.Request(
+            self.url, data=json.dumps(frame).encode(),
+            headers={'Content-Type': 'application/json',
+                     'Accept': 'application/json', 'Mcp-Session-Id': 'sess-1'})
+        try:
+            with urllib.request.urlopen(request, timeout=10) as resp:
+                status, body = resp.status, resp.read()
+        except urllib.error.HTTPError as exc:
+            status, body = exc.code, exc.read()
+        self.quiesce()
+        return status, body, self.upstream_calls()[len(before):]
+
+    def call_frame(self, **id_field):
+        return dict({'jsonrpc': '2.0', 'method': 'tools/call',
+                     'params': {'name': 'search', 'arguments': {}}}, **id_field)
+
+    def test_missing_id_is_invalid_input_not_forwarded(self):
+        status, body, reached = self.send(self.call_frame())
+        self.assertEqual((status, reached), (400, []))
+        self.assertIn(b'requires a request id', body)
+        codes = [r['code'] for r in self.records('delivery', settle=4)]
+        self.assertIn('invalid_mcp_request', codes)
+        self.assertNotIn(BLOCK_MARKER, codes)
+
+    def test_null_and_non_scalar_ids_are_refused_with_their_own_reason(self):
+        for rid in (None, 1.5, True, {'a': 1}, [1]):
+            with self.subTest(id=rid):
+                self.setUp()
+                status, body, reached = self.send(self.call_frame(id=rid))
+                self.assertEqual((status, reached), (400, []))
+                self.assertIn(b'string or an integer', body)
+
+    def test_zero_and_string_ids_are_ordinary_requests(self):
+        for rid in (0, '', 'abc'):
+            with self.subTest(id=rid):
+                self.setUp()
+                status, body, reached = self.send(self.call_frame(id=rid))
+                self.assertEqual(status, 200)
+                self.assertEqual(json.loads(body)['id'], rid)
+                self.assertEqual(len(reached), 1)
+
+    def test_refusal_echoes_nothing_from_the_request(self):
+        frame = self.call_frame()
+        frame['params']['name'] = 'secret_tool_name'
+        _, body, _ = self.send(frame)
+        self.assertNotIn(b'secret_tool_name', body)
+
+    def test_notifications_still_forward(self):
+        status, _, reached = self.send(
+            {'jsonrpc': '2.0', 'method': 'notifications/cancelled',
+             'params': {'requestId': 3}})
+        self.assertEqual((status, len(reached)), (202, 1))
+
+    def test_observe_mode_forwards_id_less_calls(self):
+        status, _, reached = self.send(self.call_frame(), mode=dj.MODE_OBSERVE)
+        self.assertEqual((status, len(reached)), (202, 1))
 
 
 # ── matrix 8: the synthesized response is correlatable ───────────────────
