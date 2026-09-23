@@ -79,6 +79,32 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+# tools/call arguments nested deeper than this are blocked before any
+# scanner runs: the scanners recurse, and a caller-chosen RecursionError
+# must not become a fail-open skip of the credential check. Real tool
+# schemas are a handful of levels deep.
+MAX_ARGUMENT_DEPTH = 64
+
+
+def _nesting_exceeds(value: Any, limit: int) -> bool:
+    """True when dict/list nesting in `value` goes deeper than `limit`
+    (a bare container is depth 1). Iterative, so it cannot itself hit the
+    recursion limit it guards against."""
+    stack = [(value, 1)]
+    while stack:
+        node, depth = stack.pop()
+        if isinstance(node, dict):
+            children = node.values()
+        elif isinstance(node, list):
+            children = node
+        else:
+            continue
+        if depth > limit:
+            return True
+        stack.extend((child, depth + 1) for child in children)
+    return False
+
+
 # ─────────────────────────────────────────────────────────────────
 # Session logger — append-only JSONL, thread-safe, failure-isolated.
 # ─────────────────────────────────────────────────────────────────
@@ -493,6 +519,23 @@ class Gate:
                             {"action": "blocked", "tool": name,
                              "reason": "attestation_failed"})
             arguments = (frame.get("params") or {}).get("arguments")
+            if _nesting_exceeds(arguments, MAX_ARGUMENT_DEPTH):
+                if not self._enforcement_on():
+                    return ("forward", None,
+                            {"action": "gate_disabled", "tool": name,
+                             "reason": "arguments_too_deep"})
+                self.blocked_count += 1
+                rid = frame.get("id")
+                response = self._block(
+                    rid, "arguments_too_deep", name,
+                    f"glassport gate: tools/call '{name}' blocked — "
+                    f"arguments nested deeper than {MAX_ARGUMENT_DEPTH} "
+                    f"levels cannot be inspected safely",
+                    suggestion=f"Flatten the arguments to at most "
+                               f"{MAX_ARGUMENT_DEPTH} levels of nesting.")
+                return ("block", response,
+                        {"action": "blocked", "tool": name,
+                         "reason": "arguments_too_deep"})
             try:
                 repeat = self._idempotency_hit(name, arguments)
             except Exception:

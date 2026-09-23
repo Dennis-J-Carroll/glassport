@@ -808,5 +808,71 @@ class TestGateAttestationReview(unittest.TestCase):
             self.assertEqual(json.loads(response)["error"]["data"]["reason"], "attestation_failed")
 
 
+def _parses(raw: bytes) -> bool:
+    try:
+        json.loads(raw)
+        return True
+    except RecursionError:
+        return False
+
+
+class TestGateHostileShapes(unittest.TestCase):
+    """Caller-chosen frame shapes must not turn a scanner fault into a
+    bypass or kill the relay."""
+
+    PEM = ("-----BEGIN RSA PRIVATE KEY-----\n" + "A" * 200 +
+           "\n-----END RSA PRIVATE KEY-----")
+
+    def deep_call(self, depth: int, leaf=None) -> bytes:
+        """tools/call whose arguments object is nested `depth` containers
+        deep (the arguments object itself is level 1). Built as text so the
+        fixture never recurses."""
+        leaf = self.PEM if leaf is None else leaf
+        inner = "[" * (depth - 1) + json.dumps(leaf) + "]" * (depth - 1)
+        return ('{"jsonrpc":"2.0","id":21,"method":"tools/call","params":'
+                '{"name":"web_search","arguments":{"k":%s}}}\n' % inner).encode()
+
+    def disabled_gate(self, tmp) -> Gate:
+        g = Gate(control_path=Path(tmp) / "s.jsonl.gate")
+        g.observe_s2c(TOOLS_LIST_RESULT)
+        g.control_path.write_text(json.dumps({"enforce": False}), encoding="utf-8")
+        g.control_path.chmod(0o600)
+        return g
+
+    def test_arguments_nested_past_limit_block_before_scanners(self):
+        from glassport.tap import MAX_ARGUMENT_DEPTH
+        depths = [MAX_ARGUMENT_DEPTH + 1, 500]
+        # Deeper than the recursion limit but still parseable here: the
+        # scanners used to raise RecursionError and fail open, skipping PII.
+        depths += [d for d in (sys.getrecursionlimit() + 50, 3000)
+                   if _parses(self.deep_call(d))]
+        for depth in depths:
+            with self.subTest(depth=depth):
+                g = declared_gate()
+                action, response, info = g.check_c2s(self.deep_call(depth))
+                self.assertEqual(action, "block")
+                self.assertEqual(json.loads(response)["error"]["code"], -32000)
+                self.assertEqual(info["reason"], "arguments_too_deep")
+                self.assertEqual(g.blocked_count, 1)
+
+    def test_arguments_at_limit_are_still_scanned(self):
+        from glassport.tap import MAX_ARGUMENT_DEPTH
+        action, _, info = declared_gate().check_c2s(self.deep_call(MAX_ARGUMENT_DEPTH))
+        self.assertEqual(action, "block")
+        self.assertEqual(info["reason"], "pii_exfiltration")
+        self.assertEqual(
+            declared_gate().check_c2s(self.deep_call(MAX_ARGUMENT_DEPTH, leaf="ok")),
+            ("forward", None, None))
+
+    def test_deep_arguments_forward_with_marker_when_disabled(self):
+        from glassport.tap import MAX_ARGUMENT_DEPTH
+        with tempfile.TemporaryDirectory() as tmp:
+            action, _, info = self.disabled_gate(tmp).check_c2s(
+                self.deep_call(MAX_ARGUMENT_DEPTH + 1))
+        self.assertEqual(action, "forward")
+        self.assertEqual(info["action"], "gate_disabled")
+        self.assertEqual(info["reason"], "arguments_too_deep")
+
+
 if __name__ == "__main__":
     unittest.main()
