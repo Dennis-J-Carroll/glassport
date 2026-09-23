@@ -1,0 +1,102 @@
+{
+  "artifacts_checked": 10,
+  "artifacts_list": [
+    "html_args",
+    "sarif_args",
+    "html_results",
+    "sarif_results",
+    "text_args",
+    "json_args",
+    "advisory_args",
+    "text_results",
+    "json_results",
+    "advisory_results"
+  ],
+  "canaries": 4,
+  "checker_tests": {
+    "count": 11,
+    "passed": 11
+  },
+  "detection": {
+    "args_direction": {
+      "expected_categories": [
+        "anthropic_key",
+        "aws_access_key",
+        "email_address",
+        "ssn"
+      ],
+      "observed_categories": [
+        "anthropic_key",
+        "aws_access_key",
+        "email_address",
+        "generic_api_key",
+        "ssn"
+      ],
+      "ok": true
+    },
+    "results_direction": {
+      "expected_categories": [
+        "anthropic_key"
+      ],
+      "observed_categories": [
+        "anthropic_key",
+        "aws_access_key",
+        "ssn"
+      ],
+      "ok": true
+    }
+  },
+  "reconstruction": {
+    "leaks_found": 0,
+    "per_artifact": {
+      "advisory_args": {
+        "canaries_checked": 4,
+        "leaks": []
+      },
+      "advisory_results": {
+        "canaries_checked": 4,
+        "leaks": []
+      },
+      "html_args": {
+        "canaries_checked": 4,
+        "leaks": []
+      },
+      "html_results": {
+        "canaries_checked": 4,
+        "leaks": []
+      },
+      "json_args": {
+        "canaries_checked": 4,
+        "leaks": []
+      },
+      "json_results": {
+        "canaries_checked": 4,
+        "leaks": []
+      },
+      "sarif_args": {
+        "canaries_checked": 4,
+        "leaks": []
+      },
+      "sarif_results": {
+        "canaries_checked": 4,
+        "leaks": []
+      },
+      "text_args": {
+        "canaries_checked": 4,
+        "leaks": []
+      },
+      "text_results": {
+        "canaries_checked": 4,
+        "leaks": []
+      }
+    },
+    "total_checks": 40
+  },
+  "sessions": 2,
+  "t06b": {
+    "cli_used": "<scratchpad>/venv-0610/bin/glassport",
+    "fallbacks": [
+      "detect --json -> summarize --json for both args and results sessions"
+    ]
+  }
+}

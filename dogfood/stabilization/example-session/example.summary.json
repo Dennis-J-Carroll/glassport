@@ -1,0 +1,16 @@
+{
+  "session": "example.jsonl",
+  "completeness": "complete",
+  "frames_parsed": 7,
+  "declared_tools": [
+    "search"
+  ],
+  "called_tools": [
+    "search"
+  ],
+  "unused_declared": [],
+  "fabricated_calls": [],
+  "protocol_errors": [],
+  "tool_errors": [],
+  "context_violations": []
+}

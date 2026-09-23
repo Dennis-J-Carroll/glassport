@@ -228,8 +228,18 @@ class SessionLog:
 
     def record(self, direction: str, line: bytes,
                gate: dict | None = None,
-               metadata: dict | None = None) -> None:
-        """Log one wire line. Never raises — relay must outlive logging.
+               metadata: dict | None = None, *,
+               observation: dict | None = None,
+               wire_bytes: bytes | None = None,
+               sequence: int | None = None) -> dict | None:
+        """Log one wire line; return its envelope on write success, else None.
+
+        Never raises — relay must outlive logging. The receipt proves only a
+        successful write call, not fsync durability or transport delivery.
+        HTTP observation metadata is trusted outer evidence, never peer JSON.
+        wire_bytes optionally preserves exact HTTP frame bytes as base64.
+        sequence optionally assigns a strictly increasing caller-owned order,
+        preserving linkage even after an earlier failed recording attempt.
 
         `gate` marks frames the gate acted on: {"action": "blocked"} on a
         c2s frame the server never received, {"action": "injected"} on an
@@ -249,7 +259,12 @@ class SessionLog:
             except (json.JSONDecodeError, ValueError, RecursionError):
                 raw = text
             with self._lock:
-                self._seq += 1
+                if sequence is not None:
+                    if type(sequence) is not int or sequence <= self._seq:
+                        raise ValueError('session sequence must increase')
+                    self._seq = sequence
+                else:
+                    self._seq += 1
                 entry = {
                     "schema_version": SCHEMA_VERSION,
                     "seq": self._seq,
@@ -262,6 +277,11 @@ class SessionLog:
                     entry["gate"] = gate
                 if metadata is not None:
                     entry["sse_meta"] = metadata
+                if observation is not None:
+                    entry["http_observation"] = observation
+                if wire_bytes is not None:
+                    import base64
+                    entry["wire_b64"] = base64.b64encode(wire_bytes).decode("ascii")
                 try:
                     serialized = json.dumps(entry, ensure_ascii=False)
                 except RecursionError:
@@ -276,8 +296,25 @@ class SessionLog:
                     # UTF-8 cannot carry: escape this entry, never drop it.
                     serialized = json.dumps(entry, ensure_ascii=True)
                 self._fh.write(serialized + "\n")
+                return entry
         except Exception:
-            pass  # logging is best-effort; the relay is sacred
+            return None  # logging is best-effort; the relay is sacred
+
+    def write_json(self, entry: dict) -> bool:
+        """Append one caller-shaped JSON record; True on a successful write.
+
+        Not a wire frame and not part of the session schema: this is the
+        private-file append primitive (0700 dir, 0600 file, one lock, never
+        raises) reused by the decision journal, which owns its OWN files.
+        Decision evidence and wire evidence are never written to one file.
+        """
+        try:
+            line = json.dumps(entry, ensure_ascii=False) + "\n"
+            with self._lock:
+                self._fh.write(line)
+            return True
+        except Exception:
+            return False  # journaling is best-effort; the relay is sacred
 
     def write_metrics(self, **fields) -> None:
         """One self-observation line at session end (H1.09): what the tap
@@ -1268,6 +1305,7 @@ def summarize(log_path: Path, as_json: bool = False, as_sarif: bool = False) -> 
             "completeness": "partial_tail_only" if partial else "complete",
             "frames_parsed": frames,
             "declared_tools": sorted(declared),
+            "declaration_known": trace.declared_surface() is not None,
             "called_tools": [n for _, n in called],
             "unused_declared": unused,
             "fabricated_calls": [{"seq": s, "tool": n}
@@ -1287,7 +1325,9 @@ def summarize(log_path: Path, as_json: bool = False, as_sarif: bool = False) -> 
     if partial:
         print("completeness:     PARTIAL (tail-only — head not analyzed)")
     print(f"frames parsed:    {frames}")
-    print(f"declared tools:   {sorted(declared) or '— (no tools/list seen)'}")
+    surface_label = ("— (unknown: no usable tools/list seen)"
+                     if trace.declared_surface() is None else "— (explicitly empty)")
+    print(f"declared tools:   {sorted(declared) or surface_label}")
     print(f"called tools:     {[n for _, n in called] or '—'}")
     print(f"unused declared:  {unused or '—'}")
     if fabricated:
@@ -1401,6 +1441,86 @@ def _cmd_advise(audit: str | None, session: str | None,
     return 0
 
 
+def _cmd_observe(args: list[str]) -> int:
+    """`glassport observe --url <remote>` — explicit HTTP observation mode.
+
+    Strict on purpose, and deliberately separate from the `wrap` path's
+    positional parsing: an unknown or duplicated option here must fail rather
+    than silently select a different mode. Observation only — no gate exists.
+    """
+    from glassport.adapters.mcp_http import _validate_remote, run_http_tap
+    from glassport.decision_journal import DecisionJournal
+    from glassport.http_sessions import HTTPObserver, HTTPRegistryLimits
+
+    values: dict[str, str] = {}
+    flags = {"--url", "--log-dir", "--journal-dir", "--bind", "--port",
+             "--max-sessions"}
+    rest = list(args)
+    while rest:
+        arg = rest.pop(0)
+        if arg not in flags:
+            print(f"glassport: unknown option {arg!r} for observe; expected "
+                  f"one of {' '.join(sorted(flags))}", file=sys.stderr)
+            return 2
+        if arg in values:
+            print(f"glassport: {arg} given more than once", file=sys.stderr)
+            return 2
+        if not rest:
+            print(f"glassport: {arg} requires a value", file=sys.stderr)
+            return 2
+        values[arg] = rest.pop(0)
+    if "--url" not in values:
+        print("usage: glassport observe --url <remote-mcp-url> [--log-dir DIR] "
+              "[--journal-dir DIR] [--bind HOST] [--port N] [--max-sessions N]",
+              file=sys.stderr)
+        return 2
+    try:
+        port = int(values.get("--port", "0"))
+        sessions = int(values["--max-sessions"]) if "--max-sessions" in values else None
+    except ValueError:
+        print("glassport: --port and --max-sessions take integers", file=sys.stderr)
+        return 2
+    log_dir = Path(values.get("--log-dir", DEFAULT_LOG_DIR))
+    journal_dir = Path(values.get("--journal-dir", log_dir / "decisions"))
+    # Validate before building anything, so a bad URL never leaves an observer
+    # and a journal dangling behind an early return.
+    try:
+        _validate_remote(values["--url"])
+        limits = (HTTPRegistryLimits(max_sessions=sessions) if sessions is not None
+                  else HTTPRegistryLimits())
+    except ValueError as exc:
+        print(f"glassport: invalid observe configuration: {exc}", file=sys.stderr)
+        return 2
+    observer = HTTPObserver(log_dir, limits=limits)
+    journal = DecisionJournal(journal_dir, observer)
+    run_http_tap(values["--url"], log_dir, values.get("--bind", "127.0.0.1"),
+                 port, observer=observer, journal=journal)
+    return 0
+
+
+def _run_http_gate(remote_url: str, log_dir: Path) -> int:
+    """`glassport gate --transport http --url <remote>` — HTTP enforcement.
+
+    Deliberately the same construction as `observe`, differing in exactly one
+    argument: the journal's mode. Enforcement is therefore not a second
+    analysis path that could drift from the observed one — it is the observed
+    one, with the verdict it already computed finally acted upon. Everything
+    the observe command guarantees about session isolation, bounded state and
+    fail-open recording holds here unchanged.
+    """
+    from glassport.adapters.mcp_http import _validate_remote, run_http_tap
+    from glassport.decision_journal import MODE_GATE, DecisionJournal
+    from glassport.http_sessions import HTTPObserver
+
+    # Validate before building anything, so a bad URL never leaves an observer
+    # and a journal dangling behind an early return (as `observe` does).
+    _validate_remote(remote_url)
+    observer = HTTPObserver(log_dir)
+    journal = DecisionJournal(log_dir / "decisions", observer, mode=MODE_GATE)
+    run_http_tap(remote_url, log_dir, observer=observer, journal=journal)
+    return 0
+
+
 # ─────────────────────────────────────────────────────────────────
 # CLI
 # ─────────────────────────────────────────────────────────────────
@@ -1416,12 +1536,30 @@ glassport — passive MCP stdio proxy
                     --controllable lets `tui --gate-control` toggle it;
                     --strict blocks when a check cannot run instead of
                     forwarding with a logged gate_skipped marker)
+                   glassport gate --transport http --url <remote-mcp-url>
+                        (active MITM over MCP Streamable-HTTP: everything
+                         `observe` does, plus the recorded would-blocks are
+                         enforced. Only a severity-3 tools/call proved against
+                         an observed declared surface is refused — locally,
+                         with a JSON-RPC -32000 error and no upstream request.
+                         Missing/partial declarations, faulted analysis, PII
+                         and unexpected-egress findings all still forward)
   audit:           glassport audit <path> [--json|--sarif]
                         [--provenance [--provenance-cache DIR]
                          [--provenance-refresh]] | audit --rubric
                    (static, pre-deployment: reads source, never runs it.
                     --provenance: opt-in npm/PyPI registry enrichment, off
                     by default so the core audit stays offline/reproducible)
+  observe:         glassport observe --url <remote-mcp-url> [--log-dir DIR]
+                        [--journal-dir DIR] [--bind HOST] [--port N]
+                        [--max-sessions N]
+                   (HTTP tap with per-epoch session isolation plus recorded
+                    candidate decisions and delivery outcomes. Observation
+                    only: nothing is ever blocked)
+  replay-decisions: glassport replay-decisions <journal.jsonl>
+                        --wire <session.jsonl> [--json]
+                   (re-run one epoch's analysis and verify the recorded
+                    decisions; exit 0 only when equivalence is proved)
   summarize:       glassport summarize [--json|--sarif] <session.jsonl>
   detect:          glassport detect [--sarif] <session.jsonl>
                    (run all behavioral detectors; exit 1 if findings,
@@ -1559,6 +1697,16 @@ def main(argv: list[str]) -> int:
         from glassport import prune as prune_mod
         return prune_mod.main(argv[1:])
 
+    if argv[0] == "observe":
+        # Explicit HTTP observation mode (session isolation + decision
+        # journal). Its own strict parser; the wrap path below is untouched.
+        return _cmd_observe(argv[1:])
+
+    if argv[0] == "replay-decisions":
+        # Verify recorded decisions against their wire evidence. Lazy import.
+        from glassport import decision_replay
+        return decision_replay.main(argv[1:])
+
     if argv[0] == "health":
         # tap self-metrics over recent sessions. Lazy import.
         from glassport import health as health_mod
@@ -1570,7 +1718,9 @@ def main(argv: list[str]) -> int:
         argv = argv[2:]
     # H2.01: passive tap over MCP's Streamable-HTTP transport. Default stays
     # stdio (spawn + relay a child). `--transport http --url <remote>` runs a
-    # local MITM proxy instead. Gate (active enforcement) is stdio-only for now.
+    # local MITM proxy instead. Gate (active enforcement) now covers both
+    # stdio and HTTP; they differ only in control surface — `--controllable`
+    # is stdio-only and refused below for the HTTP gate.
     transport = "stdio"
     remote_url = None
     if argv and argv[0] == "--transport":
@@ -1580,16 +1730,26 @@ def main(argv: list[str]) -> int:
         remote_url = argv[1] if len(argv) > 1 else None
         argv = argv[2:]
     if transport == "http":
-        if gate is not None:
-            print("glassport: gate over HTTP is not supported yet; use the "
-                  "passive `wrap --transport http`", file=sys.stderr)
-            return 2
         if not remote_url:
-            print("usage: glassport wrap --transport http --url "
-                  "<remote-mcp-url>", file=sys.stderr)
+            print("usage: glassport %s --transport http --url <remote-mcp-url>"
+                  % ("gate" if gate is not None else "wrap"), file=sys.stderr)
+            return 2
+        if gate is not None and gate_controllable:
+            # --controllable toggles the stdio Gate through an override file;
+            # the HTTP gate has no such control surface. Refuse rather than
+            # accept the flag and quietly enforce unconditionally anyway.
+            print("glassport: --controllable applies to the stdio gate only",
+                  file=sys.stderr)
             return 2
         from glassport.adapters.mcp_http import run_http_tap
         try:
+            if gate is not None:
+                # `gate` here is only the sentinel meaning "the user asked for
+                # enforcement" — the stdio Gate object itself is never used
+                # over HTTP. HTTP enforcement is a property of the decision
+                # journal's mode, and runs through the same observer the
+                # `observe` command builds.
+                return _run_http_gate(remote_url, log_dir)
             run_http_tap(remote_url, log_dir)
         except ValueError as exc:
             print(f"[glassport] invalid --url: {exc}", file=sys.stderr)

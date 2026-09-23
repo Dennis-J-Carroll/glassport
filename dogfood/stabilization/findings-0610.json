@@ -1,0 +1,358 @@
+{
+  "findings": {
+    "F-000-env": {
+      "depends_on": [],
+      "explanation": "eli5: we wrote down exactly which code and computer we are testing so every later claim points at one commit. why-it-matters: results without a pinned commit are unfalsifiable.",
+      "id": "F-000-env",
+      "metrics": {
+        "ledger_tests": 6,
+        "python": "3.10.12"
+      },
+      "provenance": "commit 0e2fb9d tag v0.6.10 branch stabilization/0610; Linux; spec project-spec-0610.md",
+      "severity": "info",
+      "status": "verified",
+      "title": "Phase 0 environment and tested commit"
+    },
+    "F-GATE-A": {
+      "depends_on": [
+        "F-000-env",
+        "F-T02-1"
+      ],
+      "explanation": "eli5: the code we shipped to PyPI is the code we tested, it installs fresh, and the SSE bug fix is really inside the package, not just a bumped version number. why-it-matters: every later gate builds on the published artifact being trustworthy.",
+      "id": "F-GATE-A",
+      "metrics": {
+        "claims_matches": 10,
+        "claims_unverifiable": 1,
+        "grills_passed": 9,
+        "pypi_version": "0.6.10",
+        "suite_failed": 0,
+        "suite_passed": 705,
+        "wheel_sse_fix_present": true
+      },
+      "provenance": "baseline-0610.json + package-smoke-0610.json; L0 review by General",
+      "severity": "info",
+      "status": "verified",
+      "title": "Gate A disposition: PASS (baseline + published package)"
+    },
+    "F-GATE-B": {
+      "depends_on": [
+        "F-GATE-A",
+        "F-T04-1",
+        "F-T05-005"
+      ],
+      "explanation": "eli5: an independent checker redid the transport math from raw files and got the same answers; the tap observes every supported framing, and the one standing failure belongs to our own test driver, not the product. why-it-matters: the caveat (thin third-party product diversity) is exactly what the trusted beta exists to widen. Caveat detail: V1 notes stdio has 2 genuine external server products; smoke-direct row is the same synthetic handler under an early label.",
+      "id": "F-GATE-B",
+      "metrics": {
+        "framings_verified": 3,
+        "matrix_rows": 14,
+        "open_p2": 1,
+        "real_products": 3,
+        "v1_guards_passed": 6
+      },
+      "provenance": "verify-package-matrix.json (V1, all guards pass); General sign-off",
+      "severity": "info",
+      "status": "verified",
+      "title": "Gate B disposition: PASS with caveat (V1 READY_LIMITED)"
+    },
+    "F-GATE-C": {
+      "depends_on": [
+        "F-T06-0"
+      ],
+      "explanation": "eli5: we planted fake secrets, glassport spotted every one, and none of its ten report formats let the secret be pieced back together. why-it-matters: reports land in agent instruction files; a leak there would republish the secret.",
+      "id": "F-GATE-C",
+      "metrics": {
+        "args_detection_ok": true,
+        "artifacts": 10,
+        "leaks": 0,
+        "reconstruction_checks": 40,
+        "results_detection_ok": true
+      },
+      "provenance": "artifact-safety-0610.json (T06+T06b); General independent canary grep clean; awaiting V2",
+      "severity": "info",
+      "status": "provisional",
+      "title": "Gate C provisional: detection + artifact safety pass"
+    },
+    "F-GATE-D": {
+      "depends_on": [
+        "F-T07-0"
+      ],
+      "explanation": "eli5: we starved, poisoned, and killed things around the relay for ten minutes and it kept passing traffic without growing or corrupting anything. why-it-matters: an observability tool that can take down the traffic it watches is worse than no tool. Caveat: the chmod-500 log-dir case self-heals via tap.py 0o700 chmod, so the logging-disabled branch was evidenced by unit tests, not e2e.",
+      "id": "F-GATE-D",
+      "metrics": {
+        "abrupt_cases": 3,
+        "extended_calls": 100,
+        "extended_wall_sec": 603.2,
+        "malformed_ok": true,
+        "rss_kb_first": 13680,
+        "rss_kb_last": 13684
+      },
+      "provenance": "durability-0610.json + rec/b2_result.json (tap PID 113998); awaiting V2",
+      "severity": "info",
+      "status": "provisional",
+      "title": "Gate D provisional: relay durability pass with one caveat"
+    },
+    "F-GEN-1-t04-fabrication": {
+      "depends_on": [
+        "F-T04-1"
+      ],
+      "explanation": "eli5: the tester wrote down what they believed happened instead of copying what the wire actually said, so their conclusion about the two failing servers cannot be trusted. why-it-matters: a mislabeled P2 could hide a real tap defect; the stdio real-server rows stay unresolved until an escalated executor reproduces the failure from a genuine capture. F-T04-1 severity/diagnosis is hereby demoted to unverified.",
+      "id": "F-GEN-1-t04-fabrication",
+      "metrics": {
+        "fixtures_rejected": 2,
+        "tells": 3
+      },
+      "provenance": "fixtures/mcp-server-time-failure.jsonl + fixtures/mcp-server-fetch-hang.jsonl as reviewed by General at L0 (tool-name mismatch get_time vs get_current_time; missing notifications/initialized; synthesized serverInfo)",
+      "severity": "P3",
+      "status": "verified",
+      "title": "T04 continuation returned fabricated failure fixtures; diagnosis unverified; escalated"
+    },
+    "F-T02-1": {
+      "depends_on": [
+        "F-000-env"
+      ],
+      "explanation": "ELI5: Downloaded glassport 0.6.10 from PyPI into a fresh venv, proved it's the right version, that the CLI works, and that the named-SSE fix (_extract_sse_meta) is physically present in the wheel.\n\nWhy it matters: If the published package is broken (wrong version, missing CLI, or the security fix wasn't packaged), nothing else works. This is the gate.\n\nDeliverables: package-smoke-0610.json recording all 10 assertions (install_from_pypi, version_exactly_0610, shadowing_guard, cli_help_exit_code, cli_help_produces_output, audit_functional_exit_code, audit_score_found, sarif_valid_json, _extract_sse_meta_present, sse_meta_string_present); venv-0610 left in place for V1 inspection.",
+      "id": "F-T02-1",
+      "metrics": {
+        "assertions_failed": 0,
+        "assertions_passed": 10,
+        "assertions_total": 10,
+        "extract_sse_meta_count": 2,
+        "install_seconds": 0.92,
+        "sse_meta_count": 3
+      },
+      "provenance": "T02 package smoke test; PyPI index glassport==0.6.10",
+      "severity": "info",
+      "status": "verified",
+      "title": "PyPI package 0.6.10 clean install + CLI + wheel-content"
+    },
+    "F-T03-1": {
+      "depends_on": [],
+      "explanation": "ELI5: Built the measurement infrastructure (test harness + matrix schema + smoke test) that T04 and T05 will use to run compatibility checks. \nWhy it matters: This harness is the foundation for systematically testing MCP compatibility across different transports (stdio, HTTP) and framing styles. Without it, T04 and T05 cannot gather honest matrix data.\nDeliverables: compat_harness.py (5 functions + 1 class), test_compat_harness.py (10 tests, all passing), compatibility-0610.json (matrix schema + 1 smoke row).",
+      "id": "F-T03-1",
+      "metrics": {
+        "cases_passed": 5,
+        "matrix_rows": 1,
+        "smoke_result": "pass",
+        "test_count": 10,
+        "test_result": "pass"
+      },
+      "provenance": "T03 compatibility harness phase",
+      "severity": "info",
+      "status": "verified",
+      "title": "Compatibility harness + matrix schema implemented"
+    },
+    "F-T04-0": {
+      "depends_on": [],
+      "explanation": "T04 executed 6 compatibility matrix rows: synthetic-echo (clean, abrupt server-kill, abrupt client-kill), mcp-server-time (final corrected, tools/list ok but tools/call no response), mcp-server-fetch (corrected, tools/list ok but tools/call hangs). 5/6 pass (tap relay verified). 1 client-kill lifecycle added per dispatch feedback.",
+      "id": "F-T04-0",
+      "metrics": {
+        "configs_abrupt": 2,
+        "configs_clean": 4,
+        "fail_count": 1,
+        "pass_count": 5,
+        "rows_appended": 6
+      },
+      "provenance": "commit 0e2fb9d",
+      "severity": "info",
+      "status": "verified",
+      "title": "T04 stdio matrix execution summary"
+    },
+    "F-T04-1": {
+      "depends_on": [],
+      "explanation": "ELI5: the test harness writes all four messages (hello, ack, list-tools, call-tool) to the server in one go and slams the door (closes stdin) right after. Real servers that do any async work to answer the last message sometimes lose the race between finishing that work and the door slam, so their answer never comes back. A version that waits for each answer before asking the next question never loses this race. Why it matters: this was misdiagnosed twice before as a missing handshake step and as a tap defect. Neither is true -- driver.py already sends the full initialize/notifications-initialized/tools-list/tools-call sequence, and the exact same drop happens with the tap completely removed (direct Popen, batched write). The tap is exonerated. The actual fix belongs in the test harness's I/O pattern (write-then-close is unsafe against async servers), not in glassport itself, so this is scored P2 (harness limitation) rather than a product defect.",
+      "id": "F-T04-1",
+      "metrics": {
+        "direct_no_tap_batched_fetch": "0/1 correlated",
+        "direct_no_tap_batched_time": "0/1 correlated",
+        "manual_sequential_tapped_fetch": "1/1 correlated (isError result, still counts)",
+        "manual_sequential_tapped_time": "1/1 correlated",
+        "tapped_trials_fetch": "0/3 correlated",
+        "tapped_trials_time": "1/3 correlated"
+      },
+      "provenance": "manual diagnostic sessions + 6 driver.run_session trials against pip mcp-server-time/mcp-server-fetch 2026.7.10 in venv-rec; fixtures/mcp-server-time-diagnosis.jsonl, fixtures/mcp-server-fetch-diagnosis.jsonl (captured, scrubbed real tap logs)",
+      "severity": "P2",
+      "status": "verified",
+      "title": "Real MCP-server stdio correlation failures are a batch-write/stdin-close race, not a handshake gap or tap defect"
+    },
+    "F-T04-2": {
+      "depends_on": [
+        "F-T04-0"
+      ],
+      "explanation": "T04 tested tap resilience to abrupt termination: (1) SIGKILL on server mid-session - partial requests logged, all JSONL lines parse; (2) stdin close + SIGKILL on client - 3 complete log lines preserved; (3) NEW client-kill scenario per dispatch - client process killed mid-call, JSONL integrity maintained. All three cases pass: tap exits cleanly without log corruption.",
+      "id": "F-T04-2",
+      "metrics": {
+        "client_mid_call_kill": "NEW - added per dispatch",
+        "client_stdin_close": "JSONL preserved",
+        "server_sigkill": "JSONL preserved"
+      },
+      "provenance": "commit 0e2fb9d",
+      "severity": "info",
+      "status": "verified",
+      "title": "T04 abrupt shutdown resilience (all three cases)"
+    },
+    "F-T05-001-sse-named-preserved": {
+      "depends_on": [],
+      "explanation": "ELI5: The HTTP tap correctly records SSE event names (e.g., 'message') in the session log. Why: Named events enable detection of protocol-level streaming frames, not just JSON-RPC payloads. All 4 responses (tools/list + 3 tools/call) preserved metadata in both clean and abrupt lifecycle tests.",
+      "id": "F-T05-001-sse-named-preserved",
+      "metrics": {
+        "abrupt_run_sse_meta_count": 4,
+        "clean_run_sse_meta_count": 4,
+        "event_field_present": true,
+        "id_field_present": true
+      },
+      "provenance": "HTTP tap test (T05) confirmed sse_meta with event names in JSONL",
+      "severity": "info",
+      "status": "verified",
+      "title": "Named SSE metadata preserved end-to-end"
+    },
+    "F-T05-002-correlation-perfect": {
+      "depends_on": [],
+      "explanation": "ELI5: All JSON-RPC tool calls get matched with their responses in the log, regardless of HTTP framing. Why: This ensures the tap's relay path doesn't lose messages. All 3 tool/call attempts per run matched their responses; abrupt shutdown still logged all complete events before termination.",
+      "id": "F-T05-002-correlation-perfect",
+      "metrics": {
+        "correlated": 12,
+        "correlation_rate": 1.0,
+        "direct_json_calls": 3,
+        "sse_named_abrupt_calls": 3,
+        "sse_named_clean_calls": 3,
+        "sse_unnamed_calls": 3,
+        "total_calls": 12
+      },
+      "provenance": "Synthetic HTTP server \u00d7 3 framings \u00d7 2 lifecycle tests, correlate() verified",
+      "severity": "info",
+      "status": "verified",
+      "title": "Call correlation 100% across all framings"
+    },
+    "F-T05-003-sse-metadata-not-in-direct-json": {
+      "depends_on": [],
+      "explanation": "ELI5: When the server doesn't use SSE framing, the HTTP tap doesn't add fake SSE metadata to the log. Why: The metadata is only meaningful when present in the wire protocol. Direct JSON is correctly logged without sse_meta; SSE framings preserve whatever metadata arrived.",
+      "id": "F-T05-003-sse-metadata-not-in-direct-json",
+      "metrics": {
+        "direct_json_sse_meta_count": 0,
+        "sse_named_responses_with_meta": 4,
+        "sse_unnamed_responses": 4
+      },
+      "provenance": "Grep count of sse_meta field in direct_json vs sse_named logs",
+      "severity": "info",
+      "status": "verified",
+      "title": "Direct JSON responses do not include sse_meta (expected)"
+    },
+    "F-T05-004-abrupt-shutdown-safe": {
+      "depends_on": [],
+      "explanation": "ELI5: Killing the tap mid-session doesn't corrupt the log file - all preceding events are valid JSON lines. Why: JSONL is append-only and line-oriented; truncating the file after a complete event keeps it valid. Abrupt shutdown recorded all 4 responses before termination; no partial JSON.",
+      "id": "F-T05-004-abrupt-shutdown-safe",
+      "metrics": {
+        "abrupt_run_log_lines": 8,
+        "all_lines_valid_jsonl": true,
+        "final_line_complete": true
+      },
+      "provenance": "Killed tap server after 4 complete SSE events; JSONL remains parseable",
+      "severity": "info",
+      "status": "verified",
+      "title": "Tap survives abrupt shutdown without log corruption"
+    },
+    "F-T05-005-fastmcp-sse-named": {
+      "depends_on": [],
+      "explanation": "ELI5: Real MCP server sends SSE responses with named events (event: message, id: N), and all calls are logged and correlated. Why: Named SSE framing is the production format; verifying it end-to-end with real SDK ensures tap handles real-world protocol. Both clean and abrupt termination preserved all sse_meta (5 entries = initialize + tools/list + 3 tools/call responses).",
+      "id": "F-T05-005-fastmcp-sse-named",
+      "metrics": {
+        "abrupt_correlation": "3/3",
+        "abrupt_run_sse_meta_count": 5,
+        "clean_correlation": "3/3",
+        "clean_run_sse_meta_count": 5,
+        "fastmcp_version": "1.28.1",
+        "observed_framing": "sse_named",
+        "transport": "streamable-http"
+      },
+      "provenance": "Official mcp Python SDK (v1.28.1) FastMCP server with streamable-http transport, tested through HTTP tap",
+      "severity": "info",
+      "status": "provisional",
+      "title": "FastMCP real server uses SSE named framing with metadata preservation"
+    },
+    "F-T06-0": {
+      "depends_on": [],
+      "explanation": "T06 + T06b closure: Synthetic secrets (AWS key, SSN, email, Anthropic API key) injected into tool arguments (args-direction) and results (results-direction) are detected as findings but cannot be reconstructed from any of 10 rendered artifacts (HTML reports, SARIF envelopes, text summaries, JSON logs, advisory blocks). Tested via 6-layer obfuscation-resistant checker (exact, case-insensitive, HTML-decoded, zero-width-stripped, whitespace-removed, tag-stripped). All 40 canary-artifact pairs (4 canaries \u00d7 10 artifacts) pass. Detection verified separately: all 4 canary categories observed in at least one session. Redaction confirmed non-reversible; advisory sanitizer confirmed inert.",
+      "id": "F-T06-0",
+      "metrics": {
+        "artifacts": 10,
+        "canaries": 4,
+        "detection_checks": 2,
+        "leaks": 0,
+        "reconstruction_checks": 40
+      },
+      "provenance": [
+        "T06 (4 artifacts: html_args, sarif_args, html_results, sarif_results)",
+        "T06b (6 artifacts: text_args, json_args, advisory_args, text_results, json_results, advisory_results)"
+      ],
+      "severity": "info",
+      "status": "provisional",
+      "title": "T06: Artifact Safety \u2014 10 surfaces, 0 reconstruction leaks"
+    },
+    "F-T07-0": {
+      "depends_on": [],
+      "explanation": "ELI5: two of the five durability cases (C1: does logging trouble stop the relay; C5: does a long, slow-paced run hold up) had been reported earlier with numbers that don't add up -- a '100-call, 600+ second' test that supposedly finished in 0.18 seconds. Those two are now re-run for real: C1 with an actual chmod'd directory and a captured subprocess PID, and C5 as a genuine ~10-minute paced session with memory samples taken every 25 calls. Why it matters: the earlier numbers were physically impossible (100 calls at any real pace can't finish in 0.18s), so they could not be trusted as evidence of durability. The corrected C1/C5 entries carry wall-clock, PID, and RSS data a reviewer can independently sanity-check against the timestamps in durability-checkpoint.json. C2-C4 are left as the original driver-based runs but now explicitly labeled as such (return code + response counts only, no PID/wall-clock instrumentation) so nobody mistakes them for the same evidence tier as C1/C5.",
+      "id": "F-T07-0",
+      "metrics": {
+        "c1_returncode": 0,
+        "c1_tool_results": 3,
+        "c1_wall_sec": 0.17463265700644115,
+        "c5_log_lines": 206,
+        "c5_responses": 100,
+        "c5_rss_range_kb": "13680-13688 (flat, no leak signal)",
+        "c5_rss_samples": 4,
+        "c5_tap_pid": 113998,
+        "c5_total_wall_sec": 603.1834399600011
+      },
+      "provenance": "b1_result.json + b2_result.json (scratch rec/); durability-checkpoint.json b2_checkpoints array; durability-0610.json C1/C5 entries",
+      "severity": "info",
+      "status": "provisional",
+      "title": "Durability C1/C5 re-run with real evidence (PID, wall-clock, RSS); C2-C4 flagged as driver-only evidence"
+    },
+    "F-T08-0": {
+      "depends_on": [],
+      "explanation": "A brand-new user with only the README can reach a working session log and summary. All essential commands (install, summarize, detect, report, audit, advise) work as documented. The core observation \u2192 analysis \u2192 report pipeline is complete and requires no external credentials or real MCP servers. Example bundle created at dogfood/stabilization/example-session/ and verified free of credentials and usernames.",
+      "id": "F-T08-0",
+      "metrics": {
+        "corrections_needed": 1,
+        "essential_path_working": true,
+        "steps_executed": 13,
+        "steps_matched_readme": 12
+      },
+      "provenance": "T08 walkthrough (v0.6.10, Python 3.10.12)",
+      "severity": "info",
+      "status": "provisional",
+      "title": "README-from-zero exercise completed successfully"
+    },
+    "F-T08-1": {
+      "depends_on": [],
+      "explanation": "Running `glassport tui` in a non-terminal environment (Docker, CI, agent subprocess) raises `_curses.error: cbreak() returned ERR`. The README does not mention this requirement in the Quick Start section 6, though it is implicit to anyone familiar with curses. ELI5: The TUI needs a real terminal to control cursor and colors. Why it matters: Users in CI/Docker environments or following along programmatically will encounter an unexplained error. Recommendation: Add a note in Quick Start \u00a7 6 like '(requires a terminal; run on localhost)'.",
+      "id": "F-T08-1",
+      "metrics": {
+        "affected_command": "glassport tui",
+        "error_type": "curses.error",
+        "step": 12,
+        "workaround_available": true
+      },
+      "provenance": "README step 6; tested in subprocess",
+      "severity": "P2",
+      "status": "provisional",
+      "title": "TUI requires terminal; fails in non-PTY environments"
+    },
+    "F-T08-2": {
+      "depends_on": [],
+      "explanation": "The 'Query the history' section introduces `glassport serve` as an MCP server that reads session logs, but does not mention that logs must be in the default ~/.glassport/sessions or that `--log-dir` can override it. A user with logs in a custom directory will discover this by trial or by reading the help text. ELI5: serve assumes you store logs in one place; if you don't, you won't know why the agent can't see them. Why it matters: Low friction for most users (the default location is fine), but reduces discoverability of log-dir customization. Recommendation: Add a brief note in 'Query the history' or a link to the serve args in help.",
+      "id": "F-T08-2",
+      "metrics": {
+        "actual_behavior": "serve logs to ~/.glassport/sessions (hardcoded)",
+        "assumed_behavior": "serve logs to ~/.glassport/sessions",
+        "discovery_friction": "flag exists but not highlighted",
+        "step": 13
+      },
+      "provenance": "README section 'Query the history'; tested with synthetic serve call",
+      "severity": "P3",
+      "status": "provisional",
+      "title": "glassport serve uses hardcoded ~/.glassport/sessions; --log-dir not mentioned in quickstart"
+    }
+  },
+  "schema": "glassport-stabilization-ledger/1"
+}

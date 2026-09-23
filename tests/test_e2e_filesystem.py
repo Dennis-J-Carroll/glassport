@@ -142,6 +142,10 @@ class TestE2EFilesystemServer(unittest.TestCase):
             logs = list(logdir.glob("*.jsonl"))
             self.assertTrue(logs, f"no session log written; stderr:\n{err}")
             trace = from_mcp_session_file(str(logs[0]))
+            from glassport.detectors import annotate
+            from tests.test_incremental_detectors import TestFabricatedParity
+            TestFabricatedParity.assert_parity(
+                self, logs[0].read_text(encoding="utf-8").splitlines(), annotate, None)
 
             # 1. The server declared a real tool surface (handshake + tools/list
             #    captured from real bytes, not a synthetic fixture).

@@ -29,12 +29,12 @@ import re
 import string
 import sys
 import unicodedata
-from typing import Any, Iterator, NamedTuple, Optional, Callable
+from typing import Any, Iterator, NamedTuple, Optional, Callable, Sequence
 
 from glassport.interaction_trace import (
     Annotation, AnnotationKind, HallucinationCategory,
     ActorKind, EventKind, Event, InteractionTrace, PartKind,
-    _new_id,
+    _new_id, tool_declaration,
 )
 
 ANNOTATOR = "glassport.detectors"
@@ -184,152 +184,42 @@ def _tool_call_parts(event: Event):
 
 def _list_result_names(event: Event) -> Optional[set[str]]:
     """Tool names in a tools/list response event, or None if not one."""
-    if event.metadata.get("method_replied_to") != "<tools/list>":
-        return None
-    for p in event.parts:
-        frame = p.content if isinstance(p.content, dict) else {}
-        tools = (frame.get("result") or {}).get("tools")
-        if isinstance(tools, list):
-            return {t["name"] for t in tools
-                    if isinstance(t, dict) and "name" in t}
-    return None
+    tools = tool_declaration(event)
+    return {t["name"] for t in tools} if tools is not None else None
 
 
 def context_violations(trace: InteractionTrace) -> list[Annotation]:
-    """
-    Wire-provable violations of the session's negotiated context:
-
-      schema_violation        call arguments break the declared inputSchema
-      capability_violation    server-initiated request the client never granted
-      unknown_server_request  server-initiated request outside the MCP set
-      premature_call          tools/call before notifications/initialized
-      call_before_declaration tools/call when no tools/list request was
-                              ever sent (a call merely racing the
-                              response is valid pipelining, not flagged)
-      orphaned_response       response whose id matched no request
-      surface_change          tools/list result changed mid-session
-    """
-    out: list[Annotation] = []
-
-    client_caps: Optional[dict] = None
-    tool_defs: dict[str, dict] = {}
-    for actor in trace.actors:
-        if actor.kind == ActorKind.AGENT and "capabilities" in actor.metadata:
-            client_caps = actor.metadata["capabilities"]
-        for t in actor.metadata.get("tools") or []:
-            if isinstance(t, dict) and "name" in t:
-                tool_defs.setdefault(t["name"], t)
-
-    initialized_seen = False
-    tools_list_requested = False
-    first_surface: Optional[set[str]] = None
-
-    for e in trace.events:
-        md = e.metadata
-
-        if e.kind == EventKind.MESSAGE and \
-                md.get("method") == "notifications/initialized":
-            initialized_seen = True
-
-        # a c2s tools/list request means the client INTENDS to learn the
-        # surface; parsed c2s requests carry no "dir" key, so the absent
-        # server_initiated flag is the direction discriminator
-        if e.kind == EventKind.MESSAGE and md.get("method") == "tools/list" \
-                and not md.get("server_initiated"):
-            tools_list_requested = True
-
-        names = _list_result_names(e)
-        if names is not None:
-            if first_surface is None:
-                first_surface = names
-            elif names != first_surface:
-                delta = sorted(names ^ first_surface)
-                out.append(_ann(
-                    e, AnnotationKind.DIVERGENCE, "surface_change",
-                    f"tools/list surface changed mid-session; delta: {delta}",
-                    severity=2, delta=delta))
-
-        if e.kind == EventKind.TOOL_CALL:
-            for name, args in _tool_call_parts(e):
-                if not initialized_seen:
-                    out.append(_ann(
-                        e, AnnotationKind.ANOMALY, "premature_call",
-                        f"tools/call '{name}' before notifications/initialized",
-                        severity=2))
-                elif first_surface is None and not tools_list_requested:
-                    out.append(_ann(
-                        e, AnnotationKind.ANOMALY, "call_before_declaration",
-                        f"tools/call '{name}' and no tools/list request "
-                        f"was ever sent", severity=1))
-                schema = (tool_defs.get(name) or {}).get("inputSchema")
-                for problem in _schema_problems(args, schema):
-                    out.append(_ann(
-                        e, AnnotationKind.DIVERGENCE, "schema_violation",
-                        f"'{name}': {problem}", severity=2,
-                        category=HallucinationCategory.TOOL_USE))
-
-        if md.get("server_initiated") and not md.get("notification"):
-            method = md.get("method")
-            if method in ALWAYS_ALLOWED_SERVER_REQUESTS:
-                pass
-            elif method in SERVER_REQUEST_CAPABILITY:
-                needed = SERVER_REQUEST_CAPABILITY[method]
-                # no initialize captured -> no claim either way
-                if client_caps is not None and needed not in client_caps:
-                    out.append(_ann(
-                        e, AnnotationKind.ANOMALY, "capability_violation",
-                        f"server requested '{method}' but the client never "
-                        f"granted the '{needed}' capability", severity=3))
-            else:
-                out.append(_ann(
-                    e, AnnotationKind.ANOMALY, "unknown_server_request",
-                    f"server-initiated request '{method}' is not a known "
-                    f"MCP client capability", severity=2))
-
-        # a quarantine replacement re-answers an id the logged original
-        # already answered; it is the delivered copy, not an orphan
-        gate_mark = md.get("gate")
-        if md.get("orphaned") and not (isinstance(gate_mark, dict) and gate_mark.get(
-                "action") == "quarantine_replacement"):
-            out.append(_ann(
-                e, AnnotationKind.ANOMALY, "orphaned_response",
-                f"response id={md.get('jsonrpc_id')} matched no request",
-                severity=1))
-
-    return out
+    """Context/schema findings from facts observed at each event in wire order."""
+    from glassport.incremental import ContextDetector, replay
+    return replay(trace, [ContextDetector()])
 
 
 def fabricated_calls(trace: InteractionTrace) -> list[Annotation]:
-    """trace.fabricated_tool_calls() lifted into annotations."""
-    events_by_id = {e.id: e for e in trace.events}
-    declared = trace.declared_tools()
-    out = []
-    for event_id, name in trace.fabricated_tool_calls():
-        out.append(_ann(
-            events_by_id[event_id], AnnotationKind.HALLUCINATION,
-            "fabricated_tool_call",
-            f"tools/call '{name}' is outside the declared surface",
-            severity=3, category=HallucinationCategory.TOOL_USE,
-            no_declaration_seen=not declared))
-    return out
+    """Batch compatibility wrapper over the incremental fabricated-call pass."""
+    from glassport.incremental import FabricatedCallsDetector, replay
+    return replay(trace, [FabricatedCallsDetector()])
 
 
 def semantic_taint(trace: InteractionTrace) -> list[Annotation]:
     """Apply the live gate's taint check post-hoc, including ungated calls."""
+    from glassport.incremental import SemanticTaintDetector, replay
+    return replay(trace, [SemanticTaintDetector()])
+
+
+def _taint_for_event(e: Event) -> list[Annotation]:
     out: list[Annotation] = []
-    for e in trace.events:
-        if e.kind != EventKind.TOOL_CALL:
+    if e.kind != EventKind.TOOL_CALL:
+        return out
+    for name, args in _tool_call_parts(e):
+        hit = find_taint(args)
+        if hit is None:
             continue
-        for name, args in _tool_call_parts(e):
-            hit = find_taint(args)
-            if hit is None:
-                continue
-            pat_name, key_path, _snippet = hit
-            out.append(_ann(
-                e, AnnotationKind.HALLUCINATION, pat_name,
-                f"tools/call '{name}' argument '{key_path}' contains a "
-                f"semantic taint signature ({pat_name})",
-                severity=3, category=HallucinationCategory.TOOL_USE))
+        pat_name, key_path, _snippet = hit
+        out.append(_ann(
+            e, AnnotationKind.HALLUCINATION, pat_name,
+            f"tools/call '{name}' argument '{key_path}' contains a "
+            f"semantic taint signature ({pat_name})",
+            severity=3, category=HallucinationCategory.TOOL_USE))
     return out
 
 
@@ -351,74 +241,73 @@ _GATE_BLOCK_WHY = {
 
 
 def gate_actions(trace: InteractionTrace) -> list[Annotation]:
-    """
-    Gate enforcement (M5) surfaced as INFO annotations — the record that
-    a frame was stopped at the glass, not a judgment about it (the call
-    itself is still judged by fabricated_calls / context_violations).
-    """
+    """Observed gate records; classification remains separate from enforcement."""
+    return [a for e in trace.events for a in _gate_actions_for_event(e)]
+
+
+def _gate_actions_for_event(e: Event) -> list[Annotation]:
     out: list[Annotation] = []
-    for e in trace.events:
-        g = e.metadata.get("gate")
-        if not isinstance(g, dict):
-            continue
-        if g.get("action") == "blocked":
-            reason = g.get("reason")
-            tool = g.get("tool")
-            why = _GATE_BLOCK_WHY.get(reason) if isinstance(reason, str) or reason is None else None
-            if why is None:   # strict-mode faults and future reasons
-                why = f"a required check could not complete ({reason})"
-            what = f"tools/call '{tool}'" if tool is not None else "a client frame"
-            out.append(_ann(
-                e, AnnotationKind.INFO, "gate_blocked",
-                f"gate blocked {what} — {why}; the server never saw this frame",
-                severity=1, tool=tool, reason=reason))
-        elif g.get("action") == "injected":
-            out.append(_ann(
-                e, AnnotationKind.INFO, "gate_injected_response",
-                f"error response synthesized by the gate for "
-                + (f"blocked call '{g.get('tool')}'" if g.get("tool") is not None
-                   else "a blocked client frame")
-                + "; the server never sent this frame",
-                severity=1, tool=g.get("tool")))
-        elif g.get("action") == "quarantined":
-            reduced = " (delivered in reduced form)" if g.get("reduced") else ""
-            out.append(_ann(
-                e, AnnotationKind.INFO, "gate_quarantined",
-                f"gate neutralized prompt-injection text in a resources/read "
-                f"reply for '{g.get('uri')}'{reduced}; the client never saw "
-                f"this original", severity=1, uri=g.get("uri")))
-        elif g.get("action") == "quarantine_replacement":
-            out.append(_ann(
-                e, AnnotationKind.INFO, "gate_quarantine_replacement",
-                f"neutralized resources/read reply the client received in "
-                f"place of the original", severity=1, uri=g.get("uri")))
-        elif g.get("action") in ("quarantine_dropped", "quarantine_withheld"):
-            verb = ("withheld (strict mode)" if g.get("action") == "quarantine_withheld"
-                    else "dropped")
-            out.append(_ann(
-                e, AnnotationKind.INFO, "gate_" + g["action"],
-                f"gate {verb} a server frame it could not safely deliver "
-                f"({g.get('reason') or 'quarantine'}); the client never saw it",
-                severity=1, reason=g.get("reason"), uri=g.get("uri")))
-        elif g.get("action") == "gate_skipped":
-            # The gate records the first fault as `reason` and any later
-            # ones in `also_skipped`; surface all of them, since a config
-            # reason (attestation_unavailable) can precede a scanner fault.
-            reason = g.get("reason")
-            also = g.get("also_skipped")
-            also = [r for r in also if isinstance(r, str)] if isinstance(also, list) else []
-            if reason in (None, "no_surface_timeout") and not also:
-                why = ("no tools/list response arrived within the hold "
-                       "window, so this call was forwarded unenforced")
-            else:
-                skipped = ", ".join(str(r) for r in (reason, *also) if r is not None)
-                why = (f"these checks could not run ({skipped}), so it was "
-                       f"forwarded without them")
-            out.append(_ann(
-                e, AnnotationKind.INFO, "gate_skipped",
-                f"gate failed open for tools/call '{g.get('tool')}' — {why}",
-                severity=1, tool=g.get("tool"), reason=reason,
-                also_skipped=also))
+    g = e.metadata.get("gate")
+    if not isinstance(g, dict):
+        return []
+    if g.get("action") == "blocked":
+        reason = g.get("reason")
+        tool = g.get("tool")
+        why = _GATE_BLOCK_WHY.get(reason) if isinstance(reason, str) or reason is None else None
+        if why is None:   # strict-mode faults and future reasons
+            why = f"a required check could not complete ({reason})"
+        what = f"tools/call '{tool}'" if tool is not None else "a client frame"
+        out.append(_ann(
+            e, AnnotationKind.INFO, "gate_blocked",
+            f"gate blocked {what} — {why}; the server never saw this frame",
+            severity=1, tool=tool, reason=reason))
+    elif g.get("action") == "injected":
+        out.append(_ann(
+            e, AnnotationKind.INFO, "gate_injected_response",
+            f"error response synthesized by the gate for "
+            + (f"blocked call '{g.get('tool')}'" if g.get("tool") is not None
+               else "a blocked client frame")
+            + "; the server never sent this frame",
+            severity=1, tool=g.get("tool")))
+    elif g.get("action") == "quarantined":
+        reduced = " (delivered in reduced form)" if g.get("reduced") else ""
+        out.append(_ann(
+            e, AnnotationKind.INFO, "gate_quarantined",
+            f"gate neutralized prompt-injection text in a resources/read "
+            f"reply for '{g.get('uri')}'{reduced}; the client never saw "
+            f"this original", severity=1, uri=g.get("uri")))
+    elif g.get("action") == "quarantine_replacement":
+        out.append(_ann(
+            e, AnnotationKind.INFO, "gate_quarantine_replacement",
+            f"neutralized resources/read reply the client received in "
+            f"place of the original", severity=1, uri=g.get("uri")))
+    elif g.get("action") in ("quarantine_dropped", "quarantine_withheld"):
+        verb = ("withheld (strict mode)" if g.get("action") == "quarantine_withheld"
+                else "dropped")
+        out.append(_ann(
+            e, AnnotationKind.INFO, "gate_" + g["action"],
+            f"gate {verb} a server frame it could not safely deliver "
+            f"({g.get('reason') or 'quarantine'}); the client never saw it",
+            severity=1, reason=g.get("reason"), uri=g.get("uri")))
+    elif g.get("action") == "gate_skipped":
+        # The gate records the first fault as `reason` and any later
+        # ones in `also_skipped`; surface all of them, since a config
+        # reason (attestation_unavailable) can precede a scanner fault.
+        reason = g.get("reason")
+        also = g.get("also_skipped")
+        also = [r for r in also if isinstance(r, str)] if isinstance(also, list) else []
+        if reason in (None, "no_surface_timeout") and not also:
+            why = ("no tools/list response arrived within the hold "
+                   "window, so this call was forwarded unenforced")
+        else:
+            skipped = ", ".join(str(r) for r in (reason, *also) if r is not None)
+            why = (f"these checks could not run ({skipped}), so it was "
+                   f"forwarded without them")
+        out.append(_ann(
+            e, AnnotationKind.INFO, "gate_skipped",
+            f"gate failed open for tools/call '{g.get('tool')}' — {why}",
+            severity=1, tool=g.get("tool"), reason=reason,
+            also_skipped=also))
     return out
 
 
@@ -1216,6 +1105,20 @@ def _active_patterns() -> list[PIIPattern]:
     return PII_PATTERNS + _CUSTOM_PATTERNS
 
 
+def snapshot_pii_patterns() -> tuple[PIIPattern, ...]:
+    """Freeze the currently active pattern set into an immutable tuple.
+
+    The registry above is process-global and mutable: `register_pii_pattern()`
+    and the env autoload can change it between two scans. Ordinary callers
+    (stdio tap, summarize, advise, audit) keep reading it live, unchanged. A
+    caller that must stay reproducible across a whole session — an explicitly
+    observed HTTP epoch — takes one snapshot at session start and passes it
+    down through the scanner helpers, so a mid-session registry mutation
+    cannot silently change what the recorded decisions were computed from.
+    """
+    return tuple(_active_patterns())
+
+
 # Set by _ensure_env_patterns_loaded(); reset by clear_custom_pii_patterns().
 _env_loaded = False
 
@@ -1347,16 +1250,21 @@ _STRUCTURAL_CONTAINERS = frozenset({"jwt_token"})
 _GENERIC_SECRETS = frozenset({"aws_secret_key", "generic_api_key", "high_entropy_token_30_40"})
 
 
-def _scan_normalized(text: str) -> list[tuple[PIIPattern, str, int, int]]:
+def _scan_normalized(text: str,
+                     patterns: "Sequence[PIIPattern] | None" = None,
+                     ) -> list[tuple[PIIPattern, str, int, int]]:
     """Validated, de-duped PII hits WITH normalized-coordinate spans.
     `text` is assumed ALREADY normalized (see _normalize_for_scan).
+
+    `patterns` is an optional frozen pattern set (see snapshot_pii_patterns).
+    None — the default every ordinary caller uses — reads the live registry.
 
     Span-aware suppression: a generic-secret match (aws_secret_key,
     generic_api_key) that falls entirely inside a structural token match
     (jwt_token) is part of that structure, not a separate credential."""
     raw: list[tuple[PIIPattern, str, int, int]] = []
     structural_spans: list[tuple[int, int]] = []
-    for pat in _active_patterns():
+    for pat in (_active_patterns() if patterns is None else patterns):
         for m in pat.pattern.finditer(text):
             value = m.group(m.lastindex) if m.lastindex else m.group(0)
             if pat.validator and not pat.validator(value):
@@ -1380,19 +1288,23 @@ def _scan_normalized(text: str) -> list[tuple[PIIPattern, str, int, int]]:
     return hits
 
 
-def _scan_pii_spanned(text: str) -> list[tuple[PIIPattern, str, int, int]]:
+def _scan_pii_spanned(text: str,
+                      patterns: "Sequence[PIIPattern] | None" = None,
+                      ) -> list[tuple[PIIPattern, str, int, int]]:
     """Validated, de-duped PII hits with spans, from raw (un-normalized) text.
     Caps input at MAX_SCAN_BYTES so a multi-megabyte payload can't turn the
     scan into a DoS, then normalizes to defeat obfuscation."""
     if len(text) > MAX_SCAN_BYTES:
         text = text[:MAX_SCAN_BYTES]
-    return _scan_normalized(_normalize_for_scan(text))
+    return _scan_normalized(_normalize_for_scan(text), patterns)
 
 
-def _scan_pii(text: str) -> list[tuple[PIIPattern, str]]:
+def _scan_pii(text: str,
+              patterns: "Sequence[PIIPattern] | None" = None,
+              ) -> list[tuple[PIIPattern, str]]:
     """Validated, de-duplicated PII hits (no spans). Back-compat wrapper for
     consumers that don't need offsets."""
-    return [(p, v) for p, v, _, _ in _scan_pii_spanned(text)]
+    return [(p, v) for p, v, _, _ in _scan_pii_spanned(text, patterns)]
 
 
 def _extract_hosts_from_value(value: Any, hosts: set[str]) -> None:
@@ -1441,58 +1353,65 @@ def _is_trusted_host(hostname: str) -> bool:
 
 
 def data_exfiltration(trace: InteractionTrace) -> list[Annotation]:
-    """PII/credentials in tool-call arguments, sensitive egress to
-    undeclared or merely-trusted hosts, and secrets leaked back in tool
-    results. Severity: 3 hostile, 2 should-not-happen, 1 worth a look."""
+    """PII and egress findings using declarations observed before each event."""
+    from glassport.incremental import DataExfiltrationDetector, replay
+    return replay(trace, [DataExfiltrationDetector()])
+
+
+def _exfiltration_for_event(e: Event, declared: set[str],
+                            patterns: "Sequence[PIIPattern] | None" = None,
+                            ) -> list[Annotation]:
+    """Shared payload checks; declared hosts come from bounded session state.
+
+    `patterns` optionally pins the scan to a frozen pattern set instead of the
+    live registry (see snapshot_pii_patterns); None keeps today's behavior."""
     out: list[Annotation] = []
-    declared = _extract_declared_hosts(trace)
-
-    for e in trace.events:
-        if e.kind == EventKind.TOOL_CALL:
-            for name, args in _tool_call_parts(e):
-                blob = json.dumps(args, ensure_ascii=False, default=str)
-                hits = _scan_pii(blob)
-                for pat, value in hits:
-                    out.append(_ann(
-                        e, AnnotationKind.DIVERGENCE, f"pii_{pat.category}",
-                        f"tools/call '{name}' argument contains {pat.description}: "
-                        f"{_redact(value, pat.category)}",
-                        severity=pat.severity,
-                        category=HallucinationCategory.TOOL_USE,
-                        pii_category=pat.category, tool=name))
-
-                has_pii = any(p.severity >= 2 for p, _ in hits)
-                for host in _extract_hosts_from_args(args):
-                    if host in declared:
-                        continue
-                    trusted = _is_trusted_host(host)
-                    if trusted and not has_pii:
-                        continue            # ordinary cloud traffic, no secret
-                    severity = 3 if (has_pii and not trusted) else 2
-                    out.append(_ann(
-                        e, AnnotationKind.ANOMALY, "unexpected_egress_host",
-                        f"tools/call '{name}' reaches {host}"
-                        + (" (allowlisted)" if trusted else " (undeclared)")
-                        + (" CARRYING SENSITIVE DATA" if has_pii else ""),
-                        severity=severity,
-                        host=host, has_pii=has_pii, trusted=trusted, tool=name))
-
-        elif e.kind == EventKind.TOOL_RESULT:
-            blob = json.dumps([p.content for p in e.parts],
-                              ensure_ascii=False, default=str)
-            for pat, _ in _scan_pii(blob):
-                if pat.severity < 3:
-                    continue
+    if e.kind == EventKind.TOOL_CALL:
+        for name, args in _tool_call_parts(e):
+            blob = json.dumps(args, ensure_ascii=False, default=str)
+            hits = _scan_pii(blob, patterns)
+            for pat, value in hits:
                 out.append(_ann(
-                    e, AnnotationKind.DIVERGENCE, f"pii_in_result_{pat.category}",
-                    f"tool result leaks {pat.description}",
-                    severity=3, category=HallucinationCategory.TOOL_USE,
-                    pii_category=pat.category))
+                    e, AnnotationKind.DIVERGENCE, f"pii_{pat.category}",
+                    f"tools/call '{name}' argument contains {pat.description}: "
+                    f"{_redact(value, pat.category)}",
+                    severity=pat.severity,
+                    category=HallucinationCategory.TOOL_USE,
+                    pii_category=pat.category, tool=name))
+
+            has_pii = any(p.severity >= 2 for p, _ in hits)
+            for host in _extract_hosts_from_args(args):
+                if host in declared:
+                    continue
+                trusted = _is_trusted_host(host)
+                if trusted and not has_pii:
+                    continue            # ordinary cloud traffic, no secret
+                severity = 3 if (has_pii and not trusted) else 2
+                out.append(_ann(
+                    e, AnnotationKind.ANOMALY, "unexpected_egress_host",
+                    f"tools/call '{name}' reaches {host}"
+                    + (" (allowlisted)" if trusted else " (undeclared)")
+                    + (" CARRYING SENSITIVE DATA" if has_pii else ""),
+                    severity=severity,
+                    host=host, has_pii=has_pii, trusted=trusted, tool=name))
+
+    elif e.kind == EventKind.TOOL_RESULT:
+        blob = json.dumps([p.content for p in e.parts],
+                          ensure_ascii=False, default=str)
+        for pat, _ in _scan_pii(blob, patterns):
+            if pat.severity < 3:
+                continue
+            out.append(_ann(
+                e, AnnotationKind.DIVERGENCE, f"pii_in_result_{pat.category}",
+                f"tool result leaks {pat.description}",
+                severity=3, category=HallucinationCategory.TOOL_USE,
+                pii_category=pat.category))
     return out
 
 
 DETECTORS = [fabricated_calls, context_violations, gate_actions, semantic_taint,
              data_exfiltration]
+_DEFAULT_DETECTORS = tuple(DETECTORS)
 
 
 def _detector_error(detector_name: str, exc: BaseException) -> Annotation:
@@ -1516,6 +1435,12 @@ def annotate(trace: InteractionTrace) -> list[Annotation]:
     Each detector is isolated: if one raises, its failure is captured as
     a 'detector_error' annotation and the remaining detectors still run,
     so a single bad pass can't blind the whole overwatch."""
+    if tuple(DETECTORS) == _DEFAULT_DETECTORS:
+        from glassport.incremental import replay
+        found = replay(trace)
+        trace.annotations.extend(found)
+        return found
+    # Preserve the existing extension point for explicitly installed batch passes.
     found: list[Annotation] = []
     for detector in DETECTORS:
         try:

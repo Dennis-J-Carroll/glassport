@@ -244,6 +244,7 @@ def fingerprint(trace: InteractionTrace, source_name: str = "") -> dict:
         "protocol_version": server_meta.get("protocol_version"),
         "capabilities": sorted(server_meta.get("capabilities") or {}),
         "declared_tools": sorted(trace.declared_tools()),
+        "declaration_known": trace.declared_surface() is not None,
         "schema_hashes": schema_hashes,
         "called_tools": sorted({n for _, n in trace.called_tools()}),
         "fabricated_tools": sorted({n for _, n
@@ -303,7 +304,7 @@ def merge(baseline: dict, fp: dict) -> dict:
         if fp["server_version"]:
             baseline["server_versions"].setdefault(
                 fp["server_name"], set()).add(fp["server_version"])
-    if fp["declared_tools"]:
+    if fp.get("declaration_known", bool(fp["declared_tools"])):
         baseline["last_declared"] = set(fp["declared_tools"])
     baseline["last_schemas"].update(fp["schemas"])
     return baseline
@@ -337,7 +338,7 @@ def drift(baseline: dict, fp: dict) -> list[Drift]:
 
     # only meaningful when this session actually produced a tools/list;
     # a session with no handshake proves nothing about removal
-    if fp["declared_tools"]:
+    if fp.get("declaration_known", bool(fp["declared_tools"])):
         for name in sorted(baseline["last_declared"]
                            - set(fp["declared_tools"])):
             d("removed_declared_tool", 1,
