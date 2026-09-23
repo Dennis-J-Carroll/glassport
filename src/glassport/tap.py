@@ -59,6 +59,7 @@ from glassport.detectors import (
 
 import hashlib
 import json
+import math
 import os
 import shlex
 import signal
@@ -201,6 +202,12 @@ class SessionLog:
                     # rather than silently dropping the entry.
                     entry["frame"], entry["raw"] = None, text
                     serialized = json.dumps(entry, ensure_ascii=False)
+                try:
+                    serialized.encode("utf-8")
+                except UnicodeEncodeError:
+                    # json.loads accepts lone surrogates ("\\ud800") that
+                    # UTF-8 cannot carry: escape this entry, never drop it.
+                    serialized = json.dumps(entry, ensure_ascii=True)
                 self._fh.write(serialized + "\n")
         except Exception:
             pass  # logging is best-effort; the relay is sacred
@@ -317,18 +324,29 @@ class Gate:
         All gate blocks reuse -32000 and distinguish checks via data.reason.
         Callers build suggestions from known structured values, never from
         matched payload content.
+
+        Only a JSON-RPC id (string or finite number) is echoed. A notification
+        (no id) gets nothing back, and so does a caller-built container,
+        boolean, or non-finite number: such a request is unaddressable, and
+        re-encoding a deeply nested id could itself overflow and turn the
+        block into a fail-open forward.
         """
-        if rid is None:
+        if rid is None or isinstance(rid, bool) or not isinstance(rid, (str, int, float)):
+            return None
+        if isinstance(rid, float) and not math.isfinite(rid):
             return None
         data = {"glassport": "gate_blocked", "reason": reason, **extra_data}
         if tool is not None:
             data["tool"] = tool
         if suggestion is not None:
             data["suggestion"] = suggestion
+        # ASCII-escaped: the message quotes caller text, which may hold lone
+        # surrogates that UTF-8 cannot encode; the resulting exception would
+        # otherwise turn a block into a fail-open forward.
         return (json.dumps({
             "jsonrpc": "2.0", "id": rid,
             "error": {"code": -32000, "message": message, "data": data},
-        }, ensure_ascii=False) + "\n").encode("utf-8")
+        }, ensure_ascii=True) + "\n").encode("utf-8")
 
     def _idempotency_hit(self, name: str, arguments: Any) -> bool:
         """Detect repeated canonical calls in a monotonic TTL window."""
@@ -364,7 +382,7 @@ class Gate:
             if st.st_uid != os.getuid() or (st.st_mode & 0o022):
                 return True
             data = json.loads(p.read_text(encoding="utf-8"))
-        except (OSError, ValueError, UnicodeDecodeError):
+        except (OSError, ValueError, UnicodeDecodeError, RecursionError):
             return True
         if not isinstance(data, dict):
             return True
@@ -433,7 +451,9 @@ class Gate:
                     changed = True
             if not changed:
                 return ("forward", None, None)
-            new_line = (json.dumps(frame, ensure_ascii=False) + "\n").encode("utf-8")
+            # ASCII-escaped so a lone surrogate in any sibling field cannot
+            # fail the encode and release the unneutralized original.
+            new_line = (json.dumps(frame, ensure_ascii=True) + "\n").encode("utf-8")
         except Exception:
             return ("forward", None,
                     {"action": "quarantine_scan_error", "uri": uri})
