@@ -88,8 +88,17 @@ def _matches_type(value, type_name: str) -> bool:
 
 # Semantic taint checks injection shape, independently of secret content.
 _TAINT_PATTERNS: list[tuple[str, "re.Pattern[str]"]] = [
+    # Role markers and model chat-template special tokens (ChatML, Llama 2/3,
+    # Gemma, GPT end-of-text). These are reserved token spellings, not prose.
+    # No two \s* may be adjacent: the optional closing "/" is (?:/\s*)?, so a
+    # second whitespace run can only follow a literal "/" (a bare \s*/?\s*
+    # backtracked quadratically on "[" plus a long whitespace run).
     ("role_switch_delimiter",
-     re.compile(r"<\|\s*(system|assistant|user)\s*\|>|\[\s*SYSTEM\s*\]",
+     re.compile(r"<\|\s*(?:system|assistant|user|im_start|im_end|im_sep"
+                r"|start_header_id|end_header_id|eot_id|begin_of_text"
+                r"|endoftext)\s*\|>"
+                r"|\[\s*SYSTEM\s*\]|\[\s*(?:/\s*)?INST\s*\]"
+                r"|<<\s*(?:/\s*)?SYS\s*>>|<\s*(?:start|end)_of_turn\s*>",
                 re.IGNORECASE)),
     ("zero_width_obfuscation", re.compile(r"[\u200b-\u200d\ufeff]")),
 ]
