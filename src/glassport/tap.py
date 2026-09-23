@@ -87,6 +87,22 @@ def _now_iso() -> str:
 MAX_ARGUMENT_DEPTH = 64
 
 
+def _lenient_int(digits: str) -> int | str:
+    """parse_int hook: CPython refuses integer literals past
+    sys.get_int_max_str_digits() (4300), which V8 accepts. Keep such a
+    literal as its digit string so the frame stays inspectable instead of
+    becoming a parser differential the gate cannot judge."""
+    try:
+        return int(digits)
+    except ValueError:
+        return digits
+
+
+def _loads(data: bytes) -> Any:
+    """json.loads for gate decisions: tolerant of oversized integers only."""
+    return json.loads(data, parse_int=_lenient_int)
+
+
 def _nesting_exceeds(value: Any, limit: int) -> bool:
     """True when dict/list nesting in `value` goes deeper than `limit`
     (a bare container is depth 1). Iterative, so it cannot itself hit the
@@ -404,7 +420,7 @@ class Gate:
     def observe_s2c(self, line: bytes) -> None:
         """Harvest tool declarations from server output. Never raises."""
         try:
-            frame = json.loads(line)
+            frame = _loads(line)
         except (json.JSONDecodeError, ValueError, UnicodeDecodeError,
                 RecursionError):
             return
@@ -421,30 +437,36 @@ class Gate:
                 self._declared_defs = defs
             self._surface_known.set()
 
+    def _uninspectable_s2c(self, reason: str
+                           ) -> tuple[str, bytes | None, dict | None]:
+        """A server line the gate cannot read may be a resources/read reply
+        whose text a client parser (V8) would still accept, and its id is
+        unreadable. While enforcing it is dropped, not released."""
+        if not self._enforcement_on():
+            return ("forward", None, {"action": "gate_disabled", "reason": reason})
+        return ("drop", None, {"action": "quarantine_dropped", "reason": reason})
+
     def check_s2c(self, line: bytes
                   ) -> tuple[str, bytes | None, dict | None]:
         """Forward results, or rewrite tainted resources/read text in place.
 
         A scan failure preserves the original response so the waiting client
-        still receives it. Readable results are never dropped by this check.
-        The one exception is a frame too deep to parse while a resources/read
-        is pending: it may be that response, an iterative client parser (V8)
-        would accept text the quarantine never saw, and its id is unreadable,
-        so it is dropped while enforcing ("drop") rather than released.
+        still receives it. Readable results are never dropped by this check;
+        unreadable lines are (see _uninspectable_s2c). Blank lines pass.
         """
-        try:
-            frame = json.loads(line)
-        except RecursionError:
-            with self._lock:
-                pending = bool(self._pending_reads)
-            if pending and self._enforcement_on():
-                return ("drop", None,
-                        {"action": "quarantine_dropped", "reason": "frame_too_deep"})
-            return ("forward", None,
-                    {"action": "quarantine_scan_error", "reason": "frame_too_deep"})
-        except (json.JSONDecodeError, ValueError, UnicodeDecodeError):
+        if not line.strip():
             return ("forward", None, None)
-        if not isinstance(frame, dict) or "method" in frame:
+        try:
+            frame = _loads(line)
+        except RecursionError:
+            return self._uninspectable_s2c("frame_too_deep")
+        except (json.JSONDecodeError, ValueError, UnicodeDecodeError):
+            return self._uninspectable_s2c("uninspectable_frame")
+        if isinstance(frame, list):
+            return ("forward", None, None)
+        if not isinstance(frame, dict):
+            return self._uninspectable_s2c("uninspectable_frame")
+        if "method" in frame:
             return ("forward", None, None)
         uri = None
         try:
@@ -494,6 +516,20 @@ class Gate:
                     {"action": "quarantine_scan_error", "uri": uri})
         return ("rewrite", new_line, {"action": "quarantined", "uri": uri})
 
+    def _uninspectable_c2s(self, reason: str
+                           ) -> tuple[str, bytes | None, dict | None]:
+        """A client line the gate cannot read (too deep, malformed,
+        invalid UTF-8, \\r-joined messages a
+        universal-newline server splits, or a bare non-object value) may still
+        parse on the server and run a call the gate never read. While
+        enforcing it is dropped; its id is unreadable, so no error response
+        can be addressed."""
+        if not self._enforcement_on():
+            return ("forward", None,
+                    {"action": "gate_disabled", "tool": None, "reason": reason})
+        self.blocked_count += 1
+        return ("block", None, {"action": "blocked", "tool": None, "reason": reason})
+
     def check_c2s(self, line: bytes
                   ) -> tuple[str, bytes | None, dict | None]:
         """
@@ -502,25 +538,18 @@ class Gate:
         sends `response` (bytes, or None for id-less calls) back to the
         client, and logs `info` on the blocked entry.
         """
+        if not line.strip():
+            return ("forward", None, None)   # blank lines carry no message
         try:
-            frame = json.loads(line)
+            frame = _loads(line)
         except RecursionError:
-            # Too deep for this parser, yet an iterative parser on the server
-            # (V8's JSON.parse) may accept it and run a call the gate never
-            # read. While enforcing, drop it; its id is unreadable, so no
-            # error response can be addressed.
-            if not self._enforcement_on():
-                return ("forward", None,
-                        {"action": "gate_disabled", "tool": None,
-                         "reason": "frame_too_deep"})
-            self.blocked_count += 1
-            return ("block", None,
-                    {"action": "blocked", "tool": None,
-                     "reason": "frame_too_deep"})
+            return self._uninspectable_c2s("frame_too_deep")
         except (json.JSONDecodeError, ValueError, UnicodeDecodeError):
-            return ("forward", None, None)   # not ours to judge
-        if not isinstance(frame, dict):
+            return self._uninspectable_c2s("uninspectable_frame")
+        if isinstance(frame, list):
             return ("forward", None, None)
+        if not isinstance(frame, dict):
+            return self._uninspectable_c2s("uninspectable_frame")
         method = frame.get("method")
         if method == "resources/read":
             try:
