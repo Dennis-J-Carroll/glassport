@@ -211,6 +211,7 @@ _RELAY_CHUNK = 65536          # stream bodies in bounded chunks, never all at on
 GATE_MAX_BODY = 4 * 1024 * 1024
 _GATE_DRAIN_LIMIT = 4 * GATE_MAX_BODY
 _LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "[::1]")
+_CREDENTIAL_HEADERS = ("authorization", "cookie", "proxy-authorization")
 _HANDLER_TIMEOUT = 30         # drop a stalled client so it can't pin a thread
 
 
@@ -679,6 +680,21 @@ def _make_handler(remote, log: SessionLog, observer=None, journal=None):
             if gate_mode and not self._local_request_ok():
                 self._reject(403, "origin or host not allowed")
                 return
+            if gate_mode:
+                # Nothing a caller sends may weaken enforcement for later
+                # calls. The observer answers ambiguous credentials and an
+                # unverifiable resume by retiring or resetting the session's
+                # epoch, which would switch enforcement off for the whole
+                # session; refuse such a request before it is observed.
+                names = [k.lower() for k in self.headers.keys()]
+                if any(names.count(n) > 1 for n in _CREDENTIAL_HEADERS):
+                    self._reject(400, "ambiguous credentials")
+                    return
+                if "last-event-id" in names and (
+                        observer is None
+                        or not observer.resume_verifiable(list(self.headers.items()))):
+                    self._reject(400, "cannot verify the resume point")
+                    return
             # Delivery phase flags. Recording reads them; nothing branches on
             # them, so the forwarded bytes are identical with journal=None.
             intent = None

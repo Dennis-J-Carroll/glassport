@@ -227,6 +227,25 @@ class HTTPObserver:
             self._emit(Observation(None, None, diagnostic=diagnostic))
         return lease
 
+    def resume_verifiable(self, headers) -> bool:
+        """True when a request's Last-Event-ID names an event this proxy
+        delivered on the session it claims. Read-only: it never creates,
+        retires or resets an epoch, so a gate can refuse an unverifiable
+        resume instead of letting it reset the session's analysis."""
+        headers = list(headers.items()) if hasattr(headers, 'items') else list(headers)
+        limit = self.limits.max_identifier_chars
+        token, token_error = _single(headers, 'mcp-session-id', limit)
+        cursor, cursor_error = _single(headers, 'last-event-id', limit)
+        if token is None or cursor is None or token_error or cursor_error:
+            return False
+        partition = self._partition(headers)
+        with self._lock:
+            context = self._bindings.get((partition, token))
+        if context is None or context.retired or context.lost:
+            return False
+        with context.lock:
+            return cursor in context.sse_ids
+
     def pattern_snapshot(self, epoch):
         """The frozen PII pattern tuple of a live epoch, or None if unknown.
 

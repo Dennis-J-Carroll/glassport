@@ -801,6 +801,129 @@ class TestGateModeOriginAndHost(GateCase):
                                    mode=dj.MODE_OBSERVE), (200, 1))
 
 
+class TestGateModeClientCannotRetireASession(GateCase):
+    """Nothing a caller sends may weaken enforcement for later calls.
+
+    Ambiguous credentials and an unverifiable Last-Event-ID used to make the
+    observer retire or reset the session's epoch, so ONE such request
+    switched enforcement off for every later call on that session. Gate
+    mode now refuses such a request (400) before the observer sees it."""
+
+    SHAPES = {
+        'duplicate authorization': ('POST', [('Authorization', 'Bearer A'),
+                                             ('Authorization', 'Bearer B')]),
+        'duplicate cookie': ('POST', [('Authorization', 'Bearer A'),
+                                      ('Cookie', 'a=1'), ('Cookie', 'b=2')]),
+        'unknown last-event-id': ('POST', [('Authorization', 'Bearer A'),
+                                           ('Last-Event-ID', 'never-sent')]),
+        'malformed last-event-id': ('POST', [('Authorization', 'Bearer A'),
+                                             ('Last-Event-ID', 'a,b')]),
+        'get with unknown last-event-id': ('GET', [('Authorization', 'Bearer A'),
+                                                   ('Last-Event-ID', 'never-sent')]),
+    }
+
+    def raw(self, method, headers):
+        body = (json.dumps({'jsonrpc': '2.0', 'id': 61, 'method': 'ping'}).encode()
+                if method == 'POST' else b'')
+        authority = self.url.split('/')[2]
+        head = (f'{method} /mcp HTTP/1.1\r\nHost: {authority}\r\n'
+                'Accept: application/json, text/event-stream\r\n'
+                'Mcp-Session-Id: sess-1\r\n'
+                + ('Content-Type: application/json\r\n' if body else '')
+                + ''.join(f'{k}: {v}\r\n' for k, v in headers)
+                + f'Content-Length: {len(body)}\r\nConnection: close\r\n\r\n')
+        with socket.create_connection(
+                ('127.0.0.1', int(authority.rsplit(':', 1)[1])), timeout=5) as sock:
+            sock.sendall(head.encode() + body)
+            data = b''
+            while chunk := sock.recv(65536):
+                data += chunk
+        return int(data.split(b' ', 2)[1])
+
+    def undeclared(self, rid):
+        before = len(self.upstream_calls())
+        _, body = self.call('nope', rid=rid, auth='Bearer A')
+        self.quiesce()
+        return ('blocked' if BLOCK_MARKER.encode() in body else 'forwarded',
+                len(self.upstream_calls()) - before)
+
+    def test_shape_is_refused_and_the_session_keeps_enforcing(self):
+        for label, (method, headers) in self.SHAPES.items():
+            with self.subTest(shape=label):
+                self.setUp()
+                self.proxy()
+                self.handshake(auth='Bearer A')
+                self.assertEqual(self.undeclared(70), ('blocked', 0))
+                before = len(self.upstream_calls())
+                self.assertEqual(self.raw(method, headers), 400)
+                self.quiesce()
+                self.assertEqual(len(self.upstream_calls()), before)
+                self.assertEqual(self.undeclared(80), ('blocked', 0))
+
+    def test_resume_from_an_event_this_proxy_delivered_is_admitted(self):
+        """The refusal is for unverifiable resumes only: a client resuming
+        from an SSE event id it actually received still reaches upstream."""
+        seen = []
+
+        class Resumable(Upstream):
+            def do_POST(self):
+                raw = self.rfile.read(int(self.headers.get('Content-Length', 0) or 0))
+                frame = json.loads(raw)
+                if frame.get('method') != 'ping':
+                    self.rfile = __import__('io').BytesIO(raw)
+                    return Upstream.do_POST(self)
+                body = json.dumps({'jsonrpc': '2.0', 'id': frame['id'], 'result': {}})
+                self.send_response(200)
+                self.send_header('Content-Type', 'text/event-stream')
+                self.send_header('Connection', 'close')
+                self.end_headers()
+                self.wfile.write(b'id: evt-1\ndata: ' + body.encode() + b'\n\n')
+                self.close_connection = True
+
+            def do_GET(self):
+                seen.append(self.headers.get('Last-Event-ID'))
+                self.send_response(200)
+                self.send_header('Content-Type', 'text/event-stream')
+                self.send_header('Connection', 'close')
+                self.end_headers()
+                self.close_connection = True
+
+        srv = ThreadingHTTPServer(('127.0.0.1', 0), Resumable)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.server_close)
+        self.addCleanup(srv.shutdown)
+        self.proxy(remote=f'http://127.0.0.1:{srv.server_address[1]}/mcp')
+        self.handshake(auth='Bearer A')
+        self.post({'jsonrpc': '2.0', 'id': 60, 'method': 'ping'}, session='sess-1',
+                  accept='application/json, text/event-stream', auth='Bearer A')
+        self.quiesce()
+        self.assertEqual(self.raw('GET', [('Authorization', 'Bearer A'),
+                                          ('Last-Event-ID', 'evt-1')]), 200)
+        self.assertEqual(seen, ['evt-1'])
+
+    def test_single_credentials_still_pass(self):
+        self.proxy()
+        self.handshake(auth='Bearer A')
+        before = len(self.upstream_calls())
+        self.assertEqual(self.raw('POST', [('Authorization', 'Bearer A'),
+                                           ('Cookie', 'a=1')]), 200)
+        self.quiesce()
+        self.assertEqual(len(self.upstream_calls()), before + 1)
+
+    def test_observe_mode_still_forwards_these_shapes(self):
+        for label, (method, headers) in self.SHAPES.items():
+            if method != 'POST':
+                continue
+            with self.subTest(shape=label):
+                self.setUp()
+                self.proxy(mode=dj.MODE_OBSERVE)
+                self.handshake(auth='Bearer A')
+                before = len(self.upstream_calls())
+                self.assertEqual(self.raw(method, headers), 200)
+                self.quiesce()
+                self.assertEqual(len(self.upstream_calls()), before + 1)
+
+
 # ── matrix 8: the synthesized response is correlatable ───────────────────
 
 class TestBlockResponseShape(GateCase):
