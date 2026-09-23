@@ -61,6 +61,7 @@ import hashlib
 import json
 import math
 import os
+import secrets
 import shlex
 import signal
 import subprocess
@@ -120,6 +121,33 @@ def _nesting_exceeds(value: Any, limit: int) -> bool:
             return True
         stack.extend((child, depth + 1) for child in children)
     return False
+
+
+def _dumps_strict_json(obj: Any) -> str:
+    """ASCII json.dumps that never emits Infinity/-Infinity/NaN, which are
+    not JSON: strict parsers (V8's JSON.parse) reject the whole message.
+    json.loads reads an overflowing literal such as 1e400 as inf; it is
+    re-emitted as 1e999, which parses back to the same infinity. NaN (which
+    json.loads also accepts) becomes null. Mutates non-finite floats in
+    `obj`; the walk is iterative, so peer-sized nesting cannot overflow it."""
+    text = json.dumps(obj, ensure_ascii=True)
+    if "Infinity" not in text and "NaN" not in text:
+        return text
+    token = "\x00glassport-" + secrets.token_hex(8)   # unguessable by the peer
+    literals = {token + "p": "1e999", token + "m": "-1e999", token + "n": "null"}
+    stack = [obj]
+    while stack:
+        node = stack.pop()
+        pairs = node.items() if isinstance(node, dict) else enumerate(node)
+        for key, value in list(pairs):
+            if isinstance(value, float) and not math.isfinite(value):
+                node[key] = token + ("p" if value > 0 else "m" if value < 0 else "n")
+            elif isinstance(value, (dict, list)):
+                stack.append(value)
+    text = json.dumps(obj, ensure_ascii=True)
+    for sentinel, literal in literals.items():
+        text = text.replace(json.dumps(sentinel, ensure_ascii=True), literal)
+    return text
 
 
 def _minimal_read_response(rid: Any, contents: list) -> bytes:
@@ -610,7 +638,7 @@ class Gate:
             # ASCII-escaped so a lone surrogate in any sibling field cannot
             # fail the encode and release the unneutralized original.
             try:
-                new_line = (json.dumps(frame, ensure_ascii=True) + "\n").encode("utf-8")
+                new_line = (_dumps_strict_json(frame) + "\n").encode("utf-8")
             except RecursionError:
                 # The server sized this structure; near the parser's depth
                 # limit it can parse but not re-encode. Deliver only the
