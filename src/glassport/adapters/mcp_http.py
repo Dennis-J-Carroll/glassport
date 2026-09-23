@@ -212,6 +212,16 @@ GATE_MAX_BODY = 4 * 1024 * 1024
 _GATE_DRAIN_LIMIT = 4 * GATE_MAX_BODY
 _LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "[::1]")
 _CREDENTIAL_HEADERS = ("authorization", "cookie", "proxy-authorization")
+
+# Protocol eras the gate knows how to check. An agent-chosen version header
+# must never route around enforcement, so anything else is refused.
+MODERN_VERSIONS = ("2026-07-28",)
+LEGACY_VERSIONS = ("2025-03-26", "2025-06-18", "2025-11-25")
+ENDPOINT_ERAS = ("auto", "legacy", "modern")
+_META_VERSION = "io.modelcontextprotocol/protocolVersion"
+# Methods whose params field is mirrored into Mcp-Name (2026-07-28).
+_MIRRORED_NAME = {"tools/call": "name", "prompts/get": "name", "resources/read": "uri"}
+_SAFE_VERSION = re.compile(r"[0-9A-Za-z._-]{1,32}")
 _HANDLER_TIMEOUT = 30         # drop a stalled client so it can't pin a thread
 
 
@@ -508,7 +518,7 @@ def _observe_sse(resp, wfile, lease, cap):
 
 def _gate_body_problem(body: bytes):
     """(status, reason, delivery code) when gate mode must refuse this POST
-    body, else None.
+    body, else the parsed frame (a dict).
 
     Enforcement is only as good as the analyser's reading of the request. A
     body it cannot read as exactly one JSON object -- the same object any
@@ -533,10 +543,75 @@ def _gate_body_problem(body: bytes):
         if not (type(rid) is int or type(rid) is str):
             return (400, "tools/call id must be a string or an integer",
                     "invalid_mcp_request")
+    return frame
+
+
+def _decode_mirrored(value: str):
+    """A mirrored header value as the body would carry it, or None if it is
+    malformed. The base64 sentinel is exactly `=?base64?...?=` (lowercase);
+    anything else is a literal header-safe value."""
+    if value.startswith("=?base64?") and value.endswith("?=") and len(value) >= 11:
+        import base64
+        import binascii
+        try:
+            return base64.b64decode(value[9:-2], validate=True).decode("utf-8")
+        except (binascii.Error, ValueError):
+            return None
+    if any((ord(c) < 0x20 and c != "\t") or ord(c) > 0x7E for c in value):
+        return None
+    return value
+
+
+def _modern_problem(frame: dict, headers, era: str):
+    """(JSON-RPC code, fixed message, data) when gate mode must refuse this
+    request's protocol-version or mirrored-header claims, else None.
+
+    2026-07-28 mirrors body fields into headers so intermediaries can route
+    without parsing. A gate deciding on one copy while upstream executes the
+    other is a parser differential, so any disagreement is refused (-32020
+    HeaderMismatch), and any version the gate cannot check, or that the
+    operator's declared era excludes, is refused (-32022).
+    """
+    versions = headers.get_all("MCP-Protocol-Version") or []
+    if len(versions) > 1:
+        return -32020, "duplicate MCP-Protocol-Version header", None
+    claimed = versions[0] if versions else None
+
+    def unsupported():
+        requested = claimed if claimed and _SAFE_VERSION.fullmatch(claimed) else ""
+        return (-32022, "unsupported protocol version",
+                {"supported": list(MODERN_VERSIONS if era == "modern" else
+                                   LEGACY_VERSIONS if era == "legacy" else
+                                   MODERN_VERSIONS + LEGACY_VERSIONS),
+                 "requested": requested})
+
+    if claimed is not None and claimed not in MODERN_VERSIONS + LEGACY_VERSIONS:
+        return unsupported()
+    params = frame.get("params")
+    meta = params.get("_meta") if isinstance(params, dict) else None
+    if isinstance(meta, dict) and _META_VERSION in meta and meta[_META_VERSION] != claimed:
+        return -32020, "protocol version in _meta does not match MCP-Protocol-Version", None
+    modern = claimed in MODERN_VERSIONS
+    if (era == "modern" and not modern) or (era == "legacy" and modern):
+        return unsupported()
+    if not modern or "id" not in frame:
+        return None   # legacy path, or a notification (no mirrored headers)
+    if not (isinstance(meta, dict) and _META_VERSION in meta):
+        return -32020, "request _meta is missing the protocol version", None
+    methods = headers.get_all("Mcp-Method") or []
+    if len(methods) != 1 or methods[0] != frame.get("method"):
+        return -32020, "Mcp-Method header does not match the request method", None
+    field = _MIRRORED_NAME.get(frame.get("method"))
+    if field is not None:
+        names = headers.get_all("Mcp-Name") or []
+        decoded = _decode_mirrored(names[0]) if len(names) == 1 else None
+        if decoded is None or decoded != params.get(field):
+            return -32020, "Mcp-Name header does not match the request", None
     return None
 
 
-def _make_handler(remote, log: SessionLog, observer=None, journal=None):
+def _make_handler(remote, log: SessionLog, observer=None, journal=None,
+                  endpoint_era: str = "auto"):
     # Refusing what cannot be inspected is enforcement; observation stays
     # byte-transparent, so only a journal in gate mode arms these checks.
     gate_mode = journal is not None and getattr(journal, "mode", None) == "gate"
@@ -569,6 +644,29 @@ def _make_handler(remote, log: SessionLog, observer=None, journal=None):
                 pass
             note = why.replace(" ", "_")
             log.record("c2s", ('{"glassport":"rejected_%s"}' % note).encode())
+
+        def _reject_rpc(self, rid, code: int, message: str, data) -> None:
+            """Refuse with 400 and a JSON-RPC error a modern client recognizes,
+            so it corrects the request instead of falling back to a legacy
+            initialize. Fixed text only; the id is echoed only when valid."""
+            error = {"code": code, "message": "glassport gate: " + message}
+            if data is not None:
+                error["data"] = data
+            reply = {"jsonrpc": "2.0", "error": error}
+            if type(rid) is int or type(rid) is str:
+                reply["id"] = rid
+            body = json.dumps(reply).encode("utf-8")
+            self.close_connection = True
+            self.send_response(400)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Connection", "close")
+            self.end_headers()
+            try:
+                self.wfile.write(body)
+            except Exception:
+                pass
+            log.record("c2s", ('{"glassport":"rejected_rpc_%d"}' % -code).encode())
 
         def _send_block(self, observation) -> None:
             """Answer a refused tools/call locally, in glassport's own voice.
@@ -660,9 +758,14 @@ def _make_handler(remote, log: SessionLog, observer=None, journal=None):
                 problem = (_gate_body_problem(head) if len(head) == length
                            else (400, "request body shorter than content-length",
                                  "framing_rejected"))
-                if problem is not None:
+                if isinstance(problem, tuple):
                     status, why, self._refusal_code = problem
                     self._reject(status, why)
+                    return None, False
+                modern = _modern_problem(problem, self.headers, endpoint_era)
+                if modern is not None:
+                    self._refusal_code = "invalid_mcp_request"
+                    self._reject_rpc(problem.get("id"), *modern)
                     return None, False
             else:
                 head = self.rfile.read(min(length, _MAX_LOGGED_BODY)) if length else b""
@@ -944,7 +1047,7 @@ class _NullLog:
 def run_http_tap(remote_url: str, log_dir: Path, bind: str = "127.0.0.1",
                  port: int = 0, *, ready: "threading.Event | None" = None,
                  server_box: "list | None" = None, observer=None,
-                 journal=None) -> None:
+                 journal=None, endpoint_era: str = "auto") -> None:
     """Start the local Streamable-HTTP MITM proxy and serve until shut down.
 
     `ready` is set once the server is bound; `server_box` (if given) receives
@@ -955,6 +1058,8 @@ def run_http_tap(remote_url: str, log_dir: Path, bind: str = "127.0.0.1",
     only thing that enables enforcement, and then only for the narrow proved
     case described in the module docstring.
     """
+    if endpoint_era not in ENDPOINT_ERAS:
+        raise ValueError(f"endpoint_era must be one of {ENDPOINT_ERAS}")
     remote = _validate_remote(remote_url)
     log_dir = Path(log_dir)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -965,7 +1070,8 @@ def run_http_tap(remote_url: str, log_dir: Path, bind: str = "127.0.0.1",
     log = (open_session_log(log_path) or _NullLog()) if observer is None else _NullLog()
     journal = journal if observer is not None else None
     httpd = ThreadingHTTPServer((bind, port),
-                                _make_handler(remote, log, observer, journal))
+                                _make_handler(remote, log, observer, journal,
+                                              endpoint_era))
     if server_box is not None:
         server_box.append(httpd)
     print(f"[glassport] http tap on http://{bind}:{httpd.server_address[1]} "
