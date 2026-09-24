@@ -1498,7 +1498,7 @@ def _cmd_observe(args: list[str]) -> int:
     return 0
 
 
-def _run_http_gate(remote_url: str, log_dir: Path) -> int:
+def _run_http_gate(remote_url: str, log_dir: Path, *, endpoint_era: str = "auto") -> int:
     """`glassport gate --transport http --url <remote>` — HTTP enforcement.
 
     Deliberately the same construction as `observe`, differing in exactly one
@@ -1519,7 +1519,8 @@ def _run_http_gate(remote_url: str, log_dir: Path) -> int:
     # observer's frame limit is the enforcement inspection limit.
     observer = HTTPObserver(log_dir, limits=HTTPRegistryLimits(max_frame_bytes=GATE_MAX_BODY))
     journal = DecisionJournal(log_dir / "decisions", observer, mode=MODE_GATE)
-    run_http_tap(remote_url, log_dir, observer=observer, journal=journal)
+    run_http_tap(remote_url, log_dir, observer=observer, journal=journal,
+                 endpoint_era=endpoint_era)
     return 0
 
 
@@ -1538,7 +1539,7 @@ glassport — passive MCP stdio proxy
                     --controllable lets `tui --gate-control` toggle it;
                     --strict blocks when a check cannot run instead of
                     forwarding with a logged gate_skipped marker)
-                   glassport gate --transport http --url <remote-mcp-url>
+                   glassport gate --transport http --url <remote-mcp-url> [--endpoint-era auto|legacy|modern]
                         (active MITM over MCP Streamable-HTTP: everything
                          `observe` does, plus the recorded would-blocks are
                          enforced. Only a severity-3 tools/call proved against
@@ -1731,7 +1732,25 @@ def main(argv: list[str]) -> int:
     if argv and argv[0] == "--url":
         remote_url = argv[1] if len(argv) > 1 else None
         argv = argv[2:]
+    endpoint_era = "auto"
     if transport == "http":
+        # Nothing after --url may be silently ignored: a mistyped enforcement
+        # option would otherwise run with a weaker posture than was asked for.
+        if argv and argv[0] == "--endpoint-era":
+            from glassport.adapters.mcp_http import ENDPOINT_ERAS
+            if gate is None:
+                print("glassport: --endpoint-era applies to gate mode only",
+                      file=sys.stderr)
+                return 2
+            if len(argv) < 2 or argv[1] not in ENDPOINT_ERAS:
+                print("glassport: --endpoint-era must be one of "
+                      + ", ".join(ENDPOINT_ERAS), file=sys.stderr)
+                return 2
+            endpoint_era, argv = argv[1], argv[2:]
+        if argv:
+            print(f"glassport: unexpected argument {argv[0]!r} for --transport http",
+                  file=sys.stderr)
+            return 2
         if not remote_url:
             print("usage: glassport %s --transport http --url <remote-mcp-url>"
                   % ("gate" if gate is not None else "wrap"), file=sys.stderr)
@@ -1757,7 +1776,7 @@ def main(argv: list[str]) -> int:
                 # over HTTP. HTTP enforcement is a property of the decision
                 # journal's mode, and runs through the same observer the
                 # `observe` command builds.
-                return _run_http_gate(remote_url, log_dir)
+                return _run_http_gate(remote_url, log_dir, endpoint_era=endpoint_era)
             run_http_tap(remote_url, log_dir)
         except ValueError as exc:
             print(f"[glassport] invalid --url: {exc}", file=sys.stderr)
