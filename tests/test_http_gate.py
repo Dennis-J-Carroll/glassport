@@ -991,6 +991,80 @@ class TestGateModeRejectsInvalidCallIds(GateCase):
         self.assertEqual((status, len(reached)), (202, 1))
 
 
+class TestGateModeRefusesNonJSONRPCBodies(GateCase):
+    """Gate admission and the observer must agree on what a JSON-RPC message
+    is. A JSON object the observer rejects (no jsonrpc 2.0, list params, an
+    empty method, ...) used to pass admission and then mark the session's
+    epoch lost, so one such request switched enforcement off for every later
+    call on the session."""
+
+    SHAPES = {
+        'no jsonrpc field': {'id': 61, 'method': 'ping'},
+        'jsonrpc 1.0': {'jsonrpc': '1.0', 'id': 61, 'method': 'ping'},
+        'params is a list': {'jsonrpc': '2.0', 'id': 61, 'method': 'ping', 'params': [1]},
+        'empty method': {'jsonrpc': '2.0', 'id': 61, 'method': ''},
+        'method with result': {'jsonrpc': '2.0', 'id': 61, 'method': 'ping', 'result': {}},
+        'neither method nor result': {'jsonrpc': '2.0', 'id': 61},
+    }
+
+    def send(self, frame):
+        request = urllib.request.Request(
+            self.url, data=json.dumps(frame).encode(),
+            headers={'Content-Type': 'application/json', 'Accept': 'application/json',
+                     'Mcp-Session-Id': 'sess-1', 'Authorization': 'Bearer A'})
+        before = len(self.upstream_calls())
+        try:
+            with urllib.request.urlopen(request, timeout=10) as resp:
+                status = resp.status
+        except urllib.error.HTTPError as exc:
+            status = exc.code
+        self.quiesce()
+        return status, len(self.upstream_calls()) - before
+
+    def undeclared(self, rid):
+        _, body = self.call('nope', rid=rid, auth='Bearer A')
+        self.quiesce()
+        return 'blocked' if BLOCK_MARKER.encode() in body else 'forwarded'
+
+    def test_shape_is_refused_and_the_session_keeps_enforcing(self):
+        for label, frame in self.SHAPES.items():
+            with self.subTest(shape=label):
+                self.setUp()
+                self.proxy()
+                self.handshake(auth='Bearer A')
+                self.assertEqual(self.undeclared(70), 'blocked')
+                self.assertEqual(self.send(frame), (400, 0))
+                self.assertEqual(self.undeclared(80), 'blocked')
+
+    def test_a_malformed_relist_does_not_retire_the_declaration(self):
+        """Found by fuzzing: a tools/list with an unusable cursor used to make
+        the surface unknown for good, so later undeclared calls forwarded."""
+        for cursor in ([], 'never-issued'):
+            with self.subTest(cursor=cursor):
+                self.setUp()
+                self.proxy()
+                self.handshake(auth='Bearer A')
+                self.send({'jsonrpc': '2.0', 'id': 90, 'method': 'tools/list',
+                           'params': {'cursor': cursor}})
+                self.assertEqual(self.undeclared(91), 'blocked')
+
+    def test_a_client_response_to_a_server_request_still_forwards(self):
+        """2025-era clients POST responses (e.g. to sampling requests)."""
+        self.proxy()
+        self.handshake(auth='Bearer A')
+        status, reached = self.send({'jsonrpc': '2.0', 'id': 61, 'result': {}})
+        self.assertEqual(reached, 1)
+        self.assertEqual(self.undeclared(80), 'blocked')
+
+    def test_observe_mode_still_forwards_these_shapes(self):
+        for label, frame in self.SHAPES.items():
+            with self.subTest(shape=label):
+                self.setUp()
+                self.proxy(mode=dj.MODE_OBSERVE)
+                self.handshake(auth='Bearer A')
+                self.assertEqual(self.send(frame)[1], 1)
+
+
 # ── matrix 8: the synthesized response is correlatable ───────────────────
 
 class TestBlockResponseShape(GateCase):
