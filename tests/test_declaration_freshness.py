@@ -171,3 +171,59 @@ class TestTTL(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestClientCannotRetireTheDeclaration(unittest.TestCase):
+    """Only a complete, correlated reply supersedes the current surface.
+
+    A client's own tools/list request may start or abandon a *pending*
+    listing, but it must not make the current declaration unknown: otherwise
+    any caller can switch enforcement off by relisting and never finishing
+    (or by relisting with a malformed cursor)."""
+
+    def lines(self, *extra):
+        return session() + list(extra)
+
+    def relist(self, seq, rid, params=None):
+        frame = {"jsonrpc": "2.0", "id": rid, "method": "tools/list"}
+        if params is not None:
+            frame["params"] = params
+        return W(seq, "c2s", frame)
+
+    def reply(self, seq, rid, result):
+        return W(seq, "s2c", {"jsonrpc": "2.0", "id": rid, "result": result})
+
+    def test_relist_in_flight_keeps_the_current_surface(self):
+        self.assertEqual(surface_after(self.lines(self.relist(6, 3))), {"web_search"})
+
+    def test_undeclared_call_during_a_relist_is_still_fabricated(self):
+        lines = self.lines(self.relist(6, 3), call(7, 4, "absent"))
+        self.assertEqual(len(fabricated(lines)), 1)
+
+    def test_malformed_or_unknown_cursor_keeps_the_current_surface(self):
+        for cursor in ([], {}, 5, "never-issued"):
+            with self.subTest(cursor=cursor):
+                lines = self.lines(self.relist(6, 3, {"cursor": cursor}),
+                                   self.reply(7, 3, {"tools": [{"name": "other"}]}))
+                self.assertEqual(surface_after(lines), {"web_search"})
+
+    def test_abandoned_pagination_keeps_the_current_surface(self):
+        lines = self.lines(self.relist(6, 3),
+                           self.reply(7, 3, {"tools": [{"name": "a"}], "nextCursor": "p2"}))
+        self.assertEqual(surface_after(lines), {"web_search"})
+
+    def test_duplicate_relist_id_keeps_the_current_surface(self):
+        lines = self.lines(self.relist(6, 3), self.relist(7, 3))
+        self.assertEqual(surface_after(lines), {"web_search"})
+
+    def test_complete_relist_still_replaces_the_surface(self):
+        lines = self.lines(self.relist(6, 3),
+                           self.reply(7, 3, {"tools": [{"name": "a"}], "nextCursor": "p2"}),
+                           self.relist(8, 4, {"cursor": "p2"}),
+                           self.reply(9, 4, {"tools": [{"name": "b"}]}))
+        self.assertEqual(surface_after(lines), {"a", "b"})
+
+    def test_server_side_failures_still_retire_it(self):
+        malformed = self.lines(self.relist(6, 3), self.reply(7, 3, {"tools": "nope"}))
+        self.assertIsNone(surface_after(malformed))
+        self.assertIsNone(surface_after(self.lines(W(6, "s2c", LIST_CHANGED))))

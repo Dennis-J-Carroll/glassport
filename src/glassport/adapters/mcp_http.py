@@ -532,6 +532,13 @@ def _gate_body_problem(body: bytes):
         return 400, "request body is not one unambiguous JSON object", "framing_rejected"
     if not isinstance(frame, dict):
         return 400, "request body is not one JSON-RPC object", "framing_rejected"
+    # Admission and the observer must agree on what a JSON-RPC message is:
+    # a body the observer rejects marks the session's epoch lost, which
+    # would let one request switch enforcement off for every later call.
+    # Reuse its predicate so the two can never drift apart.
+    from glassport.http_sessions import _rpc_frame
+    if _rpc_frame(body) is None:
+        return 400, "request body is not a valid JSON-RPC 2.0 message", "invalid_mcp_request"
     if frame.get("method") == "tools/call":
         # MCP makes tools/call a request: an id is required, and it must be a
         # string or an integer (never null). Without one there is nothing to

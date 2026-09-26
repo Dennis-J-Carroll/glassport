@@ -93,9 +93,16 @@ class TestDeclarationCorrelation(unittest.TestCase):
             req(2, cursor="page2"), req(3), reply(3, ["b1"], nextCursor="page2"),
             reply(2, ["a2"]), call(4, "a1")])
 
-    def test_evicted_refresh_cannot_preserve_stale_exclusion(self):
+    def test_evicted_refresh_keeps_the_last_complete_declaration(self):
+        """A client that evicts its own relist (flooding past max_pending)
+        cannot thereby switch enforcement off: the uncorrelatable reply is
+        ignored and the last complete declaration stays authority. Earlier
+        this made the surface unknown (warn), which let any caller disable
+        enforcement; the residual cost is a possible stale block for a
+        client that abandons its own relist."""
         self.check([req(1), reply(1, []), req(2), req(3, "ping"),
-                    reply(2, ["real"]), call(4)], limits=SessionLimits(max_pending=1))
+                    reply(2, ["real"]), call(4)], limits=SessionLimits(max_pending=1),
+                   action=Action.BLOCK)
 
     def test_duplicate_valid_ids_do_not_establish_evidence(self):
         self.check([req(1), req(1), reply(1, []), call(2)])
@@ -125,8 +132,15 @@ class TestDeclarationCorrelation(unittest.TestCase):
             req(2, cursor="next"), req(3, cursor="next"), reply(2, []),
             reply(3, []), call(4)])
 
-    def test_pending_malformed_and_failed_refreshes_warn(self):
-        for suffix in ([req(2)], [req(2), ("s2c", {"id": 2, "result": {}})],
+    def test_pending_refresh_keeps_the_last_complete_declaration(self):
+        """Only a complete reply supersedes a declaration; a relist that is
+        merely in flight (or never answered) does not retire it."""
+        self.check([req(1), reply(1, []), req(2), call(4)], action=Action.BLOCK)
+
+    def test_malformed_and_failed_refresh_replies_warn(self):
+        """A server-side failure answering the relist does retire the old
+        declaration: the server has signalled something changed or broke."""
+        for suffix in ([req(2), ("s2c", {"id": 2, "result": {}})],
                        [req(2), ("s2c", {"id": 2, "error": {"code": -1}})]):
             with self.subTest(suffix=suffix):
                 self.check([req(1), reply(1, [])] + suffix + [call(4)])

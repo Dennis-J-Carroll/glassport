@@ -150,6 +150,19 @@ class SessionState:
         return (self.declaration_generation is not None and self._pages is not None
                 and not self._page_pending and cursor == self._next_cursor)
 
+    def _cancel_pending_declaration(self):
+        """Abandon an in-progress listing without touching the current surface.
+
+        Client-side events (a relist, a malformed cursor, a duplicated or
+        evicted request id) only ever affect the *pending* declaration: the
+        current one stays authority until a complete, correlated reply
+        replaces it. Otherwise any caller could switch enforcement off by
+        relisting and never finishing.
+        """
+        self._pages = self._next_cursor = self.declaration_generation = None
+        self._page_pending = False
+        self._pages_expire_at = None
+
     def _invalidate_declaration(self):
         self._unknown_surface()
         self._pages = self._next_cursor = self.declaration_generation = None
@@ -170,7 +183,7 @@ class SessionState:
             self.limit_reasons.add("request_correlation_saturated")
         frame = event_frame(event)
         if md.get("declaration_correlation_lost"):
-            self._invalidate_declaration()
+            self._cancel_pending_declaration()
         if self.surface_expires_at is not None:
             now = _wire_seconds(event.timestamp)
             if now is None or now > self.surface_expires_at:
@@ -197,7 +210,7 @@ class SessionState:
                 cursor = params.get("cursor") if isinstance(params, dict) else None
                 generation = md.get("declaration_generation")
                 if cursor is None:
-                    self._invalidate_declaration()
+                    self._cancel_pending_declaration()
                     self.declaration_generation = generation
                     self._page_pending = generation is not None
                 elif (generation is not None
@@ -205,7 +218,7 @@ class SessionState:
                       and self.can_continue(cursor)):
                     self._page_pending = True
                 else:
-                    self._invalidate_declaration()
+                    self._cancel_pending_declaration()
         if md.get("method_replied_to") == "<initialize>":
             result = frame.get("result")
             if isinstance(result, dict) and "error" not in frame:
@@ -248,8 +261,9 @@ class SessionState:
             self._invalidate_declaration()
             return
         if next_cursor is not None:
+            # An intermediate page: the current surface stays authority until
+            # the chain completes (a client may never fetch the next page).
             self._pages, self._next_cursor = tools, next_cursor
-            self._unknown_surface()
             return
         self._pages = self._next_cursor = None
         self.tool_defs = {t["name"]: t for t in tools}
