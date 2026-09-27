@@ -117,6 +117,8 @@ class MCPTraceBuilder:
         self.pending: OrderedDict = OrderedDict()      # client-initiated
         self.pending_s2c: OrderedDict = OrderedDict()  # server-initiated
         self._quarantined = {"c2s": set(), "s2c": set()}
+        # Opaque HTTP exchange of the entry being folded (stateless scopes).
+        self._exchange: Optional[str] = None
         self._correlation_saturated: set[str] = set()
         self._generation_counter = 0
         self.error_seen = False
@@ -144,9 +146,24 @@ class MCPTraceBuilder:
             self._correlation_saturated.add(direction)
             event.metadata["correlation_saturated"] = direction
 
+    def _key(self, pending, rid):
+        """Correlation key for a request id, or None when the id is invalid.
+
+        A client request in a stateless HTTP scope is answered on its own
+        POST, so it is keyed by (exchange, id): callers reusing ids on
+        independent exchanges never collide. Server-initiated requests are
+        answered on a different POST, and legacy HTTP and stdio carry no
+        exchange, so they keep id-only keys.
+        """
+        if not self._valid_id(rid):
+            return None
+        if pending is self.pending and self._exchange is not None:
+            return (self._exchange, type(rid), rid)
+        return (type(rid), rid)
+
     def _remember(self, pending, rid, event, method, tool_name=None, cursor=None):
         direction = "c2s" if pending is self.pending else "s2c"
-        key = (type(rid), rid) if self._valid_id(rid) else None
+        key = self._key(pending, rid)
         prior = pending.pop(key, None) if key is not None else None
         if prior is not None:
             self._quarantine(direction, key, event)
@@ -198,8 +215,9 @@ class MCPTraceBuilder:
                 or (type(rid) is str and len(rid) <= self.state.limits.max_name_chars))
 
     def _reply(self, pending, rid):
-        return pending.pop((type(rid), rid), _PendingRequest(None, None)) \
-            if self._valid_id(rid) else _PendingRequest(None, None)
+        key = self._key(pending, rid)
+        return pending.pop(key, _PendingRequest(None, None)) \
+            if key is not None else _PendingRequest(None, None)
 
     def ingest_frame(self, entry: dict) -> Optional[Event]:
         """Normalize one tap entry, update session facts, return its event.
@@ -213,6 +231,9 @@ class MCPTraceBuilder:
         observation = observation if isinstance(observation, dict) else {}
         if observation.get("skip") is True:
             return None
+        exchange = observation.get("exchange")
+        self._exchange = (exchange if isinstance(exchange, str)
+                          and 0 < len(exchange) <= 64 else None)
         loss = observation.get("loss")
         if loss or observation.get("uninterpreted"):
             raw = entry.get("raw")
