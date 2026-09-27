@@ -210,6 +210,18 @@ class MCPTraceBuilder:
         pending[key] = (_PendingRequest(event.id, method, tool_name, cursor, generation)
                         if valid else _PendingRequest(None, None))
 
+    def _end_exchange(self, exchange: str) -> None:
+        """Forget an ended exchange's unanswered requests and quarantines.
+
+        Its replies can only arrive on the exchange itself, so they never
+        will. Without this, a long-lived scope would accumulate them until
+        correlation saturated and no declaration could be established.
+        """
+        for key in [k for k in self.pending if len(k) == 3 and k[0] == exchange]:
+            del self.pending[key]
+        self._quarantined["c2s"] = {k for k in self._quarantined["c2s"]
+                                    if not (len(k) == 3 and k[0] == exchange)}
+
     def _valid_id(self, rid):
         return ((type(rid) is int and rid.bit_length() <= 128)
                 or (type(rid) is str and len(rid) <= self.state.limits.max_name_chars))
@@ -229,9 +241,13 @@ class MCPTraceBuilder:
             raise ValueError("tap entry must be an object")
         observation = entry.get("http_observation")
         observation = observation if isinstance(observation, dict) else {}
+        exchange = observation.get("exchange")
+        if observation.get("exchange_end") is True:
+            if isinstance(exchange, str) and 0 < len(exchange) <= 64:
+                self._end_exchange(exchange)
+            return None
         if observation.get("skip") is True:
             return None
-        exchange = observation.get("exchange")
         self._exchange = (exchange if isinstance(exchange, str)
                           and 0 < len(exchange) <= 64 else None)
         loss = observation.get("loss")

@@ -105,13 +105,15 @@ class ScopeCase(unittest.TestCase):
         StatelessUpstream.session_header = False
         StatelessUpstream.listen_release = threading.Event()
 
-    def proxy(self, *, scope_headers=(), public_surface=False, mode=dj.MODE_GATE):
+    def proxy(self, *, scope_headers=(), public_surface=False, mode=dj.MODE_GATE,
+              session_limits=None, limits=None):
         srv = ThreadingHTTPServer(('127.0.0.1', 0), StatelessUpstream)
         threading.Thread(target=srv.serve_forever, daemon=True).start()
         self.addCleanup(srv.server_close)
         self.addCleanup(srv.shutdown)
         self.observer = HTTPObserver(self.root / 'wire', scope_headers=scope_headers,
-                                     public_surface=public_surface)
+                                     public_surface=public_surface,
+                                     session_limits=session_limits, limits=limits)
         journal = dj.DecisionJournal(self.root / 'decisions', self.observer, mode=mode)
         ready, box = threading.Event(), []
         threading.Thread(target=run_http_tap,
@@ -211,6 +213,18 @@ class TestStatelessEnforcement(ScopeCase):
         self.lists(1, auth=None)
         self.assertEqual(self.call('nope', 2, auth=None), ('forwarded', 1))
 
+    def test_unproven_scope_is_named_in_the_decision_journal(self):
+        """An operator must see WHY anonymous traffic went unenforced."""
+        self.proxy()
+        self.lists(1, auth=None)
+        self.call('nope', 2, auth=None)
+        self.observer.close()
+        intents = [json.loads(line) for f in (self.root / 'decisions').glob('*.jsonl')
+                   for line in f.read_text().splitlines()
+                   if json.loads(line)['kind'] == 'intent']
+        self.assertTrue(intents)
+        self.assertTrue(all(r['diagnostic'] == 'http_unproven_scope' for r in intents), intents)
+
     def test_public_surface_opt_in_enforces_anonymous_callers(self):
         self.proxy(public_surface=True)
         self.lists(1, auth=None)
@@ -278,6 +292,35 @@ class TestStatelessEnforcement(ScopeCase):
 
 
 class TestScopeReplay(ScopeCase):
+    def test_interleaved_scope_decisions_replay_as_equivalent(self):
+        """One scope epoch carries many interleaved exchanges; intent and
+        delivery linkage must still replay from the wire log."""
+        from glassport import decision_replay as dr
+        self.proxy()
+        StatelessUpstream.list_delay = 0.2
+        threads = [threading.Thread(target=self.send, args=('tools/list', 1))
+                   for _ in range(3)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        self.settle()
+        StatelessUpstream.list_delay = 0.0
+        self.assertEqual(self.call('search', 1), ('forwarded', 1))
+        self.assertEqual(self.call('nope', 1), ('blocked', 0))
+        self.send('plain/error', 1)
+        self.settle()
+        self.observer.close()
+        journals = sorted((self.root / 'decisions').glob('*.jsonl'))
+        self.assertEqual(len(journals), 1)
+        result = dr.verify_journal(journals[0],
+                                   self.root / 'wire' / f'{journals[0].stem}.jsonl')
+        self.assertEqual(result.status, 'equivalent', result.as_dict())
+        self.assertEqual(result.mismatched, [])
+        enforced = [json.loads(line) for line in journals[0].read_text().splitlines()
+                    if json.loads(line).get('kind') == 'intent' and json.loads(line).get('enforce')]
+        self.assertEqual(len(enforced), 1)
+
     def test_each_scope_log_replays_to_the_same_decision(self):
         from glassport.adapters.mcp_session import from_mcp_session_file
         self.proxy()
@@ -293,6 +336,110 @@ class TestScopeReplay(ScopeCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class TestScopeUnderPressure(ScopeCase):
+    """Long-lived shared scopes must not give a caller new ways to weaken
+    enforcement for other callers: by flooding the registry, by leaving
+    exchanges unanswered, or by provoking an analysis fault."""
+
+    def scope(self):
+        return next(c for c in self.observer._contexts.values() if c.shared)
+
+    def test_a_flood_of_new_scopes_cannot_evict_a_declared_one(self):
+        from glassport.http_sessions import HTTPRegistryLimits
+        self.proxy(limits=HTTPRegistryLimits(max_sessions=8))
+        self.lists(1)
+        for i in range(20):
+            self.send('ping', 100 + i, auth=f'Bearer junk-{i}')
+        self.settle()
+        self.assertEqual(self.call('nope', 2), ('blocked', 0))
+
+    def test_a_modern_flood_cannot_evict_a_legacy_session(self):
+        from glassport.http_sessions import HTTPRegistryLimits
+        from tests.test_http_gate import BLOCK_MARKER, GateCase
+
+        class Legacy(GateCase):
+            def runTest(inner):
+                pass
+        legacy = Legacy()
+        legacy.setUp()
+        self.addCleanup(legacy.doCleanups)
+        legacy.proxy()
+        legacy.observer.limits = HTTPRegistryLimits(max_sessions=8)
+        legacy.handshake(auth='Bearer A')
+        port = int(legacy.url.rsplit(':', 1)[1].split('/')[0])
+        for i in range(20):
+            conn = http.client.HTTPConnection('127.0.0.1', port, timeout=10)
+            body = json.dumps({'jsonrpc': '2.0', 'id': i, 'method': 'ping',
+                               'params': {'_meta': dict(META)}}).encode()
+            conn.request('POST', '/mcp', body=body, headers={
+                'Content-Type': 'application/json', 'Accept': 'application/json',
+                'MCP-Protocol-Version': MODERN, 'Mcp-Method': 'ping',
+                'Authorization': f'Bearer junk-{i}'})
+            conn.getresponse().read()
+            conn.close()
+        legacy.quiesce()
+        _, body = legacy.call('nope', 500, auth='Bearer A')
+        legacy.quiesce()
+        self.assertIn(BLOCK_MARKER.encode(), body)
+
+    def test_newcomers_get_capacity_not_someone_elses_authority(self):
+        from glassport.http_sessions import HTTPRegistryLimits
+        self.proxy(limits=HTTPRegistryLimits(max_sessions=2))
+        self.lists(1, auth='Bearer A')
+        self.lists(1, auth='Bearer B')
+        self.assertEqual(self.call('nope', 2, auth='Bearer C'), ('forwarded', 1))
+        self.assertEqual(self.call('nope', 3, auth='Bearer A'), ('blocked', 0))
+        self.assertEqual(self.call('nope', 4, auth='Bearer B'), ('blocked', 0))
+
+    def test_unanswered_exchanges_do_not_leak_correlation_state(self):
+        from glassport.session import SessionLimits
+        self.proxy(session_limits=SessionLimits(max_pending=8))
+        self.lists(1)
+        for i in range(20):
+            self.send('plain/error', 200 + i)
+        self.settle()
+        builder = self.scope().builder
+        self.assertEqual(len(builder.pending), 0)
+        self.assertEqual(builder._correlation_saturated, set())
+        self.lists(300)
+        self.assertEqual(builder.state.surface, {'search'})
+        self.assertEqual(self.call('nope', 301), ('blocked', 0))
+
+    def test_exchange_ends_replay_to_the_same_correlation_state(self):
+        from glassport.adapters.mcp_session import MCPTraceBuilder
+        from glassport.session import SessionLimits
+        self.proxy(session_limits=SessionLimits(max_pending=8))
+        self.lists(1)
+        for i in range(20):
+            self.send('plain/error', 200 + i)
+        self.lists(300)
+        self.settle()
+        log = next(p for p in (self.root / 'wire').glob('*.jsonl'))
+        replay = MCPTraceBuilder(limits=SessionLimits(max_pending=8))
+        for line in log.read_text().splitlines():
+            replay.ingest_frame(json.loads(line))
+        self.assertEqual(len(replay.pending), 0)
+        self.assertEqual(replay.state.surface, {'search'})
+
+    def test_one_callers_analysis_fault_does_not_reset_the_scope(self):
+        self.proxy()
+        self.lists(1)
+        builder = self.scope().builder
+        original, fired = builder.feed, []
+
+        def faulty(entry):
+            if not fired and entry.get('dir') == 'c2s':
+                fired.append(1)
+                raise RuntimeError('analysis fault')
+            return original(entry)
+        builder.feed = faulty
+        self.send('ping', 5)
+        self.settle()
+        builder.feed = original
+        self.assertEqual(fired, [1])
+        self.assertEqual(self.call('nope', 6), ('blocked', 0))
 
 
 class TestScopeCLI(unittest.TestCase):

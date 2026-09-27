@@ -191,11 +191,7 @@ class HTTPObserver:
                     self._retire_locked(context); cleanup.append(context)
             context = self._scopes.get(key) if key is not None else None
             if context is None:
-                if len(self._contexts) >= self.limits.max_sessions:
-                    idle = [c for c in self._contexts.values() if not c.active]
-                    if idle:
-                        victim = min(idle, key=lambda c: c.last_used)
-                        self._retire_locked(victim); cleanup.append(victim)
+                self._make_room_locked(cleanup)
                 if len(self._contexts) >= self.limits.max_sessions or self._closed:
                     diagnostic = 'http_closed' if self._closed else 'http_capacity'
                 else:
@@ -217,6 +213,25 @@ class HTTPObserver:
         elif context is None and diagnostic:
             self._emit(Observation(None, None, diagnostic=diagnostic))
         return lease
+
+    def _make_room_locked(self, cleanup):
+        """Free one slot for a new context, if the registry is full.
+
+        Only an idle context that carries no declaration is ever evicted.
+        Displacing one that does would let any caller who can open contexts
+        (distinct bogus tokens cost nothing) switch enforcement off for an
+        established session or scope. Under real pressure the newcomer gets
+        `http_capacity` instead: observed, unenforced, and nobody's existing
+        authority is touched.
+        """
+        if len(self._contexts) < self.limits.max_sessions:
+            return
+        idle = [c for c in self._contexts.values()
+                if not c.active and c.builder.state.surface is None]
+        if idle:
+            victim = min(idle, key=lambda c: c.last_used)
+            self._retire_locked(victim)
+            cleanup.append(victim)
 
     def _retire_locked(self, context):
         context.retired = True
@@ -275,11 +290,7 @@ class HTTPObserver:
             if context is None:
                 if not diagnostic and (token or method != 'POST'):
                     diagnostic = 'http_unknown_identity' if token else 'http_missing_identity'
-                if len(self._contexts) >= self.limits.max_sessions:
-                    idle = [c for c in self._contexts.values() if not c.active]
-                    if idle:
-                        victim = min(idle, key=lambda c: c.last_used)
-                        self._retire_locked(victim); cleanup.append(victim)
+                self._make_room_locked(cleanup)
                 if len(self._contexts) >= self.limits.max_sessions or self._closed:
                     diagnostic = 'http_closed' if self._closed else 'http_capacity'
                 else:
@@ -438,18 +449,27 @@ class HTTPLease:
             entry = receipt
         event = context.builder.feed(entry)
         annotations = tuple(context.engine.on_event(event, context.builder.state)) if event else ()
+        # A context that could not be trusted from the start (unproven scope,
+        # missing or unknown identity) says so on every observation, so the
+        # decision journal names the reason rather than a generic gap.
+        inherited = self.diagnostic if context.lost else None
         return Observation(context.epoch, context.seq, event, annotations, receipt is not None,
-                           facts.get('loss') or ('http_log_failed' if receipt is None else None))
+                           facts.get('loss') or inherited
+                           or ('http_log_failed' if receipt is None else None))
 
     def _loss_locked(self, reason):
         """Return the first loss observation; callers emit outside context locks."""
         context = self.context
         if context.shared:
-            # A shared scope is never permanently lost: the loss resets its
-            # analysis (surface unknown, correlation cleared) until the next
-            # complete tools/list, so one bad exchange cannot switch
-            # enforcement off for every later caller in the scope.
-            return self._record_locked('s2c', b'', observation={'loss': reason})
+            # A fault in one caller's exchange stays with that exchange: the
+            # scope's declaration and correlation are shared by every caller,
+            # so it is neither reset nor marked lost. The exchange's own
+            # request has no provable observation and therefore forwards.
+            marker = {'skip': True, 'fault': reason}
+            if self.exchange is not None:
+                marker['exchange'] = self.exchange
+            self._record_locked('s2c', b'', observation=marker)
+            return Observation(context.epoch, None, diagnostic=reason)
         if context.lost:
             return Observation(context.epoch, None, diagnostic=reason)
         context.lost = True
@@ -571,6 +591,17 @@ class HTTPLease:
 
     def release(self):
         context = self.context
+        if (context is not None and context.shared and self.exchange is not None
+                and not self._released):
+            # A 2026 reply only ever arrives on its own POST, so when the POST
+            # ends its unanswered requests can never be answered. Purge them,
+            # via a logged marker so a replay purges at the same point.
+            try:
+                with context.lock:
+                    self._record_locked('s2c', b'', observation={
+                        'skip': True, 'exchange': self.exchange, 'exchange_end': True})
+            except Exception:
+                pass
         with self.observer._lock:
             if self._released:
                 return
