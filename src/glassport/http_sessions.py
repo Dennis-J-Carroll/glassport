@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 import hashlib
 import hmac
 import json
+import re
 from pathlib import Path
 import secrets
 import threading
@@ -80,7 +81,7 @@ class _Context:
 
 
 _CREDENTIAL_NAMES = ('authorization', 'cookie', 'proxy-authorization')
-_HEADER_TOKEN = __import__('re').compile(r"^[!#$%&'*+.^_`|~0-9a-z-]+$")
+_HEADER_TOKEN = re.compile(r"^[!#$%&'*+.^_`|~0-9a-z-]+$")
 
 
 def _single(headers, name, limit):
