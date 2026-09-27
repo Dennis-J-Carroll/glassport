@@ -1498,7 +1498,8 @@ def _cmd_observe(args: list[str]) -> int:
     return 0
 
 
-def _run_http_gate(remote_url: str, log_dir: Path, *, endpoint_era: str = "auto") -> int:
+def _run_http_gate(remote_url: str, log_dir: Path, *, endpoint_era: str = "auto",
+                   scope_headers: tuple = (), public_surface: bool = False) -> int:
     """`glassport gate --transport http --url <remote>` — HTTP enforcement.
 
     Deliberately the same construction as `observe`, differing in exactly one
@@ -1517,7 +1518,8 @@ def _run_http_gate(remote_url: str, log_dir: Path, *, endpoint_era: str = "auto"
     _validate_remote(remote_url)
     # Gate mode refuses any body its observer cannot fold whole, so the
     # observer's frame limit is the enforcement inspection limit.
-    observer = HTTPObserver(log_dir, limits=HTTPRegistryLimits(max_frame_bytes=GATE_MAX_BODY))
+    observer = HTTPObserver(log_dir, limits=HTTPRegistryLimits(max_frame_bytes=GATE_MAX_BODY),
+                            scope_headers=scope_headers, public_surface=public_surface)
     journal = DecisionJournal(log_dir / "decisions", observer, mode=MODE_GATE)
     run_http_tap(remote_url, log_dir, observer=observer, journal=journal,
                  endpoint_era=endpoint_era)
@@ -1540,6 +1542,7 @@ glassport — passive MCP stdio proxy
                     --strict blocks when a check cannot run instead of
                     forwarding with a logged gate_skipped marker)
                    glassport gate --transport http --url <remote-mcp-url> [--endpoint-era auto|legacy|modern]
+                        [--scope-header NAME]... [--public-surface]
                         (active MITM over MCP Streamable-HTTP: everything
                          `observe` does, plus the recorded would-blocks are
                          enforced. Only a severity-3 tools/call proved against
@@ -1736,21 +1739,37 @@ def main(argv: list[str]) -> int:
     if transport == "http":
         # Nothing after --url may be silently ignored: a mistyped enforcement
         # option would otherwise run with a weaker posture than was asked for.
-        if argv and argv[0] == "--endpoint-era":
-            from glassport.adapters.mcp_http import ENDPOINT_ERAS
-            if gate is None:
-                print("glassport: --endpoint-era applies to gate mode only",
+        scope_headers: list[str] = []
+        public_surface = False
+        while argv:
+            option = argv[0]
+            if option not in ("--endpoint-era", "--scope-header", "--public-surface"):
+                print(f"glassport: unexpected argument {option!r} for --transport http",
                       file=sys.stderr)
                 return 2
-            if len(argv) < 2 or argv[1] not in ENDPOINT_ERAS:
-                print("glassport: --endpoint-era must be one of "
-                      + ", ".join(ENDPOINT_ERAS), file=sys.stderr)
+            if gate is None:
+                print(f"glassport: {option} applies to gate mode only", file=sys.stderr)
                 return 2
-            endpoint_era, argv = argv[1], argv[2:]
-        if argv:
-            print(f"glassport: unexpected argument {argv[0]!r} for --transport http",
-                  file=sys.stderr)
-            return 2
+            if option == "--public-surface":
+                public_surface, argv = True, argv[1:]
+                continue
+            value = argv[1] if len(argv) > 1 else None
+            if option == "--endpoint-era":
+                from glassport.adapters.mcp_http import ENDPOINT_ERAS
+                if value not in ENDPOINT_ERAS:
+                    print("glassport: --endpoint-era must be one of "
+                          + ", ".join(ENDPOINT_ERAS), file=sys.stderr)
+                    return 2
+                endpoint_era = value
+            else:
+                from glassport.http_sessions import _CREDENTIAL_NAMES, _HEADER_TOKEN
+                if (value is None or not _HEADER_TOKEN.match(value.lower())
+                        or value.lower() in _CREDENTIAL_NAMES):
+                    print("glassport: --scope-header needs a header name other than "
+                          "the credential headers", file=sys.stderr)
+                    return 2
+                scope_headers.append(value)
+            argv = argv[2:]
         if not remote_url:
             print("usage: glassport %s --transport http --url <remote-mcp-url>"
                   % ("gate" if gate is not None else "wrap"), file=sys.stderr)
@@ -1776,7 +1795,9 @@ def main(argv: list[str]) -> int:
                 # over HTTP. HTTP enforcement is a property of the decision
                 # journal's mode, and runs through the same observer the
                 # `observe` command builds.
-                return _run_http_gate(remote_url, log_dir, endpoint_era=endpoint_era)
+                return _run_http_gate(remote_url, log_dir, endpoint_era=endpoint_era,
+                                      scope_headers=tuple(scope_headers),
+                                      public_surface=public_surface)
             run_http_tap(remote_url, log_dir)
         except ValueError as exc:
             print(f"[glassport] invalid --url: {exc}", file=sys.stderr)

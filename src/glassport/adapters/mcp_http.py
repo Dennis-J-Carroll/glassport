@@ -812,7 +812,8 @@ def _make_handler(remote, log: SessionLog, observer=None, journal=None,
                 # epoch, which would switch enforcement off for the whole
                 # session; refuse such a request before it is observed.
                 names = [k.lower() for k in self.headers.keys()]
-                if any(names.count(n) > 1 for n in _CREDENTIAL_HEADERS):
+                identity = _CREDENTIAL_HEADERS + tuple(getattr(observer, "scope_headers", ()))
+                if any(names.count(n) > 1 for n in identity):
                     self._reject(400, "ambiguous credentials")
                     return
                 if "last-event-id" in names and (

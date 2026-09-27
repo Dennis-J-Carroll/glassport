@@ -117,6 +117,8 @@ class MCPTraceBuilder:
         self.pending: OrderedDict = OrderedDict()      # client-initiated
         self.pending_s2c: OrderedDict = OrderedDict()  # server-initiated
         self._quarantined = {"c2s": set(), "s2c": set()}
+        # Opaque HTTP exchange of the entry being folded (stateless scopes).
+        self._exchange: Optional[str] = None
         self._correlation_saturated: set[str] = set()
         self._generation_counter = 0
         self.error_seen = False
@@ -144,9 +146,24 @@ class MCPTraceBuilder:
             self._correlation_saturated.add(direction)
             event.metadata["correlation_saturated"] = direction
 
+    def _key(self, pending, rid):
+        """Correlation key for a request id, or None when the id is invalid.
+
+        A client request in a stateless HTTP scope is answered on its own
+        POST, so it is keyed by (exchange, id): callers reusing ids on
+        independent exchanges never collide. Server-initiated requests are
+        answered on a different POST, and legacy HTTP and stdio carry no
+        exchange, so they keep id-only keys.
+        """
+        if not self._valid_id(rid):
+            return None
+        if pending is self.pending and self._exchange is not None:
+            return (self._exchange, type(rid), rid)
+        return (type(rid), rid)
+
     def _remember(self, pending, rid, event, method, tool_name=None, cursor=None):
         direction = "c2s" if pending is self.pending else "s2c"
-        key = (type(rid), rid) if self._valid_id(rid) else None
+        key = self._key(pending, rid)
         prior = pending.pop(key, None) if key is not None else None
         if prior is not None:
             self._quarantine(direction, key, event)
@@ -193,13 +210,26 @@ class MCPTraceBuilder:
         pending[key] = (_PendingRequest(event.id, method, tool_name, cursor, generation)
                         if valid else _PendingRequest(None, None))
 
+    def _end_exchange(self, exchange: str) -> None:
+        """Forget an ended exchange's unanswered requests and quarantines.
+
+        Its replies can only arrive on the exchange itself, so they never
+        will. Without this, a long-lived scope would accumulate them until
+        correlation saturated and no declaration could be established.
+        """
+        for key in [k for k in self.pending if len(k) == 3 and k[0] == exchange]:
+            del self.pending[key]
+        self._quarantined["c2s"] = {k for k in self._quarantined["c2s"]
+                                    if not (len(k) == 3 and k[0] == exchange)}
+
     def _valid_id(self, rid):
         return ((type(rid) is int and rid.bit_length() <= 128)
                 or (type(rid) is str and len(rid) <= self.state.limits.max_name_chars))
 
     def _reply(self, pending, rid):
-        return pending.pop((type(rid), rid), _PendingRequest(None, None)) \
-            if self._valid_id(rid) else _PendingRequest(None, None)
+        key = self._key(pending, rid)
+        return pending.pop(key, _PendingRequest(None, None)) \
+            if key is not None else _PendingRequest(None, None)
 
     def ingest_frame(self, entry: dict) -> Optional[Event]:
         """Normalize one tap entry, update session facts, return its event.
@@ -211,8 +241,15 @@ class MCPTraceBuilder:
             raise ValueError("tap entry must be an object")
         observation = entry.get("http_observation")
         observation = observation if isinstance(observation, dict) else {}
+        exchange = observation.get("exchange")
+        if observation.get("exchange_end") is True:
+            if isinstance(exchange, str) and 0 < len(exchange) <= 64:
+                self._end_exchange(exchange)
+            return None
         if observation.get("skip") is True:
             return None
+        self._exchange = (exchange if isinstance(exchange, str)
+                          and 0 < len(exchange) <= 64 else None)
         loss = observation.get("loss")
         if loss or observation.get("uninterpreted"):
             raw = entry.get("raw")
