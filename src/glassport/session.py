@@ -146,6 +146,23 @@ class SessionState:
         self.surface_event_id = self.surface_seq = None
         self.surface_expires_at = None
 
+    def current_at(self, timestamp) -> bool:
+        """Whether the surface's ttlMs promise still holds at this wire time.
+
+        Stale strictly after the bound; an unreadable clock is stale. Pure:
+        an enforcer may ask between events, and the next observed event is
+        what retires the surface.
+        """
+        if self.surface_expires_at is None:
+            return True
+        now = _wire_seconds(timestamp)
+        return now is not None and now <= self.surface_expires_at
+
+    @property
+    def listing_in_flight(self) -> bool:
+        """A correlated tools/list request is awaiting its reply."""
+        return self._page_pending
+
     def can_continue(self, cursor) -> bool:
         return (self.declaration_generation is not None and self._pages is not None
                 and not self._page_pending and cursor == self._next_cursor)
@@ -184,12 +201,10 @@ class SessionState:
         frame = event_frame(event)
         if md.get("declaration_correlation_lost"):
             self._cancel_pending_declaration()
-        if self.surface_expires_at is not None:
-            now = _wire_seconds(event.timestamp)
-            if now is None or now > self.surface_expires_at:
-                # Stale: unknown, never empty. Retire only the current surface;
-                # a refresh already requested may still land and restore it.
-                self._unknown_surface()
+        if not self.current_at(event.timestamp):
+            # Stale: unknown, never empty. Retire only the current surface;
+            # a refresh already requested may still land and restore it.
+            self._unknown_surface()
         if (event.kind == EventKind.MESSAGE and md.get("server_initiated")
                 and md.get("method") == _LIST_CHANGED):
             # Only the server can retract its declaration. Any reply still in

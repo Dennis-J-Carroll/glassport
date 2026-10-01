@@ -42,9 +42,20 @@ TOOLS_LIST_RESULT = line({"jsonrpc": "2.0", "id": 2,
                           "result": {"tools": [{"name": "web_search"}]}})
 
 
+TOOLS_LIST_REQUEST = line({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
+
+
+def declare(g: Gate, result_line: bytes) -> None:
+    """A correlated tools/list exchange: the request the result answers,
+    then the result. An uncorrelated result establishes nothing."""
+    rid = json.loads(result_line)["id"]
+    g.observe_c2s(line({"jsonrpc": "2.0", "id": rid, "method": "tools/list"}))
+    g.observe_s2c(result_line)
+
+
 def declared_gate() -> Gate:
     g = Gate()
-    g.observe_s2c(TOOLS_LIST_RESULT)
+    declare(g, TOOLS_LIST_RESULT)
     return g
 
 
@@ -123,7 +134,7 @@ class TestGateDecisions(unittest.TestCase):
 
     def test_latest_declaration_is_the_contract(self):
         g = declared_gate()
-        g.observe_s2c(line({"jsonrpc": "2.0", "id": 5,
+        declare(g, line({"jsonrpc": "2.0", "id": 5,
                             "result": {"tools": [{"name": "file_read"}]}}))
         action, _, _ = g.check_c2s(
             line({"jsonrpc": "2.0", "id": 6, "method": "tools/call",
@@ -132,7 +143,7 @@ class TestGateDecisions(unittest.TestCase):
 
     def test_malformed_tools_entries_ignored(self):
         g = Gate()
-        g.observe_s2c(line({"jsonrpc": "2.0", "id": 2,
+        declare(g, line({"jsonrpc": "2.0", "id": 2,
                             "result": {"tools": ["junk", {"x": 1},
                                                  {"name": "real_tool"}]}}))
         action, _, _ = g.check_c2s(
@@ -152,6 +163,7 @@ class TestGateHold(unittest.TestCase):
 
     def _held_call(self, tool_name: str):
         g = Gate(hold_timeout=5.0)
+        g.observe_c2s(TOOLS_LIST_REQUEST)   # pipelined: listing in flight
         results = {}
         t = threading.Thread(
             target=lambda: results.setdefault("r", g.check_c2s(
@@ -230,7 +242,7 @@ class TestGateControl(unittest.TestCase):
 
     def _gate(self, tmp) -> Gate:
         g = Gate(control_path=Path(tmp) / "s.jsonl.gate")
-        g.observe_s2c(TOOLS_LIST_RESULT)
+        declare(g, TOOLS_LIST_RESULT)
         return g
 
     def _write_override(self, g: Gate, enforce: bool, mode=0o600):
@@ -372,6 +384,7 @@ class TestGateInTrace(unittest.TestCase):
                 pump(io.BytesIO(line(frame)), _KeepOpen(), log, direction,
                      gate=g, client_write=lambda b: log.record("s2c", b))
 
+            send("c2s", {"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
             send("s2c", {"jsonrpc": "2.0", "id": 2, "result": {"tools": [{"name": "web_search"}]}})
             send("c2s", {"jsonrpc": "2.0", "id": 3, "method": "tools/call",
                          "params": {"name": "run_shell", "arguments": {}}})
@@ -536,7 +549,7 @@ class TestGateBoundaryChecks(unittest.TestCase):
 
     def test_gate_blocks_schema_violation_live(self):
         g = Gate()
-        g.observe_s2c(line({"jsonrpc": "2.0", "id": 1, "result": {"tools": [{
+        declare(g, line({"jsonrpc": "2.0", "id": 1, "result": {"tools": [{
             "name": "get_weather",
             "inputSchema": {"type": "object",
                             "properties": {"unit": {"type": "string", "enum": ["c", "f"]}},
@@ -572,7 +585,7 @@ class TestGateBoundaryChecks(unittest.TestCase):
 
     def test_gate_blocks_after_repeated_identical_call(self):
         g = Gate(idempotency_ttl=5.0, idempotency_max_repeats=2)
-        g.observe_s2c(line({"jsonrpc": "2.0", "id": 1,
+        declare(g, line({"jsonrpc": "2.0", "id": 1,
                             "result": {"tools": [{"name": "flaky_call"}]}}))
         call_line = line({"jsonrpc": "2.0", "id": 2, "method": "tools/call",
                           "params": {"name": "flaky_call", "arguments": {"x": 1}}})
@@ -584,7 +597,7 @@ class TestGateBoundaryChecks(unittest.TestCase):
 
     def test_gate_does_not_block_distinct_calls(self):
         g = Gate(idempotency_ttl=5.0, idempotency_max_repeats=1)
-        g.observe_s2c(line({"jsonrpc": "2.0", "id": 1,
+        declare(g, line({"jsonrpc": "2.0", "id": 1,
                             "result": {"tools": [{"name": "flaky_call"}]}}))
         for i in range(5):
             action, _, _ = g.check_c2s(
@@ -594,7 +607,7 @@ class TestGateBoundaryChecks(unittest.TestCase):
 
     def test_idempotency_canonicalizes_keys_ignores_ids_and_expires(self):
         g = Gate(idempotency_ttl=5.0, idempotency_max_repeats=1)
-        g.observe_s2c(TOOLS_LIST_RESULT)
+        declare(g, TOOLS_LIST_RESULT)
         def request(rid, args):
             return line({"jsonrpc": "2.0", "id": rid, "method": "tools/call",
                          "params": {"name": "web_search", "arguments": args}})
@@ -761,7 +774,7 @@ class TestGateBoundaryChecks(unittest.TestCase):
     def test_gate_blocks_missing_attestation_when_enforced(self):
         g = Gate(enforce_attestation=True,
                  attestation_pubkey_b64=base64.b64encode(bytes(32)).decode("ascii"))
-        g.observe_s2c(TOOLS_LIST_RESULT)
+        declare(g, TOOLS_LIST_RESULT)
         action, resp, info = g.check_c2s(line({
             "jsonrpc": "2.0", "id": 12, "method": "tools/call",
             "params": {"name": "web_search", "arguments": {}},
@@ -778,7 +791,7 @@ class TestGateAttestationReview(unittest.TestCase):
         g = Gate(enforce_attestation=True,
                  attestation_pubkey_b64=kwargs.pop("attestation_pubkey_b64", self.PUBLIC_KEY),
                  **kwargs)
-        g.observe_s2c(TOOLS_LIST_RESULT)
+        declare(g, TOOLS_LIST_RESULT)
         return g
 
     def params(self):
@@ -927,7 +940,7 @@ class TestGateHostileShapes(unittest.TestCase):
 
     def disabled_gate(self, tmp) -> Gate:
         g = Gate(control_path=Path(tmp) / "s.jsonl.gate")
-        g.observe_s2c(TOOLS_LIST_RESULT)
+        declare(g, TOOLS_LIST_RESULT)
         g.control_path.write_text(json.dumps({"enforce": False}), encoding="utf-8")
         g.control_path.chmod(0o600)
         return g
@@ -1166,7 +1179,7 @@ class TestGateHostileShapes(unittest.TestCase):
     def test_deeply_nested_override_file_keeps_enforcement_on(self):
         with tempfile.TemporaryDirectory() as tmp:
             g = Gate(control_path=Path(tmp) / "s.jsonl.gate")
-            g.observe_s2c(TOOLS_LIST_RESULT)
+            declare(g, TOOLS_LIST_RESULT)
             depth = self.UNPARSEABLE_DEPTH
             g.control_path.write_text('{"enforce": false, "x": ' + "[" * depth
                                       + "]" * depth + "}", encoding="utf-8")
@@ -1320,7 +1333,7 @@ class TestGateAstraFindings(unittest.TestCase):
 
     def control_gate(self, tmp, enforce_json: str) -> Gate:
         g = Gate(control_path=Path(tmp) / "s.jsonl.gate")
-        g.observe_s2c(TOOLS_LIST_RESULT)
+        declare(g, TOOLS_LIST_RESULT)
         g.control_path.write_text('{"enforce": %s}' % enforce_json, encoding="utf-8")
         g.control_path.chmod(0o600)
         return g
@@ -1653,7 +1666,7 @@ class TestGateStrictMode(unittest.TestCase):
 
     def strict_gate(self, **kw) -> Gate:
         g = Gate(strict=True, **kw)
-        g.observe_s2c(TOOLS_LIST_RESULT)
+        declare(g, TOOLS_LIST_RESULT)
         return g
 
     def call(self, q="weather") -> bytes:
@@ -1672,7 +1685,7 @@ class TestGateStrictMode(unittest.TestCase):
             _require_posix_override(self)
             with tempfile.TemporaryDirectory() as tmp:   # explicit override wins
                 g = Gate(strict=True, control_path=Path(tmp) / "g")
-                g.observe_s2c(TOOLS_LIST_RESULT)
+                declare(g, TOOLS_LIST_RESULT)
                 g.control_path.write_text('{"enforce": false}', encoding="utf-8")
                 g.control_path.chmod(0o600)
                 self.assertEqual(g.check_c2s(self.call())[0], "forward")

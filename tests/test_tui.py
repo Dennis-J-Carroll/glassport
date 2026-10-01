@@ -697,6 +697,7 @@ class TestGateOverrideControl(unittest.TestCase):
             s = self._session(tmp)
             tui.toggle_gate_override(s)               # enforcement off
             g = Gate(control_path=Path(tmp) / "s.jsonl.gate")
+            g.observe_c2s(b'{"jsonrpc": "2.0", "id": 2, "method": "tools/list"}\n')
             g.observe_s2c((json.dumps(
                 {"jsonrpc": "2.0", "id": 2,
                  "result": {"tools": [{"name": "web_search"}]}}) +

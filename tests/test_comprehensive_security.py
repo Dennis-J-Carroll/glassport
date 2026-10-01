@@ -125,6 +125,8 @@ class TestGateEdgeCases(unittest.TestCase):
 
     def test_gate_blocks_non_string_tool_name(self):
         g = Gate()
+        g.observe_c2s((json.dumps({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
+                       + "\n").encode())
         g.observe_s2c((json.dumps({"jsonrpc": "2.0", "id": 2,
                                    "result": {"tools": [{"name": "ok"}]}})
                        + "\n").encode())
@@ -137,6 +139,8 @@ class TestGateEdgeCases(unittest.TestCase):
 
     def test_gate_empty_tools_list_blocks_everything(self):
         g = Gate()
+        g.observe_c2s((json.dumps({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
+                       + "\n").encode())
         g.observe_s2c((json.dumps({"jsonrpc": "2.0", "id": 2,
                                    "result": {"tools": []}})
                        + "\n").encode())
@@ -148,6 +152,8 @@ class TestGateEdgeCases(unittest.TestCase):
 
     def test_gate_holds_multiple_concurrent_calls(self):
         g = Gate(hold_timeout=5.0)
+        g.observe_c2s((json.dumps({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
+                       + "\n").encode())
         results: dict[str, tuple] = {}
 
         def fire(tool):
@@ -174,6 +180,10 @@ class TestGateEdgeCases(unittest.TestCase):
 
     def test_gate_latest_declaration_is_contract_after_hold(self):
         g = Gate(hold_timeout=5.0)
+        g.observe_c2s((json.dumps({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
+                       + "\n").encode())
+        g.observe_c2s((json.dumps({"jsonrpc": "2.0", "id": 3, "method": "tools/list"})
+                       + "\n").encode())
         ln = (json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
                           "params": {"name": "first", "arguments": {}}})
               + "\n").encode()

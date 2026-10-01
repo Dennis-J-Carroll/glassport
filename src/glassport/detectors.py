@@ -297,8 +297,9 @@ def _gate_actions_for_event(e: Event) -> list[Annotation]:
         also = g.get("also_skipped")
         also = [r for r in also if isinstance(r, str)] if isinstance(also, list) else []
         if reason in (None, "no_surface_timeout") and not also:
-            why = ("no tools/list response arrived within the hold "
-                   "window, so this call was forwarded unenforced")
+            why = ("no current tools/list declaration (none arrived within "
+                   "the hold window, or the server retracted it or its ttlMs "
+                   "expired), so this call was forwarded unenforced")
         else:
             skipped = ", ".join(str(r) for r in (reason, *also) if r is not None)
             why = (f"these checks could not run ({skipped}), so it was "

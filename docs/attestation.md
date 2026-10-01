@@ -51,5 +51,6 @@ With the opt-in strict fault policy (`Gate(strict=True)`, CLI
 `glassport gate --strict`), both markers become blocks instead: the call is
 refused with `-32000` and `error.data.reason` set to `attestation_unavailable`
 or `attestation_check_error`. Enforcement also no longer depends on a
-declared tool surface: if no `tools/list` arrives within the hold window,
+declared tool surface: if no current `tools/list` declaration is available
+(none arrived, or the server retracted it or its `ttlMs` expired),
 attestation (and the credential and taint checks) still run on the call.
