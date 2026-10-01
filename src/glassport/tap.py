@@ -51,6 +51,7 @@ Author: Dennis J. Carroll · 2026 (skeleton drafted with Claude)
 """
 from __future__ import annotations
 
+from glassport.adapters.mcp_session import MCPTraceBuilder
 from glassport.attestation import ATTESTATION_KEY, validate_public_key
 from glassport.detectors import (
     MAX_SCAN_BYTES, find_taint, _schema_problems, _scan_pii, _redact,
@@ -369,16 +370,19 @@ class Gate:
     Blocks c2s tools/call frames that name a tool outside the server's
     declared surface. Everything else relays untouched.
 
-    The gate only blocks what the wire can prove. Until a tools/list
-    response has been seen there is no declaration to violate — but a
-    pipelined client may fire tools/call before that response lands, so
-    the gate HOLDS such calls (blocking the c2s pump; stdio backpressure
-    is the flow control a real client expects anyway) until the surface
-    arrives or `hold_timeout` expires. On timeout it fails open and the
-    forwarded frame is logged with a "gate_skipped" marker, so the log
-    still shows enforcement was impossible. The latest tools/list result
-    IS the contract: a server that re-declares a smaller surface shrinks
-    what it may be asked to do.
+    The gate only blocks what the wire can prove. The declaration is the
+    shared SessionState fold (the same one the HTTP gate and replay use):
+    only a complete, correlated tools/list reply establishes or replaces
+    it; a server's notifications/tools/list_changed or an elapsed ttlMs
+    makes it unknown (never empty); a reply from before an invalidation
+    restores nothing. A pipelined client may fire tools/call while a
+    listing is in flight, so the gate HOLDS such calls (blocking the c2s
+    pump; stdio backpressure is the flow control a real client expects
+    anyway) until that listing settles or `hold_timeout` expires. With no
+    current declaration it fails open and the forwarded frame is logged
+    with a "gate_skipped" marker, so the log still shows enforcement was
+    impossible. The latest complete declaration IS the contract: a server
+    that re-declares a smaller surface shrinks what it may be asked to do.
 
     A blocked request never reaches the server; the client receives a
     synthesized JSON-RPC error (code -32000) whose error.data carries
@@ -402,10 +406,12 @@ class Gate:
         # it blocks instead, naming the fault in data.reason.
         self.strict = strict
         self._lock = threading.Lock()
-        self._declared: set[str] | None = None   # None until tools/list seen
-        self._declared_defs: dict[str, dict] = {}  # name -> full tool def
+        # Declaration facts: the wire as the server saw it, folded in order.
+        # Guarded by _lock; _state_changed wakes calls held for a listing.
+        self._builder = MCPTraceBuilder(retain_events=False)
+        self._fold_seq = 0
+        self._state_changed = threading.Condition(self._lock)
         self._pending_reads: dict[Any, str] = {}  # jsonrpc id -> uri
-        self._surface_known = threading.Event()
         self._hold_timeout = hold_timeout
         self.blocked_count = 0
         self.idempotency_ttl = idempotency_ttl
@@ -579,8 +585,14 @@ class Gate:
         # {} are falsy but are not the documented {"enforce": false}.
         return data.get("enforce", True) is not False
 
-    def observe_s2c(self, line: bytes) -> None:
-        """Harvest tool declarations from server output. Never raises."""
+    def _fold(self, direction: str, line: bytes) -> None:
+        """Fold one relayed line into the declaration facts. Never raises.
+
+        A fold fault is attributed to its direction: a server line that
+        cannot be folded leaves the declaration unknown (it may have been a
+        retraction), while a client line only abandons a pending listing
+        (a caller must not be able to switch enforcement off).
+        """
         try:
             frame = _loads(line)
         except (json.JSONDecodeError, ValueError, UnicodeDecodeError,
@@ -588,16 +600,54 @@ class Gate:
             return
         if not isinstance(frame, dict):
             return
-        result = frame.get("result")
-        if isinstance(result, dict) and isinstance(result.get("tools"), list):
-            # string names only: an unhashable server-sent name used to
-            # raise here, ending the s2c relay and leaving no surface
-            defs = {t["name"]: t for t in result["tools"]
-                    if isinstance(t, dict) and isinstance(t.get("name"), str)}
-            with self._lock:
-                self._declared = set(defs)
-                self._declared_defs = defs
-            self._surface_known.set()
+        with self._state_changed:
+            try:
+                self._fold_seq += 1
+                self._builder.ingest_frame({"seq": self._fold_seq, "ts": _now_iso(),
+                                            "dir": direction, "frame": frame})
+            except Exception:
+                state = self._builder.state
+                if direction == "s2c":
+                    state._invalidate_declaration()
+                else:
+                    state._cancel_pending_declaration()
+            self._state_changed.notify_all()
+
+    def observe_s2c(self, line: bytes) -> None:
+        """Fold a server line before the client sees it. Never raises."""
+        self._fold("s2c", line)
+
+    def observe_c2s(self, line: bytes) -> None:
+        """Fold a client line the server is about to receive. Never raises.
+
+        Called only for forwarded lines, before they are written, so a fast
+        reply always finds its request already correlated.
+        """
+        self._fold("c2s", line)
+
+    def _declaration(self) -> tuple[frozenset[str], dict[str, dict]] | None:
+        """Names and tool definitions from one consistent state, or None
+        when no declaration is current. Caller holds _lock."""
+        state = self._builder.state
+        if state.surface is None or not state.current_at(_now_iso()):
+            return None
+        return state.surface, state.tool_defs
+
+    def _await_declaration(self) -> tuple[frozenset[str], dict[str, dict]] | None:
+        """Current declaration, waiting (lock released) only while a
+        correlated listing is in flight. Rechecked after every wake."""
+        deadline = None
+        with self._state_changed:
+            snapshot = self._declaration()
+            while snapshot is None and self._builder.state.listing_in_flight:
+                if deadline is None:
+                    deadline = time.monotonic() + self._hold_timeout
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                self._state_changed.wait(remaining)
+                snapshot = self._declaration()
+            return snapshot
 
     def _take_pending_read(self, rid: Any) -> str | None:
         """Pop the uri of the resources/read this reply answers, for the log
@@ -776,16 +826,11 @@ class Gate:
         name = params.get("name")
         if not isinstance(name, str):
             name = None
-        with self._lock:
-            declared = self._declared
-        surface_missing = False
-        if declared is None:
-            # pipelined client: hold the call until the tools/list
-            # response lands; the s2c pump will wake us via observe_s2c
-            self._surface_known.wait(timeout=self._hold_timeout)
-            with self._lock:
-                declared = self._declared
-            surface_missing = declared is None
+        # Names and schemas come from one snapshot: a declaration replaced
+        # mid-decision must not pair the new names with the old schema.
+        snapshot = self._await_declaration()
+        surface_missing = snapshot is None
+        declared, declared_defs = snapshot if snapshot is not None else (frozenset(), {})
         if surface_missing or name in declared:
             # With no declared surface only the undeclared-tool and schema
             # checks are impossible: fail open for those, visibly, but still
@@ -946,8 +991,7 @@ class Gate:
                 return ("block", response,
                         {"action": "blocked", "tool": name,
                          "reason": "taint_detected"})
-            with self._lock:
-                schema = (self._declared_defs.get(name) or {}).get("inputSchema")
+            schema = (declared_defs.get(name) or {}).get("inputSchema")
             try:
                 problems = list(_schema_problems(arguments, schema))
             except Exception:
@@ -1065,6 +1109,8 @@ def pump(src, dst, log: SessionLog | None, direction: str,
                                              "tool": info["tool"]})
                     continue
                 gate_info = info   # e.g. gate_skipped fail-open
+                # Before the write: the reply must find its request folded.
+                gate.observe_c2s(line)
             elif gate is not None and direction == "s2c":
                 try:
                     gate.observe_s2c(line)
