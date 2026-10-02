@@ -289,6 +289,96 @@ class TestInjectedReplyPopsNoRealRequest(CorrelationCase):
         self.assertEqual(real.metadata['tool_name'], 'search')
         self.assertEqual(len(b.pending), 0)
 
+    def test_live_refusal_racing_a_real_call_with_the_same_id(self):
+        self.proxy()
+        self.handshake()
+        SlowUpstream.slow_tool = 'search'
+        outcome = {}
+
+        def slow_call():
+            try:
+                outcome['body'] = self.call('search', rid=7)[1]
+            except Exception as exc:   # pragma: no cover - surfaced by the assertion below
+                outcome['error'] = exc
+        thread = threading.Thread(target=slow_call)
+        thread.start()
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and not any(
+                c['method'] == 'tools/call' for c in self.upstream_calls()):
+            time.sleep(0.01)
+        before = self.upstream_calls()
+        self.assertTrue(any(c['method'] == 'tools/call' for c in before), 'real call never left')
+        _, body = self.call('nope', rid=7)
+        thread.join(10)
+        self.assertIn('body', outcome, outcome.get('error'))
+        self.quiesce()
+        frame = json.loads(body)
+        self.assertEqual(frame['error']['data']['glassport'], 'http_gate_blocked')
+        self.assertEqual(frame['id'], 7)
+        self.assertEqual(len(self.upstream_calls()), len(before), 'the refusal reached upstream')
+        self.assertIn('result', json.loads(outcome['body']))
+
+        trace = from_mcp_session_file(self.wire_log())
+        results = [e for e in trace.events if e.kind == EventKind.TOOL_RESULT
+                   and e.metadata.get('jsonrpc_id') == 7]
+        self.assertEqual(sorted(e.metadata.get('tool_name') for e in results), ['nope', 'search'],
+                         'the real reply pairs to the real call, the injected one to the refused call')
+        anns = annotate(trace)
+        found = [a.subcategory for a in anns]
+        self.assertNotIn('orphaned_response', found)
+        # The refused call reused an in-flight id, so it honestly carries the
+        # collision stamp (stamps precede the verdict by design) — and that
+        # stamp waived nothing: it was still blocked. The stamp belongs to the
+        # refused call alone; the admitted call and its reply are clean.
+        refused = next(e for e in trace.events if e.kind == EventKind.TOOL_CALL
+                       and e.metadata.get('jsonrpc_id') == 7
+                       and e.metadata.get('http_observation', {}) == {}
+                       and e.parts[0].content['name'] == 'nope')
+        limits = [a for a in anns if a.subcategory == 'analysis_limit']
+        self.assertEqual([(a.event_id, a.metadata.get('reason')) for a in limits],
+                         [(refused.id, 'request_correlation')])
+        builder = self.builder()
+        self.assertEqual(len(builder.pending), 0)
+        self.assertEqual(builder._quarantined['c2s'], set(),
+                         'the refusal quarantined nothing: the server never saw it')
+
+
+# ── an ambiguous id on the refused request itself waives nothing ──────────
+
+class TestCollidingIdDoesNotWaiveTheBlock(unittest.TestCase):
+    """The exclusion a block rests on is the declared surface; whether this
+    request's own reply could ever be correlated has no bearing on it. Until
+    this change a client could forward one undeclared call per session by
+    reusing the id of a request still in flight: the collision stamped
+    `correlation_limited`, the engine reported `analysis_limit`, and that
+    waived enforcement. Saturation and every other limit stay conservative."""
+
+    def verdict(self, reason):
+        from glassport.detectors import AnnotationKind, HallucinationCategory, _ann
+        from glassport.interaction_trace import Event
+        from glassport.http_sessions import Observation
+        event = Event.tool_call('agent', 'nope', {}, metadata={'seq': 1})
+        fabricated = _ann(event, AnnotationKind.HALLUCINATION, 'fabricated_tool_call',
+                          'outside', severity=3, category=HallucinationCategory.TOOL_USE,
+                          no_declaration_seen=False, tool='nope')
+        limit = _ann(event, AnnotationKind.ANOMALY, 'analysis_limit', 'limit',
+                     severity=1, reason=reason, limits={})
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            journal = dj.DecisionJournal(Path(tmp), observer=None, mode=dj.MODE_GATE)
+            try:
+                return journal.evaluate(Observation('e', 1, event, (fabricated, limit)))
+            finally:
+                journal.close()
+
+    def test_request_correlation_limit_does_not_waive_a_proved_exclusion(self):
+        self.assertTrue(self.verdict('request_correlation'))
+
+    def test_every_other_limit_still_waives(self):
+        for reason in ('request_correlation_saturated', 'tool_declaration', 'session_metadata'):
+            with self.subTest(reason=reason):
+                self.assertFalse(self.verdict(reason))
+
 
 # ── H3: a log with refusals replays to the live correlation state ─────────
 

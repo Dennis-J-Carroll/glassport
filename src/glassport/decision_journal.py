@@ -95,9 +95,27 @@ DELIVERY_CODES = frozenset({
 NON_ENFORCEABLE = frozenset({
     "detector_error",                 # a detector raised during this event
     "analysis_limit",                 # session state bound hit; surface may be partial
+                                      # (except the request's own ambiguous id, below)
     "declaration_unavailable",        # no complete declaration to check against
     "http_observation_unavailable",   # epoch evidence lost/stale/uninterpreted
 })
+
+# The one analysis limit that says nothing about the surface: this request's
+# own id is ambiguous (reused while another request with it is in flight), so
+# its *reply* cannot be correlated. The exclusion a block rests on is the
+# declared surface, which that fact does not touch. Treating it as
+# non-enforceable let a client forward one undeclared call per session by
+# reusing an in-flight id. Saturation (`request_correlation_saturated`) and
+# every other limit still waive enforcement.
+_REQUEST_OWN_ID_LIMIT = "request_correlation"
+
+
+def _limit_is_this_requests_own_id(annotation) -> bool:
+    if getattr(annotation, "subcategory", None) != "analysis_limit":
+        return False
+    metadata = getattr(annotation, "metadata", None)
+    return isinstance(metadata, dict) and metadata.get("reason") == _REQUEST_OWN_ID_LIMIT
+
 
 _SAFE_TOKEN_RE = re.compile(r"[^a-z0-9_.:/-]")
 _MAX_TOKEN_CHARS = 64
@@ -466,6 +484,7 @@ class DecisionJournal:
                 return False
             annotations = tuple(getattr(observation, "annotations", ()) or ())
             if any(getattr(a, "subcategory", None) in NON_ENFORCEABLE
+                   and not _limit_is_this_requests_own_id(a)
                    for a in annotations):
                 return False
             return policy.decide(event_id, annotations,

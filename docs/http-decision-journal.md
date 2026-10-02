@@ -161,6 +161,20 @@ it reads a `/2` wire log with the `/1` fold. It is not asserted to interpret
 the new provenance correctly, and `replay-decisions` under `/1` refuses a
 `/2` journal for the same reason.
 
+## What waives enforcement, and the one thing that does not
+
+`DecisionJournal.evaluate()` refuses to enforce a candidate block that rests
+on an incomplete analysis pass: a detector fault, a session-state bound
+(`analysis_limit`), no complete declaration, or lost/stale/uninterpreted HTTP
+evidence. One `analysis_limit` reason is exempt: `request_correlation`, which
+says only that *this request's own id* is ambiguous (reused while another
+request carrying it is still in flight), so its reply could not be
+correlated. That fact says nothing about the declared surface the block rests
+on, and treating it as a waiver let a client forward one undeclared call per
+session by reusing an in-flight id. `request_correlation_saturated` (the
+session can no longer establish any new correlation) and every other reason
+still waive enforcement.
+
 ## Bounds
 
 | `JournalLimits` | Default | Meaning |
