@@ -22,7 +22,7 @@ from glassport.adapters.mcp_session import MCPTraceBuilder
 from glassport.detectors import snapshot_pii_patterns
 from glassport.incremental import DetectorEngine, default_detectors
 from glassport.session import SessionLimits
-from glassport.tap import _now_iso, open_session_log
+from glassport.tap import _now_iso, build_session_entry, open_session_log
 
 
 @dataclass(frozen=True)
@@ -425,38 +425,76 @@ class HTTPLease:
         elif self.method == 'DELETE' and 200 <= status < 300:
             self.observer.reset(self, 'http_session_deleted')
 
-    def _record_locked(self, direction, payload, *, metadata=None, observation=None, wire_bytes=None):
+    def _record_locked(self, direction, payload, *, metadata=None, observation=None,
+                       wire_bytes=None, gate=None, admit=None):
+        """Build the wire entry, fold it, and write it. Caller holds the lock.
+
+        The entry fed to the builder and the entry on disk are the same dict:
+        live analysis and a later reader of the log see identical evidence.
+        With `admit` (a client request in gate mode) the fold holds back the
+        request's pending correlation; `admit(observation)` then says whether
+        the server will see this request. A refused request is written with
+        the outer fact ``admitted: false`` and never becomes a correlation, so
+        a reader folds it exactly as the live gate did. A fold fault still
+        writes the entry before propagating: evidence first, analysis second.
+        """
         context = self.context
         if not context.log_opened:
             context.log_opened = True
             context.log = open_session_log(self.observer.log_dir / f'{context.epoch}.jsonl')
         context.seq += 1
         facts = dict(observation or {}, epoch=context.epoch, order=context.seq)
-        receipt = context.log.record(direction, payload, metadata=metadata,
-            observation=facts, wire_bytes=payload if wire_bytes is None else wire_bytes,
-            sequence=context.seq) if context.log is not None else None
-        # Failed logging never pretends to provide persisted linkage. Feed the
-        # same envelope locally so observation can continue without persistence.
-        if receipt is None:
-            try:
-                frame = json.loads(payload.decode('utf-8', errors='replace').rstrip('\r\n'))
-            except (ValueError, RecursionError, UnicodeError):
-                frame = None
-            # Stamp the wire clock too: declaration freshness (ttlMs) is
-            # measured on it, and a disk failure must not retire a surface.
-            entry = {'seq': context.seq, 'ts': _now_iso(), 'dir': direction, 'frame': frame,
-                     'raw': payload.decode('utf-8', errors='replace'), 'http_observation': facts}
-        else:
-            entry = receipt
-        event = context.builder.feed(entry)
-        annotations = tuple(context.engine.on_event(event, context.builder.state)) if event else ()
+        entry, text = build_session_entry(
+            direction, payload, gate=gate, metadata=metadata, observation=facts,
+            wire_bytes=payload if wire_bytes is None else wire_bytes, seq=context.seq)
         # A context that could not be trusted from the start (unproven scope,
         # missing or unknown identity) says so on every observation, so the
         # decision journal names the reason rather than a generic gap.
         inherited = self.diagnostic if context.lost else None
-        return Observation(context.epoch, context.seq, event, annotations, receipt is not None,
+        defer = admit is not None and direction == 'c2s'
+        try:
+            event = context.builder.feed(entry, defer_correlation=defer)
+            annotations = tuple(context.engine.on_event(event, context.builder.state)) if event else ()
+        except BaseException:
+            # Evidence first. A reservation this fold may have left behind is
+            # never applied: the builder drops it at its next fold, and the
+            # loss the caller records next clears correlation anyway.
+            self._write_locked(context, entry, text)
+            raise
+        admitted = True
+        if defer:
+            # The verdict is computed from analysis alone, under the same lock
+            # hold that planned the correlation, so no other fold can run
+            # between the plan and its resolution.
+            try:
+                admitted = bool(admit(Observation(
+                    context.epoch, context.seq, event, annotations, False,
+                    facts.get('loss') or inherited)))
+            except Exception:
+                admitted = True   # an undecidable verdict forwards, as ever
+            if not admitted:
+                facts['admitted'] = False
+                text = None   # the entry changed after it was serialized
+        persisted = self._write_locked(context, entry, text)
+        if defer:
+            # An unpersisted observation is uncertain evidence: the relay will
+            # not enforce on it (the final observation below carries
+            # `http_log_failed`, and the verdict is recomputed from it), so the
+            # request is forwarded and must correlate like any admitted one.
+            if admitted or not persisted:
+                context.builder.commit_correlation()
+            else:
+                context.builder.discard_correlation()
+        return Observation(context.epoch, context.seq, event, annotations, persisted,
                            facts.get('loss') or inherited
-                           or ('http_log_failed' if receipt is None else None))
+                           or ('http_log_failed' if not persisted else None))
+
+    @staticmethod
+    def _write_locked(context, entry, text) -> bool:
+        """Failed logging never pretends to provide persisted linkage."""
+        if context.log is None:
+            return False
+        return bool(context.log.write_entry(entry, text))
 
     def _loss_locked(self, reason):
         """Return the first loss observation; callers emit outside context locks."""
@@ -493,7 +531,10 @@ class HTTPLease:
         return self.observer._emit(result)
 
     def record(self, direction, payload, *, event_id=None, metadata=None,
-               incomplete=False, wire_bytes=None, transport_only=False):
+               incomplete=False, wire_bytes=None, transport_only=False, admit=None):
+        """Observe one frame. `admit`, for a client request under a gate, is
+        called under the context lock with the folded observation and returns
+        whether the request is forwarded; see `_record_locked`."""
         context = self.context
         if context is None or self._released:
             return self.observer._emit(Observation(None, None, diagnostic=self.diagnostic or 'http_stale_epoch'))
@@ -557,7 +598,8 @@ class HTTPLease:
                 if incomplete:
                     facts['incomplete'] = True
                 result = self._record_locked(direction, payload, metadata=metadata,
-                                             observation=facts, wire_bytes=wire_bytes)
+                                             observation=facts, wire_bytes=wire_bytes,
+                                             admit=admit)
                 if not context.lost and isinstance(frame, dict):
                     rid = frame.get('id')
                     if (direction == 'c2s' and self.provisional and frame.get('method') == 'initialize'
@@ -582,6 +624,32 @@ class HTTPLease:
                     self.observer._close_idle([victim])
             for loss in losses:
                 self.observer._emit(loss)
+            return self.observer._emit(result)
+        except Exception:
+            try:
+                self.loss('http_analysis_failed')
+            except Exception:
+                pass
+            return self.observer._emit(Observation(context.epoch, None, diagnostic='http_analysis_failed'))
+
+    def record_injected(self, payload, tool=None):
+        """Log the JSON-RPC error the gate answered a refused request with.
+
+        Marked ``gate: {"action": "injected"}`` exactly as the stdio gate marks
+        its own, so one reader shows both: the server never sent this frame,
+        and in the trace it pairs to the refused call, never to a real pending
+        request that shares its id.
+        """
+        context = self.context
+        if context is None or self._released:
+            return self.observer._emit(Observation(None, None, diagnostic=self.diagnostic or 'http_stale_epoch'))
+        facts = {'exchange': self.exchange} if self.exchange is not None else {}
+        gate = {'action': 'injected'}
+        if isinstance(tool, str):
+            gate['tool'] = tool
+        try:
+            with context.lock:
+                result = self._record_locked('s2c', payload, observation=facts, gate=gate)
             return self.observer._emit(result)
         except Exception:
             try:

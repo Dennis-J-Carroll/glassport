@@ -429,11 +429,11 @@ class TestScopeUnderPressure(ScopeCase):
         builder = self.scope().builder
         original, fired = builder.feed, []
 
-        def faulty(entry):
+        def faulty(entry, **kw):
             if not fired and entry.get('dir') == 'c2s':
                 fired.append(1)
                 raise RuntimeError('analysis fault')
-            return original(entry)
+            return original(entry, **kw)
         builder.feed = faulty
         self.send('ping', 5)
         self.settle()

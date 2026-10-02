@@ -400,6 +400,17 @@ def _blockable_id(observation):
     return rid if type(rid) is int or type(rid) is str else _NO_ID
 
 
+def _blocked_tool(observation):
+    """The tool name a refused tools/call asked for, for the injected-reply
+    log marker (the wire log already holds the whole frame), or None."""
+    event = getattr(observation, "event", None)
+    for part in getattr(event, "parts", None) or ():
+        content = getattr(part, "content", None)
+        if isinstance(content, dict) and isinstance(content.get("name"), str):
+            return content["name"]
+    return None
+
+
 def _gate_verdict(journal, observation) -> bool:
     """Should this frame be refused? Computed BEFORE anything is recorded.
 
@@ -675,7 +686,21 @@ def _make_handler(remote, log: SessionLog, observer=None, journal=None,
                 pass
             log.record("c2s", ('{"glassport":"rejected_rpc_%d"}' % -code).encode())
 
-        def _send_block(self, observation) -> None:
+        def _admit(self, observation) -> bool:
+            """Does the server get to see the client request being folded?
+
+            Called by the observer under the session's lock, before the
+            request's pending correlation exists, so a request the gate
+            refuses never becomes one. The answer is the same pure
+            `_gate_verdict` that `_relay` recomputes on the final observation
+            (which additionally knows whether the entry persisted): the two
+            can only differ when the wire write failed, and then both the
+            observer and the relay fall open — the request correlates and is
+            forwarded, because unpersisted evidence is never enforced on.
+            """
+            return not _gate_verdict(journal, observation)
+
+        def _send_block(self, observation) -> bytes:
             """Answer a refused tools/call locally, in glassport's own voice.
 
             The client gets an ordinary 200 carrying a JSON-RPC error — the
@@ -711,6 +736,7 @@ def _make_handler(remote, log: SessionLog, observer=None, journal=None,
                 self.wfile.write(body)
             except Exception:
                 pass   # client hung up; the block already happened
+            return body
 
         def _local_request_ok(self) -> bool:
             """Loopback proxies must not be drivable by a web page (DNS
@@ -778,8 +804,13 @@ def _make_handler(remote, log: SessionLog, observer=None, journal=None,
                 head = self.rfile.read(min(length, _MAX_LOGGED_BODY)) if length else b""
             rest = length - len(head)
             if getattr(self, "_observation_lease", None) is not None and head:
+                # In gate mode the observer asks `_admit` for the verdict while
+                # it still holds the request's correlation back (see
+                # HTTPLease._record_locked); elsewhere the fold is eager and
+                # nothing about it changes.
                 self._c2s_observation = _observe_call(
-                    self._observation_lease, "record", "c2s", head, incomplete=rest > 0)
+                    self._observation_lease, "record", "c2s", head, incomplete=rest > 0,
+                    admit=self._admit if gate_mode else None)
             if head:
                 log.record("c2s", head)   # one request body = one frame (bounded)
                 if rest > 0:
@@ -853,6 +884,11 @@ def _make_handler(remote, log: SessionLog, observer=None, journal=None,
                     # intent, say — would silently convert every journal
                     # failure into a forward of a call glassport had already
                     # proved should not be forwarded.
+                    # In gate mode `_admit` already gave the observer this same
+                    # verdict while the request's correlation was held back;
+                    # recomputing it on the final observation adds exactly one
+                    # fact, whether the entry persisted, and an unpersisted
+                    # one forwards (the observer committed its correlation).
                     enforce = _gate_verdict(journal, self._c2s_observation)
                     # Intent is persisted BEFORE the upstream request begins, so
                     # a crash mid-delivery still leaves what analysis concluded.
@@ -868,7 +904,13 @@ def _make_handler(remote, log: SessionLog, observer=None, journal=None,
                         # reach upstream. The finally block below records the
                         # terminal outcome, exactly as on every other path.
                         delivery = ("blocked", "http_gate_blocked", 200)
-                        self._send_block(self._c2s_observation)
+                        reply = self._send_block(self._c2s_observation)
+                        # The log records what each side saw: the client got
+                        # this frame, the server never sent it. Marked
+                        # `injected`, as the stdio gate marks its own.
+                        if self._observation_lease is not None:
+                            _observe_call(self._observation_lease, "record_injected",
+                                          reply, _blocked_tool(self._c2s_observation))
                         return
                 try:
                     conn = _connect(remote)

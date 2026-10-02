@@ -84,6 +84,39 @@ class _PendingRequest:
     generation: int | None = None
 
 
+@dataclass(frozen=True)
+class _CorrelationPlan:
+    """What admitting one client request would do to the correlation maps.
+
+    Phase one of :meth:`MCPTraceBuilder._remember` computes this plan and
+    stamps the event with everything the plan implies (``correlation_limited``,
+    ``declaration_correlation_lost``, ``correlation_saturated``, and a
+    ``tools/list``'s ``declaration_generation``) *before* the session state
+    folds the event, exactly as the eager fold always has. Phase two applies
+    it. The two are separable so a transport that must analyse a request
+    before deciding whether the server will ever see it can fold first and
+    insert the pending correlation only once the request is admitted: a
+    request glassport refuses never enters the server's view of the wire.
+    """
+    pending: object
+    direction: str
+    key: object
+    pop_prior: bool
+    evicted_key: object
+    quarantine: tuple
+    saturate: bool
+    record: _PendingRequest
+    tool_name: str | None
+    method: str | None
+    event_id: str | None
+
+
+# Admission modes for a client request's correlation (see _CorrelationPlan).
+_APPLY = "apply"     # eager: plan and apply in one step (every reader's default)
+_DEFER = "defer"     # live gate: plan now, commit_correlation()/discard_correlation() later
+_SKIP = "skip"       # the entry itself says the request was never admitted
+
+
 class MCPTraceBuilder:
     """Incremental MCP evidence normalization and bounded session facts.
 
@@ -117,6 +150,15 @@ class MCPTraceBuilder:
         self.pending: OrderedDict = OrderedDict()      # client-initiated
         self.pending_s2c: OrderedDict = OrderedDict()  # server-initiated
         self._quarantined = {"c2s": set(), "s2c": set()}
+        # Requests the gate refused, keyed like `pending`, so the reply the
+        # gate injected for one can still be paired to it without the refused
+        # request ever having been a pending correlation. Bounded like pending.
+        self._blocked: OrderedDict = OrderedDict()
+        # A planned-but-unapplied correlation for the entry being folded under
+        # _DEFER; resolved by commit_correlation()/discard_correlation().
+        self._reservation: Optional[_CorrelationPlan] = None
+        self._admission = _APPLY
+        self._injected = False
         # Opaque HTTP exchange of the entry being folded (stateless scopes).
         self._exchange: Optional[str] = None
         self._correlation_saturated: set[str] = set()
@@ -162,29 +204,70 @@ class MCPTraceBuilder:
         return (type(rid), rid)
 
     def _remember(self, pending, rid, event, method, tool_name=None, cursor=None):
+        """Plan the correlation this request would establish, stamp the event,
+        and apply the plan unless the entry is being folded under _DEFER or
+        _SKIP (client requests only; a server-initiated request always
+        applies). Stamps are identical in every mode: the facts the detectors
+        and the session fold see do not depend on what the transport later
+        decides."""
+        plan = self._plan_correlation(pending, rid, event, method, tool_name, cursor)
+        if plan.key is None:
+            return
+        if pending is not self.pending or self._admission == _APPLY:
+            self._apply_correlation(plan)
+        elif self._admission == _DEFER:
+            self._reservation = plan
+        else:
+            self._note_blocked(plan)
+
+    def _plan_correlation(self, pending, rid, event, method, tool_name, cursor) -> _CorrelationPlan:
         direction = "c2s" if pending is self.pending else "s2c"
+        limits = self.state.limits
         key = self._key(pending, rid)
-        prior = pending.pop(key, None) if key is not None else None
+        quarantine = self._quarantined[direction]
+        prior = pending.get(key) if key is not None else None
+        # Simulate the quarantine set exactly as applying would mutate it, in
+        # the same order (prior, eviction, invalid key), so the saturation
+        # stamp and the validity check read the state the apply step reaches.
+        adds: list = []
+        size = len(quarantine)
+        saturate = direction in self._correlation_saturated
+
+        def plan_quarantine(k):
+            nonlocal size, saturate
+            if k in quarantine or k in adds:
+                return
+            if size < limits.max_pending:
+                adds.append(k)
+                size += 1
+            else:
+                # Forgetting ambiguous IDs would permit a delayed old response
+                # to impersonate a new request. Once the bounded set is full,
+                # stop establishing new correlations in this direction.
+                saturate = True
+                event.metadata["correlation_saturated"] = direction
+
         if prior is not None:
-            self._quarantine(direction, key, event)
+            plan_quarantine(key)
         if pending is self.pending:
             self._lost(prior, event)
-        if key is not None and len(pending) >= self.state.limits.max_pending:
-            evicted_key, evicted = pending.popitem(last=False)
-            self._quarantine(direction, evicted_key, event)
+        evicted_key = None
+        remaining = len(pending) - (1 if prior is not None else 0)
+        if key is not None and remaining >= limits.max_pending:
+            evicted_key = next(k for k in pending if k != key)
+            plan_quarantine(evicted_key)
             if pending is self.pending:
-                self._lost(evicted, event)
-            self.correlation_evictions += 1
+                self._lost(pending[evicted_key], event)
             event.metadata["correlation_limited"] = True
         valid = (key is not None and prior is None
-                 and key not in self._quarantined[direction]
-                 and direction not in self._correlation_saturated
+                 and key not in quarantine
+                 and not saturate
                  and isinstance(method, str) and bool(method)
-                 and len(method) <= self.state.limits.max_name_chars
+                 and len(method) <= limits.max_name_chars
                  and (method != "tools/call" or (isinstance(tool_name, str)
-                      and len(tool_name) <= self.state.limits.max_name_chars))
+                      and len(tool_name) <= limits.max_name_chars))
                  and (cursor is None or (isinstance(cursor, str)
-                      and 0 < len(cursor) <= self.state.limits.max_name_chars)))
+                      and 0 < len(cursor) <= limits.max_name_chars)))
         if method == "tools/list":
             params = event.parts[0].content.get("params")
             valid = valid and (params is None or isinstance(params, dict))
@@ -200,15 +283,63 @@ class MCPTraceBuilder:
                 generation = self.state.declaration_generation
             if not valid:
                 generation = None
+            # Stamped here, before SessionState.observe() runs: the pending
+            # listing the state opens for this request must carry the same
+            # generation the reply will be checked against, whether or not the
+            # pending correlation itself is inserted now or at commit.
             event.metadata["declaration_generation"] = generation
         if not valid:
             event.metadata["correlation_limited"] = True
             if key is not None:
-                self._quarantine(direction, key, event)
-        if key is None:
-            return
-        pending[key] = (_PendingRequest(event.id, method, tool_name, cursor, generation)
-                        if valid else _PendingRequest(None, None))
+                plan_quarantine(key)
+        record = (_PendingRequest(event.id, method, tool_name, cursor, generation)
+                  if valid else _PendingRequest(None, None))
+        return _CorrelationPlan(pending, direction, key, prior is not None, evicted_key,
+                                tuple(adds), saturate, record,
+                                tool_name if isinstance(tool_name, str) else None,
+                                method if isinstance(method, str) else None, event.id)
+
+    def _apply_correlation(self, plan: _CorrelationPlan) -> None:
+        pending = plan.pending
+        if plan.pop_prior:
+            pending.pop(plan.key, None)
+        if plan.evicted_key is not None and plan.evicted_key in pending:
+            del pending[plan.evicted_key]
+            self.correlation_evictions += 1
+        quarantine = self._quarantined[plan.direction]
+        for k in plan.quarantine:
+            quarantine.add(k)
+        if plan.saturate:
+            self._correlation_saturated.add(plan.direction)
+        pending[plan.key] = plan.record
+
+    def _note_blocked(self, plan: _CorrelationPlan) -> None:
+        """A refused request: no correlation, but remember it so the reply the
+        gate injected in its place can still be paired to it in the trace."""
+        self._blocked.pop(plan.key, None)
+        while len(self._blocked) >= self.state.limits.max_pending:
+            self._blocked.popitem(last=False)
+        self._blocked[plan.key] = _PendingRequest(plan.event_id, plan.method, plan.tool_name)
+
+    def commit_correlation(self) -> bool:
+        """Admit the client request folded under ``defer_correlation=True``:
+        its pending correlation is inserted now. True when there was one."""
+        plan, self._reservation = self._reservation, None
+        if plan is None:
+            return False
+        self._apply_correlation(plan)
+        return True
+
+    def discard_correlation(self) -> bool:
+        """The client request folded under ``defer_correlation=True`` was
+        refused: the server never sees it, so it never becomes a pending
+        correlation (and never displaces or quarantines a real one). True
+        when there was a reservation to discard."""
+        plan, self._reservation = self._reservation, None
+        if plan is None:
+            return False
+        self._note_blocked(plan)
+        return True
 
     def _end_exchange(self, exchange: str) -> None:
         """Forget an ended exchange's unanswered requests and quarantines.
@@ -219,6 +350,8 @@ class MCPTraceBuilder:
         """
         for key in [k for k in self.pending if len(k) == 3 and k[0] == exchange]:
             del self.pending[key]
+        for key in [k for k in self._blocked if len(k) == 3 and k[0] == exchange]:
+            del self._blocked[key]
         self._quarantined["c2s"] = {k for k in self._quarantined["c2s"]
                                     if not (len(k) == 3 and k[0] == exchange)}
 
@@ -228,19 +361,47 @@ class MCPTraceBuilder:
 
     def _reply(self, pending, rid):
         key = self._key(pending, rid)
-        return pending.pop(key, _PendingRequest(None, None)) \
-            if key is not None else _PendingRequest(None, None)
+        if key is None:
+            return _PendingRequest(None, None)
+        if self._injected and pending is self.pending:
+            # A reply the gate synthesized answers only the request the gate
+            # refused; it never consumes a real pending request that happens
+            # to carry the same id (the server may still answer that one).
+            return self._blocked.pop(key, _PendingRequest(None, None))
+        return pending.pop(key, _PendingRequest(None, None))
 
-    def ingest_frame(self, entry: dict) -> Optional[Event]:
+    def ingest_frame(self, entry: dict, *, defer_correlation: bool = False) -> Optional[Event]:
         """Normalize one tap entry, update session facts, return its event.
 
         Set retain_events=False for a bounded live fold. Persist input entries
         separately; snapshot() then contains current actors/state, not history.
+
+        ``defer_correlation=True`` folds a client request completely (event,
+        stamps, session state, so detectors can judge it) but holds back its
+        pending correlation until :meth:`commit_correlation` admits it or
+        :meth:`discard_correlation` refuses it. A reader of a saved log needs
+        neither: an entry whose outer facts say ``admitted: false`` (the HTTP
+        gate) or whose ``gate.action`` is ``blocked`` (the stdio gate) is
+        folded the same way and never inserted, and an entry whose
+        ``gate.action`` is ``injected`` is a reply the server never sent, which
+        pairs to the refused request and pops no real one. Outer facts and the
+        ``gate`` marker are written by the tap; peer JSON cannot set them.
         """
         if not isinstance(entry, dict):
             raise ValueError("tap entry must be an object")
+        # A reservation can only survive here if the previous fold faulted
+        # between planning and resolution; never apply a half-made plan.
+        self._reservation = None
         observation = entry.get("http_observation")
         observation = observation if isinstance(observation, dict) else {}
+        gate = entry.get("gate") if isinstance(entry.get("gate"), dict) else {}
+        if defer_correlation:
+            self._admission = _DEFER
+        elif observation.get("admitted") is False or gate.get("action") == "blocked":
+            self._admission = _SKIP
+        else:
+            self._admission = _APPLY
+        self._injected = gate.get("action") == "injected"
         exchange = observation.get("exchange")
         if observation.get("exchange_end") is True:
             if isinstance(exchange, str) and 0 < len(exchange) <= 64:
@@ -259,6 +420,7 @@ class MCPTraceBuilder:
         if loss:
             self.pending.clear()
             self.pending_s2c.clear()
+            self._blocked.clear()
             self.client.metadata.clear()
             self.server.metadata.clear()
         before = len(self.events)
@@ -288,9 +450,9 @@ class MCPTraceBuilder:
             self.events.clear()
         return event
 
-    def feed(self, entry: dict) -> Optional[Event]:
+    def feed(self, entry: dict, *, defer_correlation: bool = False) -> Optional[Event]:
         """Compatibility spelling for ingest_frame()."""
-        return self.ingest_frame(entry)
+        return self.ingest_frame(entry, defer_correlation=defer_correlation)
 
     def _feed_entry(self, entry: dict) -> None:
         client, server = self.client, self.server
@@ -467,7 +629,10 @@ class MCPTraceBuilder:
                         parent_event_id=parent_eid or last_event_id,
                         metadata={"seq": seq, "jsonrpc_id": rid,
                                   "error_message": msg,
-                                  "orphaned": parent_eid is None and rid is not None},
+                                  # glassport's own reply matched no *server*
+                                  # request by construction; it is not an orphan
+                                  "orphaned": (parent_eid is None and rid is not None
+                                               and not self._injected)},
                     )
                 ev.timestamp = ts
                 events.append(ev)
@@ -498,7 +663,8 @@ class MCPTraceBuilder:
                     parent_event_id=parent_eid or last_event_id,
                     metadata={"seq": seq, "jsonrpc_id": rid,
                               "method_replied_to": reply_method,
-                              "orphaned": parent_eid is None and rid is not None},
+                              "orphaned": (parent_eid is None and rid is not None
+                                           and not self._injected)},
                 )
                 events.append(ev)
                 self.last_event_id = ev.id

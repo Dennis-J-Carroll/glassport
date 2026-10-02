@@ -121,6 +121,46 @@ Digests cross-check artifacts. They are **not** signatures: an attacker who can
 rewrite both the journal and the wire log can make them agree, and nothing here
 claims otherwise.
 
+## Fold-version provenance
+
+Two detector-engine identities are in play on every replay, and the result
+names both rather than conflating them:
+
+| Field | Where it comes from | What it says |
+|---|---|---|
+| `recorded_engine` | the journal's `profile` record (`detector_engine`), written by the process that recorded the epoch | the fold the decisions were **actually computed under** |
+| `analyzer_engine` | `decision_journal.DETECTOR_ENGINE_VERSION` of the glassport running `replay-decisions` | the fold this reader **would analyze the log with** |
+
+They are compared, never reconciled. A journal whose `recorded_engine` differs
+from the analyzer is `unsupported` (`profile_mismatch_detector_engine`), and
+the text output prints both values. The analyzer's version is a property of
+the reader; it is not written into a log the reader merely opens, and opening
+a log with a newer glassport does not upgrade what the log recorded.
+
+The current fold is `glassport.detectors/2`. It differs from `/1` in how a
+gate's own actions enter correlation:
+
+- A client request the gate refuses is folded for analysis (its event, its
+  stamps, and the session-state fold are exactly those of a forwarded
+  request) but never becomes a pending correlation: the server never saw it,
+  so it never displaces or quarantines a real request sharing its id. The HTTP
+  gate writes the outer fact `http_observation.admitted: false` on that wire
+  entry; the stdio gate's `gate.action: "blocked"` marker means the same.
+- The error the gate answers with is logged as an `s2c` entry marked
+  `gate: {"action": "injected"}` (the stdio gate's existing marker). In the
+  trace it pairs to the refused call and pops no real pending request.
+
+Both markers are outer, tap-written facts; peer JSON cannot set them.
+
+**Journals recorded under `/1` are unsupported under `/2`**, by the profile
+check above: they were recorded against a fold in which a refused request did
+enter correlation, so re-judging them with the current fold would not be a
+replay of the same analysis. No claim is made in the other direction either:
+a `/1` reader does not know the `admitted` fact or the injected-reply rule, so
+it reads a `/2` wire log with the `/1` fold. It is not asserted to interpret
+the new provenance correctly, and `replay-decisions` under `/1` refuses a
+`/2` journal for the same reason.
+
 ## Bounds
 
 | `JournalLimits` | Default | Meaning |

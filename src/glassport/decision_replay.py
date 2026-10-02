@@ -6,7 +6,12 @@ preconditions:
 
 * the journal carries a configuration profile, and that profile matches the
   implementation and pattern configuration active right now (schema, policy
-  version, detector engine identity, frozen PII pattern digest);
+  version, detector engine identity, frozen PII pattern digest). Two versions
+  are in play and the result names both: ``recorded_engine`` is what the
+  writer put into the journal when it recorded, ``analyzer_engine`` is what
+  this reader folds with now. They are compared, never reconciled: a journal
+  recorded under an older fold is ``unsupported`` here, and this module makes
+  no claim about how an older reader would interpret a log written now;
 * the recorded pattern profile is reproducible — a consumer-registered
   arbitrary callable validator cannot be reconstructed from a digest, so such a
   run is reported ``incomplete``, never compared and called equal;
@@ -58,6 +63,11 @@ class ReplayResult:
     missing_evidence: list = field(default_factory=list)
     not_analyzable: int = 0
     reasons: list = field(default_factory=list)
+    # Provenance: the detector-engine identity the journal's writer recorded
+    # into it, and the one this reader analyzed with. Equal when equivalence
+    # is even attempted; both are reported so a mismatch names its sides.
+    recorded_engine: str | None = None
+    analyzer_engine: str = dj.DETECTOR_ENGINE_VERSION
 
     def as_dict(self) -> dict:
         return {"status": self.status, "epoch": self.epoch,
@@ -66,11 +76,15 @@ class ReplayResult:
                 "recorded_faults": self.recorded_faults,
                 "missing_evidence": list(self.missing_evidence),
                 "not_analyzable": self.not_analyzable,
-                "reasons": list(self.reasons)}
+                "reasons": list(self.reasons),
+                "recorded_engine": self.recorded_engine,
+                "analyzer_engine": self.analyzer_engine}
 
 
-def _unsupported(reason, epoch=None) -> ReplayResult:
-    return ReplayResult(STATUS_UNSUPPORTED, epoch, reasons=[reason])
+def _unsupported(reason, epoch=None, recorded_engine=None) -> ReplayResult:
+    result = ReplayResult(STATUS_UNSUPPORTED, epoch, reasons=[reason])
+    result.recorded_engine = recorded_engine if isinstance(recorded_engine, str) else None
+    return result
 
 
 def _read_records(path):
@@ -132,6 +146,7 @@ def verify_journal(journal_path, wire_path, *, patterns=None) -> ReplayResult:
         return _unsupported("profile_conflict", profiles[0].get("epoch"))
     profile = profiles[0]
     epoch = profile.get("epoch")
+    recorded_engine = profile.get("detector_engine")
 
     current = dj.pattern_profile(
         detectors.snapshot_pii_patterns() if patterns is None else patterns)
@@ -140,9 +155,10 @@ def verify_journal(journal_path, wire_path, *, patterns=None) -> ReplayResult:
                                  ("detector_engine", dj.DETECTOR_ENGINE_VERSION),
                                  ("pattern_digest", current.digest)):
         if profile.get(field_name) != expected:
-            return _unsupported(f"profile_mismatch_{field_name}", epoch)
+            return _unsupported(f"profile_mismatch_{field_name}", epoch, recorded_engine)
 
     result = ReplayResult(STATUS_EQUIVALENT, epoch)
+    result.recorded_engine = recorded_engine if isinstance(recorded_engine, str) else None
     if profile.get("pattern_status") != dj.PROFILE_REPRODUCIBLE:
         # An arbitrary callable validator was active. Never compare and call it
         # equal — the recording cannot be reconstructed from what is on disk.
@@ -291,6 +307,9 @@ def main(argv: list[str]) -> int:
               f"missing_evidence={len(result.missing_evidence)}")
         for reason in result.reasons:
             print(f"  reason: {reason}")
+        if result.recorded_engine != result.analyzer_engine:
+            print(f"  recorded detector engine: {result.recorded_engine or '(none)'}; "
+                  f"this analyzer: {result.analyzer_engine}")
         for item in result.mismatched:
             print(f"  mismatch seq={item['event_seq']}: "
                   f"{','.join(item['problems'])}")
