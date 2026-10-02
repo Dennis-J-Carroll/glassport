@@ -53,7 +53,14 @@ from glassport.interaction_trace import AnnotationKind
 # Replay refuses to claim equivalence across a change in any of the three.
 JOURNAL_SCHEMA = "glassport.decision-journal/1"
 POLICY_VERSION = "glassport.policy/1"
-DETECTOR_ENGINE_VERSION = "glassport.detectors/1"
+# /2: the fold changed. A client request the gate refuses is folded for
+# analysis but never becomes a pending correlation (its wire entry says
+# `admitted: false`), and the reply the gate injects for it (`gate:
+# injected`) pairs to that refused request and pops no real one. A journal
+# written under /1 was recorded against a fold in which a refused request
+# *did* enter correlation, so this reader reports it unsupported rather
+# than re-judge it; nothing here says how a /1 reader would read a /2 log.
+DETECTOR_ENGINE_VERSION = "glassport.detectors/2"
 
 MODE_OBSERVE = "observe"
 MODE_GATE = "gate"
@@ -88,9 +95,27 @@ DELIVERY_CODES = frozenset({
 NON_ENFORCEABLE = frozenset({
     "detector_error",                 # a detector raised during this event
     "analysis_limit",                 # session state bound hit; surface may be partial
+                                      # (except the request's own ambiguous id, below)
     "declaration_unavailable",        # no complete declaration to check against
     "http_observation_unavailable",   # epoch evidence lost/stale/uninterpreted
 })
+
+# The one analysis limit that says nothing about the surface: this request's
+# own id is ambiguous (reused while another request with it is in flight), so
+# its *reply* cannot be correlated. The exclusion a block rests on is the
+# declared surface, which that fact does not touch. Treating it as
+# non-enforceable let a client forward one undeclared call per session by
+# reusing an in-flight id. Saturation (`request_correlation_saturated`) and
+# every other limit still waive enforcement.
+_REQUEST_OWN_ID_LIMIT = "request_correlation"
+
+
+def _limit_is_this_requests_own_id(annotation) -> bool:
+    if getattr(annotation, "subcategory", None) != "analysis_limit":
+        return False
+    metadata = getattr(annotation, "metadata", None)
+    return isinstance(metadata, dict) and metadata.get("reason") == _REQUEST_OWN_ID_LIMIT
+
 
 _SAFE_TOKEN_RE = re.compile(r"[^a-z0-9_.:/-]")
 _MAX_TOKEN_CHARS = 64
@@ -459,6 +484,7 @@ class DecisionJournal:
                 return False
             annotations = tuple(getattr(observation, "annotations", ()) or ())
             if any(getattr(a, "subcategory", None) in NON_ENFORCEABLE
+                   and not _limit_is_this_requests_own_id(a)
                    for a in annotations):
                 return False
             return policy.decide(event_id, annotations,

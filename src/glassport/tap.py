@@ -187,6 +187,74 @@ def _note_skip(info: dict | None, tool: str | None, reason: str) -> dict:
 # ─────────────────────────────────────────────────────────────────
 # Session logger — append-only JSONL, thread-safe, failure-isolated.
 # ─────────────────────────────────────────────────────────────────
+def _serialize_entry(entry: dict) -> str:
+    """One JSONL line for an envelope. A frame that parsed but is too deep to
+    re-encode is kept as wire text in the SAME dict (so what a live fold saw
+    and what is on disk never differ); a lone surrogate json.loads accepted
+    but UTF-8 cannot carry is escaped, never dropped."""
+    try:
+        text = json.dumps(entry, ensure_ascii=False)
+    except RecursionError:
+        # build_session_entry already applied the wire-text fallback for a
+        # frame it could not re-encode; a caller-mutated entry gets the same
+        # treatment with whatever raw text it carries.
+        entry["frame"] = None
+        text = json.dumps(entry, ensure_ascii=False)
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError:
+        text = json.dumps(entry, ensure_ascii=True)
+    return text
+
+
+def build_session_entry(direction: str, line: bytes, gate: dict | None = None,
+                        metadata: dict | None = None, *,
+                        observation: dict | None = None,
+                        wire_bytes: bytes | None = None,
+                        seq: int) -> tuple[dict, str]:
+    """The envelope :meth:`SessionLog.record` writes for one wire line, plus
+    its serialization. Pure: builds the dict every reader (`MCPTraceBuilder`,
+    `from_mcp_session_file`, replay) consumes, without touching a file, so a
+    live fold can be fed the exact object that is then written."""
+    text = line.decode("utf-8", errors="replace").rstrip("\r\n")
+    frame, raw = None, None
+    try:
+        frame = json.loads(text)
+    except (json.JSONDecodeError, ValueError, RecursionError):
+        raw = text
+    entry = {
+        "schema_version": SCHEMA_VERSION,
+        "seq": seq,
+        "ts": _now_iso(),
+        "dir": direction,
+        "frame": frame,
+        "raw": raw,
+    }
+    if gate is not None:
+        entry["gate"] = gate
+    if metadata is not None:
+        entry["sse_meta"] = metadata
+    if observation is not None:
+        entry["http_observation"] = observation
+    if wire_bytes is not None:
+        import base64
+        entry["wire_b64"] = base64.b64encode(wire_bytes).decode("ascii")
+    try:
+        serialized = json.dumps(entry, ensure_ascii=False)
+    except RecursionError:
+        # Parsed but too deep to re-encode: keep the wire text rather than
+        # silently dropping the entry.
+        entry["frame"], entry["raw"] = None, text
+        serialized = json.dumps(entry, ensure_ascii=False)
+    try:
+        serialized.encode("utf-8")
+    except UnicodeEncodeError:
+        # json.loads accepts lone surrogates ("\\ud800") that UTF-8 cannot
+        # carry: escape this entry, never drop it.
+        serialized = json.dumps(entry, ensure_ascii=True)
+    return entry, serialized
+
+
 class SessionLog:
     def __init__(self, path: Path):
         # Create the session dir private (0o700) and the log file private
@@ -251,55 +319,46 @@ class SessionLog:
         smashed into the parseable frame. For SSE it holds fields such as
         ``event``, ``id``, and ``retry`` so the JSON-RPC payload can still
         be logged as a structured ``frame``.
+
+        Equivalent to :func:`build_session_entry` followed by
+        :meth:`write_entry` under one lock; a caller that must fold an entry
+        before it knows every outer fact uses those two steps directly.
         """
         try:
-            text = line.decode("utf-8", errors="replace").rstrip("\r\n")
-            frame, raw = None, None
-            try:
-                frame = json.loads(text)
-            except (json.JSONDecodeError, ValueError, RecursionError):
-                raw = text
             with self._lock:
-                if sequence is not None:
-                    if type(sequence) is not int or sequence <= self._seq:
-                        raise ValueError('session sequence must increase')
-                    self._seq = sequence
-                else:
-                    self._seq += 1
-                entry = {
-                    "schema_version": SCHEMA_VERSION,
-                    "seq": self._seq,
-                    "ts": _now_iso(),
-                    "dir": direction,
-                    "frame": frame,
-                    "raw": raw,
-                }
-                if gate is not None:
-                    entry["gate"] = gate
-                if metadata is not None:
-                    entry["sse_meta"] = metadata
-                if observation is not None:
-                    entry["http_observation"] = observation
-                if wire_bytes is not None:
-                    import base64
-                    entry["wire_b64"] = base64.b64encode(wire_bytes).decode("ascii")
-                try:
-                    serialized = json.dumps(entry, ensure_ascii=False)
-                except RecursionError:
-                    # Parsed but too deep to re-encode: keep the wire text
-                    # rather than silently dropping the entry.
-                    entry["frame"], entry["raw"] = None, text
-                    serialized = json.dumps(entry, ensure_ascii=False)
-                try:
-                    serialized.encode("utf-8")
-                except UnicodeEncodeError:
-                    # json.loads accepts lone surrogates ("\\ud800") that
-                    # UTF-8 cannot carry: escape this entry, never drop it.
-                    serialized = json.dumps(entry, ensure_ascii=True)
-                self._fh.write(serialized + "\n")
+                seq = self._claim_sequence(sequence)
+                entry, text = build_session_entry(
+                    direction, line, gate=gate, metadata=metadata,
+                    observation=observation, wire_bytes=wire_bytes, seq=seq)
+                self._fh.write(text + "\n")
                 return entry
         except Exception:
             return None  # logging is best-effort; the relay is sacred
+
+    def _claim_sequence(self, sequence: int | None) -> int:
+        """Caller holds the lock. Validates and advances the log's sequence."""
+        if sequence is not None:
+            if type(sequence) is not int or sequence <= self._seq:
+                raise ValueError('session sequence must increase')
+            self._seq = sequence
+        else:
+            self._seq += 1
+        return self._seq
+
+    def write_entry(self, entry: dict, text: str | None = None) -> bool:
+        """Append one envelope built by :func:`build_session_entry`; True on
+        a successful write call. `text` is its serialization when the caller
+        still holds the one build_session_entry returned and has not changed
+        the entry since; otherwise it is serialized here. Never raises."""
+        try:
+            with self._lock:
+                self._claim_sequence(entry.get("seq"))
+                if text is None:
+                    text = _serialize_entry(entry)
+                self._fh.write(text + "\n")
+            return True
+        except Exception:
+            return False
 
     def write_json(self, entry: dict) -> bool:
         """Append one caller-shaped JSON record; True on a successful write.

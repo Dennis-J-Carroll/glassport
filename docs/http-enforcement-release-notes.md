@@ -65,6 +65,21 @@ contracts; this file is the compatibility/migration summary.
 - **A recorded detector fault is never re-executed on replay.** If the
   original pass recorded a fault for an event, replay reports that event as
   `incomplete`/recorded-fault, never as re-judged current-run output.
+- **A refused request is not part of the wire the server saw.** The HTTP
+  gate must fold a request before it can decide to refuse it; the refused
+  request's pending correlation is now inserted only after an admitted
+  forward verdict (under the session's lock, so no other fold intervenes),
+  its wire entry carries the outer fact `admitted: false`, and the error the
+  gate answered with is logged `gate: injected`, as the stdio gate logs its
+  own. A reader of the log folds both exactly as the live gate did. This is a
+  change of fold, so the detector engine identity is `glassport.detectors/2`;
+  a journal recorded under `/1` is reported `unsupported` on replay, and the
+  result names the recorded and the analyzing engine separately
+  (`docs/http-decision-journal.md`, "Fold-version provenance"). One
+  enforceability rule narrowed with it: an `analysis_limit` whose reason is
+  `request_correlation` (the refused request's *own* id was ambiguous) no
+  longer waives a proved out-of-surface block; a client could previously
+  forward one undeclared call per session by reusing an in-flight id.
 - **Credential partitioning is not authentication.** The salted
   credential-context digest that isolates HTTP sessions from each other
   prevents accidental state reuse; it makes no claim about verifying who is

@@ -344,7 +344,7 @@ class TestHTTPSessions(unittest.TestCase):
         rows = [json.loads(line) for line in a.context.log.path.read_text().splitlines()]
         self.assertEqual(base64.b64decode(rows[-1]['wire_b64']), payload)
         self.assertEqual(rows[-1]['raw'].encode(), payload)
-        with mock.patch.object(a.context.log, 'record', return_value=None):
+        with mock.patch.object(a.context.log, 'write_entry', return_value=False):
             failed = a.record('c2s', wire(id=2, method='ping'))
             self.assertFalse(failed.persisted)
         last = a.record('c2s', wire(id=3, method='ping'))
