@@ -1637,6 +1637,12 @@ def _run_http_gate(remote_url: str, log_dir: Path, *, endpoint_era: str = "auto"
 USAGE = """\
 glassport — passive MCP stdio proxy
 
+  probe:           glassport probe [--call NAME JSON]... [--log-dir DIR]
+                        [--timeout S] [--startup-timeout S] [-o out.html]
+                        [--json] [--open] -- <server command...>
+                   (be the client: handshake + tools/list through the tap,
+                    then write the HTML report. List-only unless --call.
+                    exit 0 clean, 1 findings, 3 handshake incomplete)
   wrap (default):  glassport [wrap] [--log-dir DIR] -- <server command...>
                    glassport wrap --transport http --url <remote-mcp-url>
                         (passive MITM over MCP Streamable-HTTP; logs both
@@ -1782,6 +1788,11 @@ def main(argv: list[str]) -> int:
         # glassport as a queryable MCP audit server. Lazy import.
         from glassport import server as server_mod
         return server_mod.main(argv[1:])
+
+    if argv[0] == "probe":
+        # one-command client: drive a server through the tap, then report
+        from glassport import probe as probe_mod
+        return probe_mod.main(argv[1:])
 
     if argv[0] == "report":
         # M3 — static HTML render. Lazy import keeps tap mode import-light.
