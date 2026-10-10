@@ -37,7 +37,8 @@ from pathlib import Path
 from typing import Any, Optional
 
 PROTOCOL_VERSION = "2025-06-18"
-_LOG_LINE = "[glassport] session log: "
+_BOOT = ("import sys; sys.path.insert(0, sys.argv.pop(1)); "
+         "from glassport.tap import cli; cli()")
 _STDERR_TAIL = 4096
 
 USAGE = ("usage: glassport probe [--call NAME JSON]... [--log-dir DIR] "
@@ -168,25 +169,25 @@ def _signal_group(proc: subprocess.Popen, sig: int) -> None:
         if os.name == "posix":
             os.killpg(proc.pid, sig)
         else:
-            proc.kill()
+            subprocess.run(["taskkill", "/T", "/F", "/PID", str(proc.pid)],
+                           capture_output=True, check=False)
     except (ProcessLookupError, PermissionError, OSError):
         pass
 
 
 def _spawn_tap(cmd: list[str], log_dir: Path) -> subprocess.Popen:
-    # Run the tap as `python -m glassport.tap` from the same interpreter,
-    # with this package's parent on PYTHONPATH, so a source checkout and an
-    # installed wheel behave the same. stdin/stdout are binary: the probe
-    # must not re-encode what the server sent.
+    # Run the tap from the same interpreter with this package importable,
+    # so a source checkout and an installed wheel behave the same. The path
+    # goes onto the tap's sys.path, never into PYTHONPATH: the tap's env is
+    # inherited by the server, and an injected site-packages there would
+    # shadow a Python server's own deps — the session must be exactly what
+    # `wrap` records. stdin/stdout stay binary: nothing is re-encoded.
     pkg_parent = str(Path(__file__).resolve().parent.parent)
-    env = dict(os.environ)
-    env["PYTHONPATH"] = os.pathsep.join(
-        p for p in (pkg_parent, env.get("PYTHONPATH")) if p)
     return subprocess.Popen(
-        [sys.executable, "-m", "glassport.tap", "wrap",
+        [sys.executable, "-c", _BOOT, pkg_parent, "wrap",
          "--log-dir", str(log_dir), "--", *cmd],
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        env=env, start_new_session=(os.name == "posix"),
+        start_new_session=(os.name == "posix"),
     )
 
 
@@ -229,13 +230,13 @@ def _version() -> str:
     return __version__
 
 
-def _find_log(stderr_lines: list[str], log_dir: Path) -> Optional[Path]:
-    for line in stderr_lines:
-        if line.startswith(_LOG_LINE):
-            p = Path(line[len(_LOG_LINE):].strip())
-            if p.exists():
-                return p
-    files = sorted(log_dir.glob("*.jsonl"), key=lambda p: p.stat().st_mtime)
+def _find_log(log_dir: Path, tap_pid: int) -> Optional[Path]:
+    # The tap names its log `<stamp>_<server>_<tap pid>.jsonl`. Matching on
+    # our own tap's pid never picks up a concurrent session in a shared log
+    # dir (a live `wrap`, a parallel survey probe) — and unlike parsing
+    # stderr, the server can't spoof it.
+    files = sorted(log_dir.glob(f"*_{tap_pid}.jsonl"),
+                   key=lambda p: p.stat().st_mtime)
     return files[-1] if files else None
 
 
@@ -249,6 +250,7 @@ def probe(cmd: list[str], calls: Optional[list[tuple[str, dict]]] = None,
     """
     from glassport import detectors
     from glassport.adapters.mcp_session import from_mcp_session_file
+    from glassport.interaction_trace import AnnotationKind
     from glassport.report import render_html
     from glassport.tap import DEFAULT_LOG_DIR
 
@@ -268,7 +270,7 @@ def probe(cmd: list[str], calls: Optional[list[tuple[str, dict]]] = None,
         handshake["failed_at"] = "spawn"
 
     stderr_tail = "".join(client.stderr)[-_STDERR_TAIL:]
-    log_path = _find_log(client.stderr, log_dir)
+    log_path = _find_log(log_dir, proc.pid)
     result = ProbeResult(cmd=list(cmd), handshake=handshake, log_path=log_path,
                          report_path=None, stderr_tail=stderr_tail)
     if log_path is None:
@@ -276,7 +278,10 @@ def probe(cmd: list[str], calls: Optional[list[tuple[str, dict]]] = None,
 
     trace = from_mcp_session_file(log_path, server_name=Path(cmd[0]).name)
     trace.metadata["handshake"] = handshake
-    found = detectors.annotate(trace)
+    # INFO annotations never drive the report's verdict; the exit code
+    # must agree with the headline
+    found = [a for a in detectors.annotate(trace)
+             if a.kind != AnnotationKind.INFO]
 
     report_path = Path(out_path) if out_path else log_path.with_suffix(".html")
     report_path.write_text(render_html(trace, source_name=log_path.name),

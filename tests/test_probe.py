@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import sys
 import tempfile
 import time
@@ -25,8 +26,12 @@ from glassport.interaction_trace import (
 )
 
 FAKE_SERVER = r'''
-import json, sys, time
+import json, os, sys, time
 mode = sys.argv[1]
+if len(sys.argv) > 2:   # side channel for the test: pid + inherited env
+    with open(sys.argv[2], "w") as f:
+        json.dump({"pid": os.getpid(),
+                   "pythonpath": os.environ.get("PYTHONPATH")}, f)
 def send(obj):
     sys.stdout.write(json.dumps(obj) + "\n"); sys.stdout.flush()
 for line in sys.stdin:
@@ -79,8 +84,8 @@ class _FakeServer:
     def tearDown(self):
         self._logs.cleanup()
 
-    def cmd(self, mode):
-        return [sys.executable, str(self.server), mode]
+    def cmd(self, mode, *extra):
+        return [sys.executable, str(self.server), mode, *extra]
 
     def run_probe(self, mode, **kw):
         kw.setdefault("startup_timeout", 15)
@@ -134,12 +139,44 @@ class TestProbeHandshake(_FakeServer, unittest.TestCase):
         self.assertEqual(res.exit_code, 3)
 
     def test_hanging_server_is_killed_and_marked_incomplete(self):
+        side = self.log_dir / "side.json"
         t0 = time.monotonic()
-        res = self.run_probe("hang_list", timeout=1)
+        res = probe_mod.probe(self.cmd("hang_list", str(side)),
+                              log_dir=self.log_dir, startup_timeout=15,
+                              timeout=1)
         self.assertLess(time.monotonic() - t0, 15)
         self.assertEqual(res.handshake["failed_at"], "tools_list")
         self.assertEqual(res.handshake["reason"], "timeout")
         self.assertEqual(res.exit_code, 3)
+        if os.name == "posix":
+            # the server itself, not just the tap, must be gone
+            pid = json.loads(side.read_text())["pid"]
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                try:
+                    os.kill(pid, 0)
+                except ProcessLookupError:
+                    break
+                time.sleep(0.05)
+            else:
+                os.kill(pid, 9)
+                self.fail("server outlived the probe")
+
+    def test_server_env_is_not_altered(self):
+        # the session must be what `wrap` records: probe may not inject
+        # its own package path into the server's environment
+        side = self.log_dir / "side.json"
+        probe_mod.probe(self.cmd("ok", str(side)), log_dir=self.log_dir,
+                        startup_timeout=15, timeout=5)
+        self.assertEqual(json.loads(side.read_text())["pythonpath"],
+                         os.environ.get("PYTHONPATH"))
+
+    def test_ignores_other_sessions_in_a_shared_log_dir(self):
+        decoy = self.log_dir / "29991231T000000Z_other_1.jsonl"
+        decoy.write_text("", encoding="utf-8")
+        res = self.run_probe("ok")
+        self.assertNotEqual(res.log_path, decoy)
+        self.assertEqual(res.declared_tools, ["echo"])
 
     def test_missing_command_fails_at_spawn(self):
         res = probe_mod.probe(["glassport-no-such-binary-xyz"],
