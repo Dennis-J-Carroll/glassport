@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/glassport_logo.jpg" alt="Glassport" width="180">
+  <img src="../assets/glassport_logo.jpg" alt="Glassport" width="180">
 </p>
 
 <h1 align="center">glassport</h1>
@@ -23,7 +23,7 @@ See what an MCP server <em>actually does</em>, not just what it declares.
 </p>
 
 <p align="center">
-  <img src="docs/screenshots/console.png" alt="glassport web console replaying a gated MCP session: blocked calls in red, gate actions and findings below" width="900">
+  <img src="screenshots/console.png" alt="glassport web console replaying a gated MCP session: blocked calls in red, gate actions and findings below" width="900">
 </p>
 
 ---
@@ -51,7 +51,7 @@ See what an MCP server <em>actually does</em>, not just what it declares.
 
 ## Why this exists
 
-The MCP ecosystem has 10,000+ public servers and the security tooling hasn't kept pace. Studies of public servers report widespread SSRF and unsafe command-execution paths; most servers ship with static API keys or no auth at all. Twenty-plus gateways now *add* security as a layer on top.
+MCP servers are multiplying faster than the tooling to check them, and most security work in the space *adds* a layer on top: gateways, policy engines, sandboxes.
 
 Nobody shows you the simplest, most fundamental thing: **the gap between what a server declares in its handshake and what it actually services.**
 
@@ -117,12 +117,6 @@ If it's not marked Built, it doesn't run yet.
 ~30k frames/s, and renders its HTML report in ~2 s — on a laptop, stdlib
 only, no cache.
 
-### Used by
-
-- [glassport itself](https://github.com/Dennis-J-Carroll/glassport) — every
-  CI run taps, gates, audits, and red-teams its own wire (dogfooding is the
-  first deployment). Using glassport in production? Open a PR and add
-  yourself here.
 
 ---
 
@@ -236,7 +230,7 @@ $ glassport serve --http # the same view in a browser (127.0.0.1 only)
 ```
 
 <p align="center">
-  <img src="docs/screenshots/tui.png" alt="glassport tui showing a gated session timeline and findings" width="820">
+  <img src="screenshots/tui.png" alt="glassport tui showing a gated session timeline and findings" width="820">
 </p>
 
 ### 7. Let the agent query its own history
@@ -373,10 +367,10 @@ register_pii_pattern(PIIPattern(
 
 Custom patterns are first-class: same dedup, same non-reversible redaction, same egress escalation as the built-ins.
 
-Two ready-made opt-in packs ship in [`examples/`](examples/) — both broad-regex patterns kept out of the default scan, gated by a checksum so they barely false-positive once enabled:
+Two ready-made opt-in packs ship in [`examples/`](../examples/) — both broad-regex patterns kept out of the default scan, gated by a checksum so they barely false-positive once enabled:
 
-- [`pii-financial.json`](examples/pii-financial.json) — ABA bank routing numbers (`aba` validator: Federal Reserve range + mod-10).
-- [`pii-crypto.json`](examples/pii-crypto.json) — Base58check cryptocurrency addresses (`base58` validator: SHA-256d checksum).
+- [`pii-financial.json`](../examples/pii-financial.json) — ABA bank routing numbers (`aba` validator: Federal Reserve range + mod-10).
+- [`pii-crypto.json`](../examples/pii-crypto.json) — Base58check cryptocurrency addresses (`base58` validator: SHA-256d checksum).
 
 IBAN (structured, barely false-positives) ships on by default; the broad ones are opt-in. Point `GLASSPORT_PII_PATTERNS` at a pack if your server handles that data:
 
@@ -393,7 +387,7 @@ JWTs are detected by default — and the `eyJ…` pattern is now gated by the `j
 `report.py` renders a self-contained static HTML page from a trace:
 
 <p align="center">
-  <img src="docs/screenshots/report.png" alt="glassport session report: verdict, declared vs called surface, and a timeline with gate blocks and a quarantined resource read" width="720">
+  <img src="screenshots/report.png" alt="glassport session report: verdict, declared vs called surface, and a timeline with gate blocks and a quarantined resource read" width="720">
 </p>
 
 - **Verdict** — `CLEAN` / `WORTH A LOOK` / `SHOULD NOT HAPPEN` / `HOSTILE OR HALLUCINATED`
@@ -452,7 +446,7 @@ The gate inspects every client-to-server frame before the server sees it, and ev
 | `taint_detected` | any `params` field carries a role delimiter or chat-template token (`<\|system\|>`, `<\|im_start\|>`, `[INST]`, `<start_of_turn>`, …) or zero-width obfuscation |
 | `schema_violation` | arguments violate the tool's declared `inputSchema` |
 | `retry_loop_exceeded` | an identical call repeats past the retry limit |
-| `attestation_failed` | opt-in caller attestation is missing, expired, or invalid ([docs/attestation.md](docs/attestation.md)) |
+| `attestation_failed` | opt-in caller attestation is missing, expired, or invalid ([docs/attestation.md](attestation.md)) |
 | `params_too_deep`, `params_too_large` | params nested or sized beyond what the gate can inspect in full |
 | `batch_unsupported` | a JSON-RPC batch — refused whole, no element forwarded |
 | `uninspectable_frame`, `frame_too_deep` | a line the gate cannot parse unambiguously (malformed, duplicate keys, invalid UTF-8, …) — never forwarded unread |
@@ -460,7 +454,7 @@ The gate inspects every client-to-server frame before the server sees it, and ev
 On the way back, a `resources/read` reply carrying injected delimiters is **quarantined**: the client receives a copy with the delimiters neutralized, and server lines the gate cannot inspect are dropped.
 
 <p align="center">
-  <img src="docs/screenshots/detect.png" alt="glassport detect listing gate blocks with their reasons for a demo session" width="900">
+  <img src="screenshots/detect.png" alt="glassport detect listing gate blocks with their reasons for a demo session" width="900">
 </p>
 
 The session log records both realities: a blocked frame is logged with `"gate": {"action": "blocked", "reason": ...}` (the server never saw it) and the synthesized error with `{"action": "injected"}` (the server never sent it); a quarantine logs the original and the replacement. `summarize`, `detect`, `report`, and `watch` all understand the markers — gate actions appear as INFO annotations naming the reason, distinct from the findings the blocked call still earns.
@@ -542,7 +536,7 @@ critical/high) or a SARIF artifact.
 `audit --sarif` → Security tab (`glassport-audit`), and `detect --sarif` over a
 session fixture → Security tab (`glassport-runtime`).
 
-**GitLab CI** — copy [`examples/gitlab-ci.yml`](examples/gitlab-ci.yml) to your
+**GitLab CI** — copy [`examples/gitlab-ci.yml`](../examples/gitlab-ci.yml) to your
 repo root as `.gitlab-ci.yml`. Two jobs mirroring the GitHub workflow:
 `glassport-audit` runs `audit --sarif` over your source, and `glassport-runtime`
 runs `detect --sarif` over a captured tap session log (`SESSION_LOG`, only when
@@ -713,7 +707,7 @@ bounded tail (50 MB default), so early declarations may be unavailable. Pure
 decisions. It is now wired into the HTTP transport — `gate --transport http`
 acts on it through `DecisionJournal.evaluate()` — while the stdio `gate` still
 enforces through its own, separate `Gate` mechanism and has not been migrated
-onto this engine. See [the API, bounds, validation, and implementation record](docs/priority-engineering.md).
+onto this engine. See [the API, bounds, validation, and implementation record](priority-engineering.md).
 
 ---
 
