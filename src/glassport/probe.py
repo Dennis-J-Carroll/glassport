@@ -245,7 +245,7 @@ def probe(cmd: list[str], calls: Optional[list[tuple[str, dict]]] = None,
           startup_timeout: float = 60.0, timeout: float = 15.0) -> ProbeResult:
     """Drive `cmd` through the tap, analyze the session, write the report.
 
-    startup_timeout bounds `initialize` (a first `npx -y` run downloads the
+    startup_timeout bounds `initialize` (a first-run npx download fetches the
     package before the server can answer); timeout bounds each later step.
     """
     from glassport import detectors
