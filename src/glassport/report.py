@@ -42,6 +42,11 @@ VERDICTS = {
     3: ("HOSTILE OR HALLUCINATED", "calls or requests outside any declaration"),
 }
 
+# Stages a driven session (`glassport probe`) can stop at. The renderer
+# echoes only these fixed names: anything else in trace metadata renders as
+# "unknown", so the banner stays static text like the tail-only one.
+HANDSHAKE_STAGES = ("spawn", "initialize", "tools_list", "call")
+
 _CSS = """
 :root { --bg:#0b0f0b; --panel:#111911; --line:#1f2d1f; --fg:#c9e4c9;
         --dim:#739173; --green:#4ade80;
@@ -180,12 +185,26 @@ def render_html(trace: InteractionTrace, source_name: str = "") -> str:
         w('<div class="verdict v2">PARTIAL — tail-only mode; the head of '
           "the log exceeded the ingest cap and was NOT analyzed</div>")
     w(f'<div class="dim">{_esc(source_name or trace.id)}</div>')
-    w(f'<div class="verdict v{max_sev}">{verdict}</div>')
-    w(f'<div class="dim">{_esc(verdict_text)}'
-      + (" · " + " · ".join(f"{sev_counts[s]} × sev {s}"
-                            for s in sorted(sev_counts, reverse=True))
-         if sev_counts else "")
-      + "</div>")
+    handshake = trace.metadata.get("handshake")
+    incomplete = isinstance(handshake, dict) and not handshake.get("completed")
+    if incomplete:
+        # doctrine: a session that never finished its handshake must never
+        # look complete — INCOMPLETE heads the page, outranking even a
+        # severity-3 verdict, which still renders beneath it
+        stage = handshake.get("failed_at")
+        stage = stage if stage in HANDSHAKE_STAGES else "unknown"
+        w('<div class="verdict v2">INCOMPLETE</div>')
+        w(f'<div class="dim">handshake failed at {stage}; only the traffic '
+          "before it was analyzed</div>")
+    counts = (" · " + " · ".join(f"{sev_counts[s]} × sev {s}"
+                                 for s in sorted(sev_counts, reverse=True))
+              if sev_counts else "")
+    if incomplete and not max_sev:
+        # no findings in a partial capture is not "clean"
+        w('<div class="dim">no findings in the captured traffic</div>')
+    else:
+        w(f'<div class="verdict v{max_sev}">{verdict}</div>')
+        w(f'<div class="dim">{_esc(verdict_text)}{counts}</div>')
 
     w("<h2>surface</h2>")
     surface_label = ("unknown: no usable tools/list seen"
