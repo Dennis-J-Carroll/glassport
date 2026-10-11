@@ -2,9 +2,9 @@
 
 **See what an MCP server actually does, not just what it declares.**
 
-<!-- TODO(week 1): replace with the probe GIF -->
+<!-- TODO(week 1): add the probe GIF (docs/screenshots/probe.tape) above this still -->
 <p align="center">
-  <img src="https://raw.githubusercontent.com/Dennis-J-Carroll/glassport/main/docs/screenshots/report.png" alt="glassport session report: declared tools, called tools, findings" width="820">
+  <img src="https://raw.githubusercontent.com/Dennis-J-Carroll/glassport/main/docs/screenshots/probe-report.png" alt="glassport probe report for the reference filesystem server: CLEAN verdict, 14 declared tools, handshake timeline" width="820">
 </p>
 
 An MCP server tells your agent what it offers in its `tools/list` handshake. Everything after that is behavior. Glassport sits on the wire between the two and reports the gap: calls outside the declared surface, secrets leaving in arguments, a tool list that quietly changes mid-session. Point it at a server and it plays the client, or put it in front of a real agent session and it records passively. No cloud, no sandbox, zero dependencies.
