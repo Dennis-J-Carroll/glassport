@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="https://raw.githubusercontent.com/Dennis-J-Carroll/glassport/main/assets/glassport_logo-360.jpg" alt="Glassport logo" width="160">
+</p>
+
 # glassport
 
 **See what an MCP server actually does, not just what it declares.**
