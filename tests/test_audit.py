@@ -148,7 +148,24 @@ class TestSecrets(unittest.TestCase):
         f = next(f for f in r.findings if f.rule == "secret-hardcoded")
         self.assertEqual(f.severity, "critical")
         self.assertNotIn(key, f.detail)          # never echo the secret
-        self.assertIn(key[:4], f.detail)         # but show enough to find it
+        self.assertNotIn(key[:4], f.detail)      # not even a prefix; path:line locates it
+        self.assertIn(f"{len(key)} chars", f.detail)
+
+    def test_no_secret_prefix_in_any_output(self):
+        # A finding's detail flows to text, JSON, SARIF and the serve
+        # audit_server tool. A short prefix is not recognizable as a secret,
+        # so output-side scrubbing (redact_secrets_strict) lets it through;
+        # the detail must never carry one in the first place.
+        from glassport.sarif import render_sarif
+        token = "q7Zt" + "Vm3xK9pL2wRb8nYc4hJf6dGs1aE5uT0i"
+        r = audit_src(f'headers = {{"Authorization": "Bearer {token}"}}\n')
+        f = next(f for f in r.findings if f.rule == "secret-hardcoded")
+        self.assertEqual((f.path, f.line), ("server.py", 1))
+        for name, out in (("text", audit.render_text(r)),
+                          ("json", audit.render_json(r)),
+                          ("sarif", render_sarif(r))):
+            self.assertNotIn(token[:4], out, name)
+            self.assertNotIn(token[-4:], out, name)
 
     def test_github_token_detected(self):
         r = audit_src(f'tok = "ghp_{"a" * 36}"\n')

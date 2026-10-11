@@ -362,9 +362,12 @@ def _scan_common(text: str, rel: str) -> list[dict]:
     for label, rx in SECRET_PATTERNS:
         for m in rx.finditer(text):
             secret = m.group(m.lastindex or 0)
+            # same non-reversible tag as the runtime detectors: no prefix,
+            # because a few characters are not recognizable as a secret and
+            # so survive every downstream scrubber (text, JSON, SARIF)
             hits.append({"rule": "secret-hardcoded", "path": rel,
                          "line": _line_of(text, m.start()),
-                         "detail": f"{label}: '{secret[:4]}…(redacted)'"})
+                         "detail": detectors._redact(secret, label)})
     # poison patterns run on the invisible-stripped view (so a directive
     # split with zero-width chars is caught), then positions map back to
     # the original text for an exact line number
