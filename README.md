@@ -1,8 +1,15 @@
+<p align="center">
+  <img src="https://raw.githubusercontent.com/Dennis-J-Carroll/glassport/main/assets/glassport_logo-360.jpg" alt="Glassport logo" width="160">
+</p>
+
 # glassport
 
 **See what an MCP server actually does, not just what it declares.**
 
-<!-- TODO(week 1): add the probe GIF (docs/screenshots/probe.tape) above this still -->
+<p align="center">
+  <img src="https://raw.githubusercontent.com/Dennis-J-Carroll/glassport/main/docs/screenshots/probe.gif" alt="glassport probe: the reference filesystem server completes its handshake with 14 tools declared; a server that exits on initialize is reported as INCOMPLETE" width="820">
+</p>
+
 <p align="center">
   <img src="https://raw.githubusercontent.com/Dennis-J-Carroll/glassport/main/docs/screenshots/probe-report.png" alt="glassport probe report for the reference filesystem server: CLEAN verdict, 14 declared tools, handshake timeline" width="820">
 </p>
