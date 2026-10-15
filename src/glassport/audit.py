@@ -39,12 +39,23 @@ from pathlib import Path
 
 from glassport import detectors, provenance
 
-RUBRIC_VERSION = "0.3"          # v0.3: capability-note tier (0 weight)
+RUBRIC_VERSION = "0.4"          # v0.3: capability-note tier (0 weight)
+                                # v0.4: tool-poisoning severity by context;
+                                #       shipped dist/ scanned; root identity
 MAX_FILE_BYTES = 1_000_000
+# A published package's main bundle is routinely over 1 MB (server-pdf
+# ships a 1.9 MB index.js) and it IS the code, so files under an un-skipped
+# shipped dir get a higher cap. Every pattern is bounded, so cost is linear.
+MAX_SHIPPED_FILE_BYTES = 16_000_000
 
 SOURCE_EXTS = {".py", ".js", ".ts", ".mjs", ".cjs"}
 SKIP_DIRS = {"node_modules", ".git", "__pycache__", "venv", ".venv",
              "dist", "build", ".tox", ".mypy_cache", ".pytest_cache"}
+# Build-output dirs are noise in a source checkout but ARE the code in a
+# published npm package. A package.json whose entry points (main, bin,
+# exports, files, ...) lead into one of these un-skips it for that
+# directory. node_modules and friends are never un-skipped.
+SHIPPABLE_DIRS = {"dist", "build"}
 
 # "note" is a zero-weight tier for capability findings that the rules
 # themselves call non-violations: they are surfaced in the report but do
@@ -198,6 +209,10 @@ SECRET_PATTERNS = [
      re.compile(r'(?i)\bbearer\s+([A-Za-z0-9\-_.]{20,})')),
 ]
 
+# a real dotenv file (.env, .env.local, .env.production), but not the
+# committed placeholder templates every project ships
+_ENV_FILE = r"\.env\b(?!\.(?:example|sample|template|dist|defaults?)\b)"
+
 POISON_PATTERNS = [
     re.compile(r"(?i)ignore\s+(all\s+|any\s+)?(previous|prior|above|"
                r"earlier)\s+(instructions|messages|directives|context)"),
@@ -205,9 +220,9 @@ POISON_PATTERNS = [
     re.compile(r"(?i)do\s+not\s+(tell|inform|mention|reveal|alert|"
                r"notify)\b[^.\n]{0,60}\b(user|human)"),
     re.compile(r"(?i)\b(read|cat|open)\b[^.\n]{0,60}"
-               r"(\.ssh|id_rsa|\.env\b|credentials|api[_ ]?keys?)"),
+               r"(\.ssh|id_rsa|" + _ENV_FILE + r"|credentials|api[_ ]?keys?)"),
     re.compile(r"(?i)\b(send|upload|post|forward|exfiltrate)\b[^.\n]{0,60}"
-               r"(\.ssh|id_rsa|\.env\b|credentials|api[_ ]?keys?|"
+               r"(\.ssh|id_rsa|" + _ENV_FILE + r"|credentials|api[_ ]?keys?|"
                r"conversation|system prompt)"),
     re.compile(r"(?i)reveal\s+the\s+system\s+prompt"),
     re.compile(r"(?i)instead\s+of\s+(telling|showing|asking)\s+the\s+user"),
@@ -255,6 +270,133 @@ NET_MODULES = {"socket", "urllib", "http", "requests", "aiohttp", "httpx",
 
 def _line_of(text: str, pos: int) -> int:
     return text.count("\n", 0, pos) + 1
+
+
+# ─────────────────────────────────────────────────────────────────
+# Tool-poisoning context. The rule's threat is text a *model* reads, so
+# where a directive sits decides how much it matters:
+#   comment lines            → note    (Python, exact tokenizer) / low
+#                                       (JS, small lexer: never free)
+#   catalog / test / error   → medium  (security tools must quote attacks,
+#                                       but a renamed hostile file must not
+#                                       become free, so it stays scored)
+#   anywhere else            → critical (string literals, docstrings —
+#                                       FastMCP turns docstrings into tool
+#                                       descriptions)
+# ─────────────────────────────────────────────────────────────────
+_CATALOG_PATH = re.compile(
+    r"(?i)(^|/)(tests?|__tests__|spec|fixtures?)/|"
+    r"(^|/)test_[^/]*\.py$|\.(test|spec)\.[cm]?[jt]s$|"
+    # security-tooling data files only — never bare "catalog" (a server's
+    # tools/catalog.ts IS its tool descriptions) or "injection" (DI code)
+    r"(^|/)[^/]*(prompt-?)?(injection|jailbreak|attack)[-_]?"
+    r"(catalog|patterns?|corpus|signatures?|payloads?)[^/]*$|"
+    r"(^|/)[^/]*(adversarial|red-?team|aidefen[cs]e)[^/]*$")
+# A file that registers MCP tools is model-facing by definition: no path or
+# error-string downgrade applies to it. Real detection catalogs are data
+# files and never match this; a hostile tool file renamed to look like one
+# does.
+_TOOL_REGISTRATION = re.compile(
+    r"\.tool\s*\(|\bregisterTool\b|\bsetRequestHandler\b|"
+    r"\bListToolsRequestSchema\b|\binputSchema\b|@\w+\.tool\b|"
+    r"\bFastMCP\b")
+_ERROR_CONTEXT = re.compile(
+    r"\bthrow\b|\bError\s*\(|\braise\b|\bconsole\.(error|warn|log)\b|"
+    r"\blogger\.\w+\(|\blog\.(error|warn|info|debug)\(|\bmessage\s*:")
+
+# characters after which a `/` starts a regex literal rather than division
+_REGEX_PRECEDERS = set("(,=:[!&|?{};+-*%<>~^") | {""}
+
+
+def _py_comment_lines(text: str) -> set[int]:
+    """Whole-line comments from the real tokenizer, so a `#` line inside a
+    docstring (a FastMCP tool description) is never mistaken for one. On any
+    tokenize error, demote nothing — fail toward critical."""
+    import io
+    import tokenize
+    out: set[int] = set()
+    try:
+        for tok in tokenize.generate_tokens(io.StringIO(text).readline):
+            if tok.type == tokenize.COMMENT and \
+                    not tok.line[:tok.start[1]].strip():
+                out.add(tok.start[0])
+    except (tokenize.TokenError, IndentationError, SyntaxError):
+        return set()
+    return out
+
+
+def _js_comment_lines(text: str) -> set[int]:
+    """Whole-line comments in JS/TS: a line that *begins* (after
+    whitespace) outside any string, template literal or regex, with `//` or
+    `/*`, plus the continuation lines of such a block comment. A lexer this
+    small can be desynced by exotic input, which is why JS comment hits are
+    demoted only to `low`, never made free."""
+    out: set[int] = set()
+    lines = text.splitlines()
+    state = "code"        # code | sq | dq | tpl | block | regex
+    block_from_line_start = False
+    for n, line in enumerate(lines, 1):
+        i, L = 0, len(line)
+        first = len(line) - len(line.lstrip())
+        if state == "block" and block_from_line_start:
+            out.add(n)
+        elif state == "code" and line.lstrip().startswith(("//", "/*")):
+            out.add(n)
+        prev = ""          # last significant code character on this line
+        while i < L:
+            c = line[i]
+            nxt = line[i + 1] if i + 1 < L else ""
+            if state == "code":
+                if c == "/" and nxt == "/":
+                    break
+                if c == "/" and nxt == "*":
+                    state, block_from_line_start = "block", i == first
+                    i += 2
+                    continue
+                if c == "'":
+                    state = "sq"
+                elif c == '"':
+                    state = "dq"
+                elif c == "`":
+                    state = "tpl"
+                elif c == "/" and prev in _REGEX_PRECEDERS:
+                    state = "regex"
+                if not c.isspace():
+                    prev = c
+            elif state == "block":
+                if c == "*" and nxt == "/":
+                    state = "code"
+                    i += 2
+                    continue
+            elif state in ("sq", "dq", "tpl", "regex"):
+                if c == "\\":
+                    i += 2
+                    continue
+                close = {"sq": "'", "dq": '"', "tpl": "`", "regex": "/"}[state]
+                if c == close:
+                    state, prev = "code", c
+            i += 1
+        if state in ("sq", "dq", "regex"):
+            state = "code"     # these never span lines; resync
+    return out
+
+
+def _comment_lines(text: str, rel: str) -> set[int]:
+    if rel.endswith(".py"):
+        return _py_comment_lines(text)
+    return _js_comment_lines(text)
+
+
+def _poison_severity(line_text: str, line: int, rel: str,
+                     comments: set[int], tool_file: bool = False) -> str:
+    if line in comments:
+        # Python comments come from the real tokenizer: free. JS comments
+        # come from a small lexer an attacker could try to desync: scored.
+        return "note" if rel.endswith(".py") else "low"
+    if not tool_file and (_CATALOG_PATH.search(rel.replace("\\", "/")) or
+                          _ERROR_CONTEXT.search(line_text)):
+        return "medium"
+    return "critical"
 
 
 # Inline suppression: `# nosec` (bandit-compatible) or `# glassport:
@@ -373,6 +515,9 @@ def _scan_common(text: str, rel: str) -> list[dict]:
     # the original text for an exact line number
     stripped, index_map = _strip_invisible(text)
     seen_poison: set[tuple[int, str]] = set()
+    lines = text.splitlines()
+    comments = _comment_lines(text, rel)
+    tool_file = bool(_TOOL_REGISTRATION.search(stripped))
     for rx in POISON_PATTERNS:
         for m in rx.finditer(stripped):
             orig_start = index_map[m.start()] if m.start() < len(index_map) \
@@ -382,8 +527,11 @@ def _scan_common(text: str, rel: str) -> list[dict]:
             if key in seen_poison:
                 continue
             seen_poison.add(key)
+            line_text = lines[line - 1] if line <= len(lines) else ""
             hits.append({"rule": "tool-poisoning", "path": rel,
                          "line": line,
+                         "severity": _poison_severity(line_text, line, rel,
+                                                      comments, tool_file),
                          "detail": f"directive text: {m.group(0)[:60]!r}"})
     m = HIDDEN_UNICODE.search(text)
     if m:
@@ -441,6 +589,37 @@ def _scan_package_json(text: str, rel: str) -> tuple[list[dict], dict]:
     return hits, meta
 
 
+def _entry_strings(value) -> list[str]:
+    """Every path string in a package.json entry field (str, list, or the
+    nested condition maps that `exports` and `bin` allow)."""
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, list):
+        return [s for v in value for s in _entry_strings(v)]
+    if isinstance(value, dict):
+        return [s for v in value.values() for s in _entry_strings(v)]
+    return []
+
+
+def _shipped_dirs(pkg_json: Path) -> set[str]:
+    """SHIPPABLE_DIRS this package.json's entry points lead into."""
+    if pkg_json.is_symlink():
+        return set()
+    try:
+        data = json.loads(pkg_json.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return set()
+    if not isinstance(data, dict):
+        return set()
+    out: set[str] = set()
+    for key in ("main", "module", "browser", "bin", "exports", "files"):
+        for s in _entry_strings(data.get(key)):
+            first = s.replace("\\", "/").lstrip("./").split("/", 1)[0]
+            if first in SHIPPABLE_DIRS:
+                out.add(first)
+    return out
+
+
 def _iter_source_files(root: Path):
     """Yield source files lazily. os.walk with in-place pruning of
     SKIP_DIRS means vendored trees (node_modules, .git) are never
@@ -453,8 +632,11 @@ def _iter_source_files(root: Path):
     # followlinks=False keeps os.walk from descending through a directory
     # symlink that points outside the audited tree.
     for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
-        dirnames[:] = sorted(d for d in dirnames if d not in SKIP_DIRS)
         base = Path(dirpath)
+        shipped = (_shipped_dirs(base / "package.json")
+                   if "package.json" in filenames else set())
+        dirnames[:] = sorted(d for d in dirnames
+                             if d not in SKIP_DIRS or d in shipped)
         for name in sorted(filenames):
             if Path(name).suffix in SOURCE_EXTS or name == "package.json":
                 p = base / name
@@ -473,20 +655,26 @@ def _finalize_findings(raw_hits: list[dict]
     """Group raw hits into Finding objects (one per rule+file), compute
     per-rule deductions, and derive score/grade. Shared by audit_path
     and audit_tool_registry so both use one scoring formula."""
+    order = {"critical": 0, "high": 1, "medium": 2, "low": 3,
+             "note": 4, "info": 5}
     grouped: dict[tuple[str, str], Finding] = {}
     for h in raw_hits:
         rule = RULES_BY_ID[h["rule"]]
         key = (h["rule"], h["path"])
         if key in grouped:
-            grouped[key].count += 1
+            f = grouped[key]
+            f.count += 1
+            # the worst hit in a file speaks for it: an earlier, milder hit
+            # (a comment) must not mask a real one further down
+            sev = h.get("severity", rule.severity)
+            if order[sev] < order[f.severity]:
+                f.severity, f.line, f.detail = sev, h["line"], h["detail"]
         else:
             grouped[key] = Finding(
                 rule=rule.id,
                 severity=h.get("severity", rule.severity),
                 path=h["path"], line=h["line"], detail=h["detail"],
                 fix=rule.fix)
-    order = {"critical": 0, "high": 1, "medium": 2, "low": 3,
-             "note": 4, "info": 5}
     findings = sorted(grouped.values(),
                       key=lambda f: (order[f.severity], f.rule, f.path))
 
@@ -514,12 +702,21 @@ def audit_path(path: str | Path) -> Report:
 
     raw_hits: list[dict] = []
     meta: dict = {"package_name": "", "version": "", "dependency_count": 0}
-    n_py = n_js = n_files = 0
+    n_py = n_js = n_files = n_large = 0
+    # identity comes from the shallowest package.json (the root), never from
+    # a vendored or nested one that happens to be read later
+    meta_depth = None
     depth = {"ast": 0, "pattern": 0}
 
     for p in _iter_source_files(root):
         try:
-            if p.stat().st_size > MAX_FILE_BYTES:
+            # only un-skipped shipped dirs (dist/, build/) can appear in the
+            # path, so a shipped-dir segment means "published bundle"
+            shipped = any(part in SHIPPABLE_DIRS
+                          for part in p.relative_to(base).parts[:-1])
+            cap = MAX_SHIPPED_FILE_BYTES if shipped else MAX_FILE_BYTES
+            if p.stat().st_size > cap:
+                n_large += 1
                 continue
             text = p.read_text(encoding="utf-8", errors="replace")
         except OSError:
@@ -540,7 +737,10 @@ def audit_path(path: str | Path) -> Report:
         elif p.name == "package.json":
             hits, m = _scan_package_json(text, rel)
             raw_hits.extend(hits)
-            meta.update({k: v for k, v in m.items() if v})
+            depth_here = len(Path(rel).parts)
+            if meta_depth is None or depth_here < meta_depth:
+                meta_depth = depth_here
+                meta.update({k: v for k, v in m.items() if v})
 
     # pyproject dependency surface (best-effort, stdlib tomllib if present)
     pyproject = (root if root.is_dir() else base) / "pyproject.toml"
@@ -581,6 +781,9 @@ def audit_path(path: str | Path) -> Report:
         "files_scanned": n_files,
         "depth": depth,
     }
+    if n_large:
+        # only present when it happened, so clean reports stay byte-identical
+        profile["files_skipped_large"] = n_large
     return Report(profile=profile, findings=findings,
                   deductions=deductions, score=score, grade=grade)
 
@@ -639,7 +842,10 @@ def render_text(report: Report) -> str:
         f"profile:  {p['runtime']} · {p['files_scanned']} file(s) scanned "
         f"(ast: {p['depth']['ast']}, pattern: {p['depth']['pattern']})"
         + (f" · package {p['package_name']} {p['version']}".rstrip()
-           if p['package_name'] else ""),
+           if p['package_name'] else "")
+        + (f" · {p['files_skipped_large']} file(s) over the size cap, "
+           f"NOT scanned"
+           if p.get('files_skipped_large') else ""),
         f"score:    {report.score}/100 ({report.grade})"
         + ("" if report.deductions else " — no deductions"),
     ]
