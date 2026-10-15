@@ -43,6 +43,10 @@ RUBRIC_VERSION = "0.4"          # v0.3: capability-note tier (0 weight)
                                 # v0.4: tool-poisoning severity by context;
                                 #       shipped dist/ scanned; root identity
 MAX_FILE_BYTES = 1_000_000
+# A published package's main bundle is routinely over 1 MB (server-pdf
+# ships a 1.9 MB index.js) and it IS the code, so files under an un-skipped
+# shipped dir get a higher cap. Every pattern is bounded, so cost is linear.
+MAX_SHIPPED_FILE_BYTES = 16_000_000
 
 SOURCE_EXTS = {".py", ".js", ".ts", ".mjs", ".cjs"}
 SKIP_DIRS = {"node_modules", ".git", "__pycache__", "venv", ".venv",
@@ -288,6 +292,14 @@ _CATALOG_PATH = re.compile(
     r"(^|/)[^/]*(prompt-?)?(injection|jailbreak|attack)[-_]?"
     r"(catalog|patterns?|corpus|signatures?|payloads?)[^/]*$|"
     r"(^|/)[^/]*(adversarial|red-?team|aidefen[cs]e)[^/]*$")
+# A file that registers MCP tools is model-facing by definition: no path or
+# error-string downgrade applies to it. Real detection catalogs are data
+# files and never match this; a hostile tool file renamed to look like one
+# does.
+_TOOL_REGISTRATION = re.compile(
+    r"\.tool\s*\(|\bregisterTool\b|\bsetRequestHandler\b|"
+    r"\bListToolsRequestSchema\b|\binputSchema\b|@\w+\.tool\b|"
+    r"\bFastMCP\b")
 _ERROR_CONTEXT = re.compile(
     r"\bthrow\b|\bError\s*\(|\braise\b|\bconsole\.(error|warn|log)\b|"
     r"\blogger\.\w+\(|\blog\.(error|warn|info|debug)\(|\bmessage\s*:")
@@ -376,13 +388,13 @@ def _comment_lines(text: str, rel: str) -> set[int]:
 
 
 def _poison_severity(line_text: str, line: int, rel: str,
-                     comments: set[int]) -> str:
+                     comments: set[int], tool_file: bool = False) -> str:
     if line in comments:
         # Python comments come from the real tokenizer: free. JS comments
         # come from a small lexer an attacker could try to desync: scored.
         return "note" if rel.endswith(".py") else "low"
-    if _CATALOG_PATH.search(rel.replace("\\", "/")) or \
-            _ERROR_CONTEXT.search(line_text):
+    if not tool_file and (_CATALOG_PATH.search(rel.replace("\\", "/")) or
+                          _ERROR_CONTEXT.search(line_text)):
         return "medium"
     return "critical"
 
@@ -505,6 +517,7 @@ def _scan_common(text: str, rel: str) -> list[dict]:
     seen_poison: set[tuple[int, str]] = set()
     lines = text.splitlines()
     comments = _comment_lines(text, rel)
+    tool_file = bool(_TOOL_REGISTRATION.search(stripped))
     for rx in POISON_PATTERNS:
         for m in rx.finditer(stripped):
             orig_start = index_map[m.start()] if m.start() < len(index_map) \
@@ -518,7 +531,7 @@ def _scan_common(text: str, rel: str) -> list[dict]:
             hits.append({"rule": "tool-poisoning", "path": rel,
                          "line": line,
                          "severity": _poison_severity(line_text, line, rel,
-                                                      comments),
+                                                      comments, tool_file),
                          "detail": f"directive text: {m.group(0)[:60]!r}"})
     m = HIDDEN_UNICODE.search(text)
     if m:
@@ -697,7 +710,12 @@ def audit_path(path: str | Path) -> Report:
 
     for p in _iter_source_files(root):
         try:
-            if p.stat().st_size > MAX_FILE_BYTES:
+            # only un-skipped shipped dirs (dist/, build/) can appear in the
+            # path, so a shipped-dir segment means "published bundle"
+            shipped = any(part in SHIPPABLE_DIRS
+                          for part in p.relative_to(base).parts[:-1])
+            cap = MAX_SHIPPED_FILE_BYTES if shipped else MAX_FILE_BYTES
+            if p.stat().st_size > cap:
                 n_large += 1
                 continue
             text = p.read_text(encoding="utf-8", errors="replace")
@@ -825,8 +843,8 @@ def render_text(report: Report) -> str:
         f"(ast: {p['depth']['ast']}, pattern: {p['depth']['pattern']})"
         + (f" · package {p['package_name']} {p['version']}".rstrip()
            if p['package_name'] else "")
-        + (f" · {p['files_skipped_large']} file(s) skipped (> "
-           f"{MAX_FILE_BYTES // 1_000_000} MB, not scanned)"
+        + (f" · {p['files_skipped_large']} file(s) over the size cap, "
+           f"NOT scanned"
            if p.get('files_skipped_large') else ""),
         f"score:    {report.score}/100 ({report.grade})"
         + ("" if report.deductions else " — no deductions"),
