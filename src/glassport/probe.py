@@ -274,7 +274,11 @@ def probe(cmd: list[str], calls: Optional[list[tuple[str, dict]]] = None,
     result = ProbeResult(cmd=list(cmd), handshake=handshake, log_path=log_path,
                          report_path=None, stderr_tail=stderr_tail)
     if log_path is None:
-        return result   # exit_code 2: nothing to analyze
+        # the tap refuses a missing binary before opening a log; that is
+        # still "handshake incomplete" (3), not a probe usage error (2)
+        if handshake["failed_at"] == "spawn":
+            result.exit_code = 3
+        return result   # otherwise exit_code 2: nothing to analyze
 
     trace = from_mcp_session_file(log_path, server_name=Path(cmd[0]).name)
     trace.metadata["handshake"] = handshake

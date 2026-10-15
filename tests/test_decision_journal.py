@@ -838,14 +838,16 @@ class TestCLISurface(unittest.TestCase):
                 self.assertEqual(tap.main(args), 2, args)
 
     def test_wrap_path_argument_handling_is_unchanged(self):
-        """`wrap --bogus -- cmd` still treats --bogus as the server command
-        (exit 127, command not found) — the new subcommands must not start
-        swallowing options the wrap parser owns."""
+        """`wrap --bogus -- cmd` stays on the wrap path — the new subcommands
+        must not start swallowing options the wrap parser owns. Since the
+        Phase 0 CLI pass, an unknown leading option is a usage error (exit
+        2) refused before any session log, rather than a server to spawn."""
         buf = io.StringIO()
         with contextlib.redirect_stderr(buf), contextlib.redirect_stdout(buf):
             code = tap.main(['wrap', '--log-dir', str(self.root),
                              '--bogus', '--', '/bin/true'])
-        self.assertEqual(code, 127)
+        self.assertEqual(code, 2)
+        self.assertIn("unknown option '--bogus'", buf.getvalue())
         self.assertNotIn('observe', buf.getvalue())
 
     def test_replay_decisions_cli_reports_and_exits_by_status(self):

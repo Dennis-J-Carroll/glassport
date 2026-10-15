@@ -58,12 +58,15 @@ from glassport.detectors import (
     neutralize_text, _TAINT_PATTERNS,
 )
 
+import difflib
 import hashlib
 import json
 import math
 import os
+import re
 import secrets
 import shlex
+import shutil
 import signal
 import subprocess
 import sys
@@ -1635,7 +1638,9 @@ def _run_http_gate(remote_url: str, log_dir: Path, *, endpoint_era: str = "auto"
 # CLI
 # ─────────────────────────────────────────────────────────────────
 USAGE = """\
-glassport — passive MCP stdio proxy
+glassport — wire-level observability and enforcement for MCP servers
+
+usage: glassport <command> [options]   (`glassport help <command>`, `glassport --version`)
 
   probe:           glassport probe [--call NAME JSON]... [--log-dir DIR]
                         [--timeout S] [--startup-timeout S] [-o out.html]
@@ -1707,6 +1712,23 @@ glassport — passive MCP stdio proxy
 """
 
 
+VERBS = ("probe", "wrap", "gate", "audit", "observe", "replay-decisions",
+         "summarize", "detect", "advise", "report", "watch", "serve", "tui",
+         "prune", "health")
+_VERB_HEAD = re.compile(r"^  ([a-z-]+)(?: \([a-z]+\))?:", re.M)
+
+
+def _verb_usage(verb: str) -> str:
+    """That verb's block of USAGE (header line through its last
+    continuation line), or the whole USAGE if the verb has no block."""
+    heads = list(_VERB_HEAD.finditer(USAGE))
+    for i, m in enumerate(heads):
+        if m.group(1) == verb:
+            end = heads[i + 1].start() if i + 1 < len(heads) else len(USAGE)
+            return "usage:\n" + USAGE[m.start():end].rstrip() + "\n"
+    return USAGE
+
+
 def _escape_unencodable_output() -> None:
     """Session logs can carry lone surrogates (json.loads accepts "\\ud800")
     that a UTF-8 stdout cannot encode. Print them backslash-escaped, which
@@ -1732,8 +1754,21 @@ def _parse_gate_flags(argv: list[str]) -> tuple[list[str], bool, bool]:
 
 
 def main(argv: list[str]) -> int:
-    if not argv or argv[0] in ("-h", "--help"):
-        print(USAGE)
+    if not argv or argv[0] in ("-h", "--help", "help"):
+        if argv[1:2] and argv[1] in VERBS:
+            print(_verb_usage(argv[1]))
+        else:
+            print(USAGE)
+        return 0
+    if argv[0] in ("--version", "-V", "version"):
+        from glassport import __version__
+        print(f"glassport {__version__}")
+        return 0
+    # `<verb> --help` answers for every verb here, uniformly, before any
+    # verb-specific parsing can mistake the flag for a path, a URL, or (for
+    # wrap/gate) a server command to launch
+    if argv[0] in VERBS and argv[1:2] and argv[1] in ("-h", "--help"):
+        print(_verb_usage(argv[0]))
         return 0
 
     # "wrap" stays the passive default forever; "gate" is the opt-in
@@ -1928,6 +1963,19 @@ def main(argv: list[str]) -> int:
     if not argv:
         print(USAGE)
         return 2
+    # Refuse before run_tap opens a session log: a typo or a flag we don't
+    # know is a usage error, not a server to tap.
+    if argv[0].startswith("-"):
+        print(f"glassport: unknown option {argv[0]!r} (see `glassport --help`)",
+              file=sys.stderr)
+        return 2
+    if shutil.which(argv[0]) is None:
+        msg = f"glassport: command not found: {argv[0]}"
+        close = difflib.get_close_matches(argv[0], VERBS, n=1)
+        if close:
+            msg += f" (did you mean `glassport {close[0]}`?)"
+        print(msg, file=sys.stderr)
+        return 127
     return run_tap(argv, log_dir, gate=gate,
                    gate_controllable=gate_controllable)
 
