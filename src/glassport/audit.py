@@ -271,7 +271,8 @@ def _line_of(text: str, pos: int) -> int:
 # ─────────────────────────────────────────────────────────────────
 # Tool-poisoning context. The rule's threat is text a *model* reads, so
 # where a directive sits decides how much it matters:
-#   comment lines            → note    (never reaches a model; still shown)
+#   comment lines            → note    (Python, exact tokenizer) / low
+#                                       (JS, small lexer: never free)
 #   catalog / test / error   → medium  (security tools must quote attacks,
 #                                       but a renamed hostile file must not
 #                                       become free, so it stays scored)
@@ -282,41 +283,104 @@ def _line_of(text: str, pos: int) -> int:
 _CATALOG_PATH = re.compile(
     r"(?i)(^|/)(tests?|__tests__|spec|fixtures?)/|"
     r"(^|/)test_[^/]*\.py$|\.(test|spec)\.[cm]?[jt]s$|"
-    r"(^|/)[^/]*(catalog|adversarial|injection|aidefen[cs]e|red-?team|"
-    r"payloads?|poison)[^/]*$")
+    # security-tooling data files only — never bare "catalog" (a server's
+    # tools/catalog.ts IS its tool descriptions) or "injection" (DI code)
+    r"(^|/)[^/]*(prompt-?)?(injection|jailbreak|attack)[-_]?"
+    r"(catalog|patterns?|corpus|signatures?|payloads?)[^/]*$|"
+    r"(^|/)[^/]*(adversarial|red-?team|aidefen[cs]e)[^/]*$")
 _ERROR_CONTEXT = re.compile(
     r"\bthrow\b|\bError\s*\(|\braise\b|\bconsole\.(error|warn|log)\b|"
     r"\blogger\.\w+\(|\blog\.(error|warn|info|debug)\(|\bmessage\s*:")
 
+# characters after which a `/` starts a regex literal rather than division
+_REGEX_PRECEDERS = set("(,=:[!&|?{};+-*%<>~^") | {""}
+
+
+def _py_comment_lines(text: str) -> set[int]:
+    """Whole-line comments from the real tokenizer, so a `#` line inside a
+    docstring (a FastMCP tool description) is never mistaken for one. On any
+    tokenize error, demote nothing — fail toward critical."""
+    import io
+    import tokenize
+    out: set[int] = set()
+    try:
+        for tok in tokenize.generate_tokens(io.StringIO(text).readline):
+            if tok.type == tokenize.COMMENT and \
+                    not tok.line[:tok.start[1]].strip():
+                out.add(tok.start[0])
+    except (tokenize.TokenError, IndentationError, SyntaxError):
+        return set()
+    return out
+
+
+def _js_comment_lines(text: str) -> set[int]:
+    """Whole-line comments in JS/TS: a line that *begins* (after
+    whitespace) outside any string, template literal or regex, with `//` or
+    `/*`, plus the continuation lines of such a block comment. A lexer this
+    small can be desynced by exotic input, which is why JS comment hits are
+    demoted only to `low`, never made free."""
+    out: set[int] = set()
+    lines = text.splitlines()
+    state = "code"        # code | sq | dq | tpl | block | regex
+    block_from_line_start = False
+    for n, line in enumerate(lines, 1):
+        i, L = 0, len(line)
+        first = len(line) - len(line.lstrip())
+        if state == "block" and block_from_line_start:
+            out.add(n)
+        elif state == "code" and line.lstrip().startswith(("//", "/*")):
+            out.add(n)
+        prev = ""          # last significant code character on this line
+        while i < L:
+            c = line[i]
+            nxt = line[i + 1] if i + 1 < L else ""
+            if state == "code":
+                if c == "/" and nxt == "/":
+                    break
+                if c == "/" and nxt == "*":
+                    state, block_from_line_start = "block", i == first
+                    i += 2
+                    continue
+                if c == "'":
+                    state = "sq"
+                elif c == '"':
+                    state = "dq"
+                elif c == "`":
+                    state = "tpl"
+                elif c == "/" and prev in _REGEX_PRECEDERS:
+                    state = "regex"
+                if not c.isspace():
+                    prev = c
+            elif state == "block":
+                if c == "*" and nxt == "/":
+                    state = "code"
+                    i += 2
+                    continue
+            elif state in ("sq", "dq", "tpl", "regex"):
+                if c == "\\":
+                    i += 2
+                    continue
+                close = {"sq": "'", "dq": '"', "tpl": "`", "regex": "/"}[state]
+                if c == close:
+                    state, prev = "code", c
+            i += 1
+        if state in ("sq", "dq", "regex"):
+            state = "code"     # these never span lines; resync
+    return out
+
 
 def _comment_lines(text: str, rel: str) -> set[int]:
-    """1-based numbers of whole-line comments. Only whole lines count: a
-    directive in a string followed by `// note` is still a string."""
-    out: set[int] = set()
-    is_py = rel.endswith(".py")
-    in_block = False
-    for n, raw in enumerate(text.splitlines(), 1):
-        line = raw.strip()
-        if is_py:
-            if line.startswith("#"):
-                out.add(n)
-            continue
-        if in_block:
-            out.add(n)
-            if "*/" in line:
-                in_block = False
-        elif line.startswith("//"):
-            out.add(n)
-        elif line.startswith("/*"):
-            out.add(n)
-            in_block = "*/" not in line[2:]
-    return out
+    if rel.endswith(".py"):
+        return _py_comment_lines(text)
+    return _js_comment_lines(text)
 
 
 def _poison_severity(line_text: str, line: int, rel: str,
                      comments: set[int]) -> str:
     if line in comments:
-        return "note"
+        # Python comments come from the real tokenizer: free. JS comments
+        # come from a small lexer an attacker could try to desync: scored.
+        return "note" if rel.endswith(".py") else "low"
     if _CATALOG_PATH.search(rel.replace("\\", "/")) or \
             _ERROR_CONTEXT.search(line_text):
         return "medium"
