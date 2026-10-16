@@ -20,7 +20,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-__version__ = "0.7.0"
+__version__ = "0.7.1"
 
 __all__ = [
     "InteractionTrace",
