@@ -6,6 +6,17 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versions follow 
 
 ## [Unreleased]
 
+### Fixed
+- no catalog downgrade for tool files; scan shipped bundles >1 MB
+- close comment-demotion bypasses in tool-poisoning scoring
+- real --version, help and <verb> --help; refuse unknown commands
+- scan shipped dist/, root identity, context-scored tool-poisoning
+
+### Documentation
+- correct stale gate claims and document audit context rules
+
+## [0.7.0] - 2026-10-11
+
 ### Added
 - add `glassport probe`, a one-command client with partial reports
 - stateless 2026-07-28 declaration scopes for the HTTP gate
@@ -84,6 +95,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versions follow 
 - require observed call-time declarations for fabricated calls (#76)
 
 ### Changed
+- 0.7.0 — probe, HTTP enforcement gate, audit redaction fix
 - Record decisions and delivery outcomes in observation mode
 - Quarantine ambiguous and evicted request IDs within session bounds
 - Fix declaration correlation before policy enforcement
@@ -91,6 +103,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versions follow 
 - Delete footer section from README
 
 ### Documentation
+- record the probe GIF from probe.tape and put it above the report still
 - probe report screenshots and the VHS tape for the README GIF
 - reword probe docstring so the self-audit's runtime-install rule stays quiet
 - rewrite README as a one-screen front door around probe
