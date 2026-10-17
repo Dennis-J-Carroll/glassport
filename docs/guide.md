@@ -232,6 +232,11 @@ glassport detect ./parallel-sessions/<file>.jsonl
 glassport report ./parallel-sessions/<file>.jsonl
 ```
 
+`detect` exits 1 when it finds annotations. This fetch can produce an
+`unexpected_egress_host` finding because `docs.python.org` appears in the call
+arguments without being declared in the tool surface; inspect the finding's
+wire evidence rather than treating it as proof of a separate network connection.
+
 Check the actual tool responses as well as the findings: a recorded call can
 still return a service error or a rate-limit response. The report shows what
 crossed the MCP connection; it does not reveal the remote service's internal
