@@ -170,6 +170,8 @@ glassport wrap --transport http --url https://some-mcp-server.example/mcp
 
 Set your client's server URL to the printed `http://127.0.0.1:PORT`. glassport forwards every request/response — POST bodies, `application/json` replies, and `text/event-stream` (SSE) streams (server→client `GET` too) — logging each JSON-RPC message to the **same JSONL** as the stdio tap, so `summarize` / `detect` / `report` / `advise` all work identically. The HTTP tap is passive and fail-open: SSE bytes reach your client as they arrive, and logging write failures do not block forwarding. An unreachable remote returns a plain `502`; upstream disconnects can end the response. `wrap` itself never blocks — for active enforcement over HTTP, use `gate --transport http --url <remote>` (see [The gate](#the-gate)).
 
+For a worked example against a live remote server, see [Example: observe Parallel Search MCP](recipes/parallel-search-mcp.md).
+
 ### 2. Read the delta
 
 ```bash
