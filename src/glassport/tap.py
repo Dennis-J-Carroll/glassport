@@ -1606,7 +1606,8 @@ def _cmd_observe(args: list[str]) -> int:
     return 0
 
 
-def _run_http_gate(remote_url: str, log_dir: Path, *, endpoint_era: str = "auto",
+def _run_http_gate(remote_url: str, log_dir: Path, port: int = 0, *,
+                   endpoint_era: str = "auto",
                    scope_headers: tuple = (), public_surface: bool = False) -> int:
     """`glassport gate --transport http --url <remote>` — HTTP enforcement.
 
@@ -1629,8 +1630,8 @@ def _run_http_gate(remote_url: str, log_dir: Path, *, endpoint_era: str = "auto"
     observer = HTTPObserver(log_dir, limits=HTTPRegistryLimits(max_frame_bytes=GATE_MAX_BODY),
                             scope_headers=scope_headers, public_surface=public_surface)
     journal = DecisionJournal(log_dir / "decisions", observer, mode=MODE_GATE)
-    run_http_tap(remote_url, log_dir, observer=observer, journal=journal,
-                 endpoint_era=endpoint_era)
+    run_http_tap(remote_url, log_dir, port=port, observer=observer,
+                 journal=journal, endpoint_era=endpoint_era)
     return 0
 
 
@@ -1649,19 +1650,22 @@ usage: glassport <command> [options]   (`glassport help <command>`, `glassport -
                     then write the HTML report. List-only unless --call.
                     exit 0 clean, 1 findings, 3 handshake incomplete)
   wrap (default):  glassport [wrap] [--log-dir DIR] -- <server command...>
-                   glassport wrap --transport http --url <remote-mcp-url>
+                   glassport wrap --transport http --url <remote-mcp-url> [--port N]
                         (passive MITM over MCP Streamable-HTTP; logs both
-                         directions to the same JSONL as the stdio tap)
+                         directions to the same JSONL as the stdio tap.
+                         --port pins the local proxy port; default random)
   gate:            glassport gate [--controllable] [--strict] [--log-dir DIR] -- <server command...>
                    (active: blocks tools/call outside the declared surface;
                     --controllable lets `tui --gate-control` toggle it;
                     --strict blocks when a check cannot run instead of
                     forwarding with a logged gate_skipped marker)
-                   glassport gate --transport http --url <remote-mcp-url> [--endpoint-era auto|legacy|modern]
+                   glassport gate --transport http --url <remote-mcp-url> [--port N]
+                        [--endpoint-era auto|legacy|modern]
                         [--scope-header NAME]... [--public-surface]
                         (active MITM over MCP Streamable-HTTP: everything
                          `observe` does, plus the recorded would-blocks are
-                         enforced. Only a severity-3 tools/call proved against
+                         enforced. --port pins the local proxy port; default
+                         random. Only a severity-3 tools/call proved against
                          an observed declared surface is refused — locally,
                          with a JSON-RPC -32000 error and no upstream request.
                          Missing/partial declarations, faulted analysis, PII
@@ -1892,12 +1896,34 @@ def main(argv: list[str]) -> int:
         # option would otherwise run with a weaker posture than was asked for.
         scope_headers: list[str] = []
         public_surface = False
+        port = 0
+        port_given = False
         while argv:
             option = argv[0]
-            if option not in ("--endpoint-era", "--scope-header", "--public-surface"):
+            if option not in ("--endpoint-era", "--scope-header",
+                              "--public-surface", "--port"):
                 print(f"glassport: unexpected argument {option!r} for --transport http",
                       file=sys.stderr)
                 return 2
+            if option == "--port":
+                if port_given:
+                    print("glassport: --port given more than once", file=sys.stderr)
+                    return 2
+                if len(argv) < 2:
+                    print("glassport: --port requires a value", file=sys.stderr)
+                    return 2
+                try:
+                    port = int(argv[1])
+                except ValueError:
+                    print("glassport: --port must be an integer", file=sys.stderr)
+                    return 2
+                if not 0 <= port <= 65535:
+                    print("glassport: --port must be between 0 and 65535",
+                          file=sys.stderr)
+                    return 2
+                port_given = True
+                argv = argv[2:]
+                continue
             if gate is None:
                 print(f"glassport: {option} applies to gate mode only", file=sys.stderr)
                 return 2
@@ -1946,12 +1972,17 @@ def main(argv: list[str]) -> int:
                 # over HTTP. HTTP enforcement is a property of the decision
                 # journal's mode, and runs through the same observer the
                 # `observe` command builds.
-                return _run_http_gate(remote_url, log_dir, endpoint_era=endpoint_era,
+                return _run_http_gate(remote_url, log_dir, port=port,
+                                      endpoint_era=endpoint_era,
                                       scope_headers=tuple(scope_headers),
                                       public_surface=public_surface)
-            run_http_tap(remote_url, log_dir)
+            run_http_tap(remote_url, log_dir, "127.0.0.1", port)
         except ValueError as exc:
             print(f"[glassport] invalid --url: {exc}", file=sys.stderr)
+            return 2
+        except OSError as exc:
+            print(f"glassport: cannot bind 127.0.0.1:{port}: {exc}",
+                  file=sys.stderr)
             return 2
         return 0
     if transport != "stdio":

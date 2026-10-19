@@ -390,6 +390,15 @@ class TestHttpTapCli(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertEqual(m.call_args.args[0], "http://remote.example/mcp")
 
+    def test_transport_http_accepts_port(self):
+        from unittest import mock
+        from glassport import tap
+        with mock.patch("glassport.adapters.mcp_http.run_http_tap") as m:
+            rc = tap.main(["wrap", "--transport", "http", "--url",
+                           "http://remote.example/mcp", "--port", "8765"])
+        self.assertEqual(rc, 0)
+        self.assertEqual(m.call_args.args[3], 8765)
+
     def test_transport_http_requires_url(self):
         from glassport import tap
         self.assertEqual(tap.main(["wrap", "--transport", "http"]), 2)
