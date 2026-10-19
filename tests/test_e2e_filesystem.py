@@ -7,10 +7,11 @@ of the official `@modelcontextprotocol/server-filesystem` reference server,
 feeds a real `initialize` -> `tools/list` -> `tools/call` sequence, and then
 asserts the JSONL the tap wrote parses back into a faithful InteractionTrace.
 
-Doctrine guarantee: the whole thing is gated on `skipUnless(which("npx"))`, so
-the zero-dependency main CI matrix (no node) and any clone-and-run without npm
-skip it cleanly. Only `ci-coverage.yml` (which sets up node) and developers who
-have node installed execute it. No new runtime dependency, no `src/` change.
+Doctrine guarantee: the whole thing is gated on a usable POSIX node + npx (see
+`_usable_npx`), so Windows and any clone-and-run without node skip it cleanly.
+GitHub's ubuntu and macos runner images ship node, so it runs in the main
+`ci.yml` matrix as well as `ci-coverage.yml`. No new runtime dependency, no
+`src/` change.
 """
 
 from __future__ import annotations
@@ -22,6 +23,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 
@@ -35,7 +37,18 @@ SRC = REPO_ROOT / "src"
 
 # The roadmap's named reference server: official, stable, credential-free,
 # and confinable to a temp directory we create and clean up.
-SERVER_PKG = "@modelcontextprotocol/server-filesystem"
+#
+# Pinned to an exact version. A floating spec resolves to whatever is `latest`
+# on a fresh CI runner but to whatever npx cached on a developer machine, so
+# the same commit can pass locally and fail in CI. That happened: 2.0.0
+# (2026-10-19) exits on stdin EOF without answering in-flight requests, which
+# broke the old close-stdin-immediately harness on every fresh runner while
+# cached machines kept passing on 1.0.0. Bump this deliberately, in its own
+# commit, and run this test before merging the bump.
+SERVER_PKG = "@modelcontextprotocol/server-filesystem@2.0.0"
+
+# JSON-RPC id of the tools/call frame; the harness waits for its reply.
+CALL_ID = 3
 
 # `list_directory` is a long-stable read-only tool of server-filesystem. If a
 # future major renames it, this test fails loudly with the declared surface
@@ -88,7 +101,7 @@ def _frames(sandbox: str) -> list[dict]:
         {"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
         {
             "jsonrpc": "2.0",
-            "id": 3,
+            "id": CALL_ID,
             "method": "tools/call",
             "params": {"name": CALLED_TOOL, "arguments": {"path": sandbox}},
         },
@@ -119,25 +132,70 @@ class TestE2EFilesystemServer(unittest.TestCase):
                 "--log-dir", str(logdir), "--",
                 "npx", "-y", SERVER_PKG, str(sandbox),
             ]
-            proc = subprocess.Popen(
-                cmd,
-                stdin=subprocess.PIPE,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE,
-                env=env,
-                text=True,
-            )
             payload = "".join(json.dumps(f) + "\n" for f in _frames(str(sandbox)))
-            try:
-                # Closing stdin (communicate) makes the stdio server hit EOF
-                # after processing our buffered frames, so it exits and the
-                # tap flushes every frame. Timeout is generous: first `npx -y`
-                # may download the package.
-                err = proc.communicate(payload, timeout=180)[1]
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                err = proc.communicate()[1]
+            # stderr goes to a file, not a pipe: nothing reads it while we
+            # block on stdout, so a pipe could fill and deadlock the tap.
+            stderr_path = Path(workdir) / "tap.stderr"
+            killed = threading.Event()
+            answered = False
+            with open(stderr_path, "w", encoding="utf-8") as stderr_file:
+                proc = subprocess.Popen(
+                    cmd,
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=stderr_file,
+                    env=env,
+                    text=True,
+                )
+
+                def _kill():
+                    killed.set()
+                    proc.kill()
+
+                # Generous: the first `npx -y` may download the package. If
+                # anything hangs, killing the tap closes its stdout, which
+                # unblocks the reads below.
+                watchdog = threading.Timer(180, _kill)
+                watchdog.start()
+                try:
+                    try:
+                        proc.stdin.write(payload)
+                        proc.stdin.flush()
+                    except BrokenPipeError:
+                        pass  # child died early; reported below via stderr
+                    # Behave like a real client: wait for the tools/call reply,
+                    # relayed through the tap, before hanging up. Closing stdin
+                    # right after sending races the server's shutdown, and
+                    # server-filesystem 2.x exits on EOF without answering.
+                    for line in proc.stdout:
+                        try:
+                            msg = json.loads(line)
+                        except ValueError:
+                            continue
+                        if isinstance(msg, dict) and msg.get("id") == CALL_ID:
+                            answered = True
+                            break
+                    try:
+                        proc.stdin.close()
+                    except BrokenPipeError:
+                        pass
+                    # Drain until the tap exits, so it flushes every frame.
+                    proc.stdout.read()
+                    proc.wait()
+                finally:
+                    watchdog.cancel()
+                    if proc.poll() is None:
+                        proc.kill()
+                        proc.wait()
+                    proc.stdout.close()
+            err = stderr_path.read_text(encoding="utf-8", errors="replace")
+            if killed.is_set():
                 self.fail(f"glassport wrap did not terminate; stderr:\n{err}")
+            self.assertTrue(
+                answered,
+                f"no reply to tools/call came back through the tap; "
+                f"stderr:\n{err}",
+            )
 
             logs = list(logdir.glob("*.jsonl"))
             self.assertTrue(logs, f"no session log written; stderr:\n{err}")
