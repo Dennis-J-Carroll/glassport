@@ -1367,6 +1367,51 @@ class TestGateCLISurface(unittest.TestCase):
         with contextlib.redirect_stderr(io.StringIO()):
             self.assertEqual(tap.main(['wrap', '--transport', 'http']), 2)
 
+    def test_gate_http_passes_port_through(self):
+        with mock.patch.object(tap, '_run_http_gate', return_value=0) as run:
+            self.assertEqual(
+                tap.main(['gate', '--transport', 'http', '--url',
+                          'http://127.0.0.1:1/mcp', '--port', '8765']), 0)
+        self.assertEqual(run.call_args.kwargs['port'], 8765)
+
+    def test_invalid_ports_are_refused_with_port_in_the_message(self):
+        import contextlib
+        import io
+        for extra in (['--port', 'notaport'],
+                      ['--port', '65536'],
+                      ['--port', '-1'],
+                      ['--port', '1', '--port', '2'],
+                      ['--port']):
+            with self.subTest(extra=extra):
+                with mock.patch.object(tap, '_run_http_gate') as run:
+                    with contextlib.redirect_stderr(io.StringIO()) as err:
+                        rc = tap.main(['gate', '--transport', 'http', '--url',
+                                       'http://127.0.0.1:1/mcp'] + extra)
+                self.assertEqual(rc, 2)
+                run.assert_not_called()
+                self.assertIn('--port', err.getvalue())
+                self.assertNotIn('Traceback', err.getvalue())
+
+    def test_bind_failure_is_one_line_and_exit_2(self):
+        import contextlib
+        import io
+        for verb, target in (
+                ('wrap', 'glassport.adapters.mcp_http.run_http_tap'),
+                ('gate', 'glassport.tap._run_http_gate')):
+            with self.subTest(verb=verb):
+                with mock.patch(target, side_effect=OSError(
+                        98, 'Address already in use')):
+                    with contextlib.redirect_stderr(io.StringIO()) as err:
+                        rc = tap.main([verb, '--transport', 'http', '--url',
+                                       'http://127.0.0.1:1/mcp',
+                                       '--port', '8765'])
+                self.assertEqual(rc, 2)
+                self.assertEqual(
+                    err.getvalue().strip(),
+                    'glassport: cannot bind 127.0.0.1:8765: '
+                    '[Errno 98] Address already in use')
+                self.assertNotIn('Traceback', err.getvalue())
+
 
 if __name__ == '__main__':
     unittest.main()
