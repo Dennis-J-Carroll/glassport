@@ -5,12 +5,13 @@ This recipe records its declarations, requests, and responses with glassport's
 passive tap. It does not prove that Sem's code analysis is complete or correct.
 
 Install glassport and Sem on the machine running your MCP client, and confirm
-`glassport --help` and `sem --version` work. This recipe was tested with Sem 0.27.0
-and 0.28.1.
+`glassport --help` and `sem --version` work. This recipe was tested with
+glassport 0.7.1 and Sem 0.27.0 and 0.28.1.
 
-On some Linux distributions `sem` resolves to GNU parallel's `sem` command
-instead. If `sem --version` does not report Sem from Ataraxy Labs, use the
-absolute path to the Sem binary in the client configuration below.
+If GNU parallel is installed (common on Linux, and via Homebrew on macOS),
+`sem` may resolve to its `sem` command instead. If `sem --version` does not
+report Sem from Ataraxy Labs, use the absolute path to the Sem binary in the
+client configuration below.
 
 Merge this entry into a client that accepts `mcpServers` configuration:
 
@@ -32,10 +33,11 @@ executables must be on the client's `PATH` (or use absolute executable paths).
 Connect this entry rather than a separate direct Sem entry, which bypasses the tap.
 
 After initialization, wait for the `tools/list` response before calling any
-tool. If a client calls a tool first, glassport has no declaration to compare
-against, and `detect` reports `declaration_unavailable` and exits 1. Then call
-the declared `sem_find` tool with a symbol that exists in your checkout, for
-example:
+tool. If a client calls a tool before that response arrives, glassport has no
+declaration to compare against: `detect` reports `declaration_unavailable` (or
+`call_before_declaration` if `tools/list` was never requested) and exits 1.
+Then call the declared `sem_find` tool with a symbol that exists in your
+checkout, for example:
 
 ```json
 {"query": "parse_config", "mode": "context", "token_budget": 1200}
