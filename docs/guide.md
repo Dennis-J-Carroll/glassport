@@ -315,7 +315,8 @@ One JSON object per wire line, append-only, crash-safe:
 | `unknown_server_request` | **2** | server-initiated request outside the MCP specification |
 | `premature_call` | **2** | `tools/call` before `notifications/initialized` |
 | `surface_change` | **2** | `tools/list` result changed mid-session |
-| `call_before_declaration` | **1** | `tools/call` before any `tools/list` response |
+| `call_before_declaration` | **1** | `tools/call` after `notifications/initialized` with no `tools/list` requested yet |
+| `declaration_unavailable` | **1** | `tools/call` that cannot be checked against an available complete declaration — `tools/list` requested but not yet answered, or the listing incomplete or invalidated |
 | `orphaned_response` | **1** | response whose JSON-RPC `id` matched no request |
 | `gate_blocked` | info | gate blocked a fabricated call; server never saw the frame |
 | `gate_injected_response` | info | gate synthesized the error reply; server never sent it |
@@ -726,7 +727,7 @@ Stated here so nobody discovers them the hard way:
 
 - **Both transports have a passive tap and an active gate.** `wrap`/`gate --transport http` covers remote Streamable-HTTP servers the same way `wrap`/`gate` cover stdio. The HTTP gate blocks only a proved out-of-surface `tools/call` for that HTTP session; it is not a general HTTP firewall, and everything else (missing declarations, detector faults, PII/egress findings) still forwards. The stdio gate is broader — it also blocks credential-bearing params, taint, schema violations, retry loops, and uninspectable frames (see [The gate](#the-gate)).
 - **Passive by default.** `wrap` observes and never blocks, rewrites, or delays — that contract is permanent. Enforcement exists only in the opt-in `gate` mode, shipped last on purpose: a blocking proxy that misfires destroys trust faster than no proxy at all.
-- **The gate can't block before declaration.** A client that fires `tools/call` before the `tools/list` response lands is forwarded — there is no declaration to enforce yet. The passive detectors flag these (`premature_call` / `call_before_declaration`), and enforcement kicks in the moment the handshake completes.
+- **The gate can't block before declaration.** A client that fires `tools/call` before the `tools/list` response lands is forwarded — there is no declaration to enforce yet. The passive detectors flag these (`premature_call` before `notifications/initialized`, `call_before_declaration` when no `tools/list` was requested, `declaration_unavailable` when one was requested but no complete declaration is available yet), and enforcement kicks in the moment the handshake completes.
 - **The tap sees the wire, not the mind.** It cannot see the user's prompt, the model's reasoning, or the agent's plan. Every claim it makes is limited to what crossed the pipe.
 
 ---

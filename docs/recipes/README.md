@@ -22,3 +22,4 @@ they stop reproducing.
 ## Index
 
 - [Parallel Search MCP](parallel-search-mcp.md): remote server
+- [Sem](sem-stdio.md): local stdio server
