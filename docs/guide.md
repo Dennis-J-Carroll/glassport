@@ -174,6 +174,8 @@ Set your client's server URL to the printed `http://127.0.0.1:PORT`. glassport f
 
 For a worked example against a live remote server, see [Example: observe Parallel Search MCP](recipes/parallel-search-mcp.md).
 
+For a local stdio capture containing source-code context, see [Example: observe Sem MCP](recipes/sem-stdio.md).
+
 ### 2. Read the delta
 
 ```bash
