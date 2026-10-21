@@ -360,6 +360,8 @@ class TestRecordedFaults(JournalCase):
 class TestBoundsAndFailures(JournalCase):
     @unittest.skipUnless(os.name == "posix",
                          "mkdir(mode=0o500) does not deny writes on Windows")
+    @unittest.skipIf(hasattr(os, "geteuid") and os.geteuid() == 0,
+                     "root ignores directory permission bits")
     def test_persistence_failure_fails_open_and_records_nothing(self):
         """An unwritable journal dir must not raise into the caller."""
         blocked = self.root / 'blocked'
