@@ -319,6 +319,7 @@ def render_session_sarif(trace, session_path: str = "", base: str = "") -> str:
     in the GitHub Security tab; absolute paths pass through unchanged),
     region.startLine is the annotation's event's line in that log. `seq` rides
     and finding metadata ride in partialFingerprints for stable identity."""
+    from glassport.evidence import annotation_level
     seq_line = _seq_to_line(session_path)
     uri = _repo_uri(session_path, base)
     event_by_id = {e.id: e for e in trace.events}
@@ -355,7 +356,8 @@ def render_session_sarif(trace, session_path: str = "", base: str = "") -> str:
             "partialFingerprints": {
                 "glassportSeq": fingerprint},
             "properties": {"severity": a.severity, "kind": a.kind.value,
-                           "subcategory": a.subcategory},
+                           "subcategory": a.subcategory,
+                           "evidence_level": annotation_level(a, ev)},
         })
 
     props = {"session": Path(session_path).name if session_path else "",

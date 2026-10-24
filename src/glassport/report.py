@@ -153,6 +153,7 @@ def _event_label(e: Event) -> str:
 
 def render_html(trace: InteractionTrace, source_name: str = "") -> str:
     """Trace + attached annotations -> one self-contained HTML page."""
+    from glassport.evidence import annotation_level
     actors = {a.id: a for a in trace.actors}
     seq_of = {e.id: e.metadata.get("seq") for e in trace.events}
     anns_by_event: dict[str, list[Annotation]] = {}
@@ -248,9 +249,12 @@ def render_html(trace: InteractionTrace, source_name: str = "") -> str:
         for a in sorted(anns_by_event.get(e.id, ()),
                         key=lambda a: -a.severity):
             marker = "•" if a.kind.value == "info" else "⚠"
+            level = annotation_level(a, e)
             w(f'<div class="ann" data-sev="{_esc(a.severity)}" '
-              f'data-kind="{_esc(a.kind.value)}">'
-              f"{marker} {_esc(a.subcategory)} · sev {_esc(a.severity)} · "
+              f'data-kind="{_esc(a.kind.value)}" '
+              f'data-evidence-level="{_esc(level)}">'
+              f"{marker} {_esc(a.subcategory)} · "
+              f"evidence: {_esc(level)} · sev {_esc(a.severity)} · "
               f"{_esc(a.kind.value)}<br>{_esc(a.explanation)}</div>")
         w("</div>")
 

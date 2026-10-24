@@ -2,6 +2,9 @@
 
 Glassport sees a call only when the client routes it through glassport. A
 `tools/list` reply is a **server declaration**, not an authorization decision.
+Decision profiles record `authorization.status: not_evaluated`; evidence-level
+labels describe local observation and forwarding, never caller permission or
+proof that an upstream tool executed.
 No path validates the caller's right to invoke a tool. The table describes
 whether a `tools/call` can reach its upstream server; a client-visible error
 alone is not evidence of a block. `tests/test_enforcement_contract.py` checks

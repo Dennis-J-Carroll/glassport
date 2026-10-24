@@ -77,6 +77,23 @@ class JournalCase(unittest.TestCase):
 
 
 class TestIntentAndDelivery(JournalCase):
+    def test_old_journal_schema_is_unsupported_even_with_current_policy(self):
+        lease = self.session()
+        obs = lease.record('c2s', wire(id=4, method='tools/call',
+                                       params={'name': 'search', 'arguments': {}}))
+        self.journal.record_intent(lease.context.epoch, obs)
+        epoch = lease.context.epoch
+        lease.release()
+        self.journal.close()
+        path = self.journal.path_for(epoch)
+        records = [json.loads(line) for line in path.read_text().splitlines()]
+        records[0]['schema'] = 'glassport.decision-journal/1'
+        self.assertEqual(records[0]['policy_version'], 'glassport.policy/2')
+        path.write_text(''.join(json.dumps(r) + '\n' for r in records))
+        replay = self.verify(lease)
+        self.assertEqual(replay.status, 'unsupported')
+        self.assertEqual(replay.reasons, ['profile_mismatch_schema'])
+
     def test_intent_records_candidate_action_and_delivery_is_separate(self):
         lease = self.session()
         obs = lease.record('c2s', wire(id=4, method='tools/call',
@@ -98,13 +115,17 @@ class TestIntentAndDelivery(JournalCase):
         self.assertEqual(kinds, ['profile', 'intent', 'delivery'])
         profile, rec_intent, delivery = entries
         self.assertEqual(profile['mode'], 'observe')
+        self.assertEqual(profile['authorization'], {'status': 'not_evaluated'})
+        self.assertEqual(profile['schema'], 'glassport.decision-journal/2')
         self.assertEqual(profile['pattern_status'], 'reproducible')
         self.assertEqual(rec_intent['action'], 'block')
         self.assertTrue(rec_intent['candidate_block'])
+        self.assertEqual(rec_intent['evidence_level'], 'intended_block')
         self.assertEqual(rec_intent['event_seq'], obs.seq)
         self.assertIn('fabricated_tool_call',
                       [f['subcategory'] for f in rec_intent['findings']])
         self.assertEqual(delivery['outcome'], 'sent')
+        self.assertEqual(delivery['evidence_level'], 'intended_block')
         self.assertEqual(delivery['status'], 200)
         self.assertFalse(delivery['enforced'])
         self.assertEqual(delivery['intent'], rec_intent['n'])
@@ -160,8 +181,10 @@ class TestIntentAndDelivery(JournalCase):
         # ...and ONLY the enforcement half differs.
         self.assertFalse(seen[dj.MODE_OBSERVE][1]['enforced'])
         self.assertEqual(seen[dj.MODE_OBSERVE][1]['outcome'], 'sent')
+        self.assertEqual(seen[dj.MODE_OBSERVE][1]['evidence_level'], 'intended_block')
         self.assertTrue(seen[dj.MODE_GATE][1]['enforced'])
         self.assertEqual(seen[dj.MODE_GATE][1]['outcome'], 'blocked')
+        self.assertEqual(seen[dj.MODE_GATE][1]['evidence_level'], 'blocked_policy')
 
 
 class TestReplayPositiveControl(JournalCase):

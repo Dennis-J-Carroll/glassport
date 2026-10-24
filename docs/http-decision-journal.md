@@ -5,6 +5,41 @@ The HTTP observer records what analysis concluded and what transport did.
 enforces proved exclusions; opt-in `--strict` also refuses `tools/call` when
 required evidence is missing. See [enforcement contract](enforcement-contract.md).
 
+## Evidence levels (decision journal schema `/2`)
+
+`evidence_level` is a closed vocabulary. It qualifies each intent and terminal
+delivery record, each stdio gate marker, each runtime SARIF result, and each
+HTML finding badge. It describes observed evidence, not caller permission.
+
+| Level | Meaning |
+|---|---|
+| `observed` | frame seen; no analyzable event or completed delivery proved |
+| `analyzed` | detector/policy processed event; transport outcome unproved |
+| `intended_block` | policy candidate was block, but gate did not enforce it |
+| `blocked_policy` | gate refused under a complete policy check |
+| `blocked_evidence_gap` | strict gate refused because a required check could not finish |
+| `blocked_admission` | malformed, uninspectable, or unsupported request refused at admission |
+| `forwarded` | transport sent a frame; remote execution remains unproved |
+| `externally_confirmed` | reserved for independent confirmation; never emitted by glassport |
+
+Intent is written before delivery, so its `blocked_*` label describes the
+already-computed refusal verdict. Only a matching terminal `delivery` with
+`outcome: blocked` proves the local transport withheld it. In observe mode a
+candidate block is `intended_block`, including when terminal delivery is
+`sent`. A completed local send is `forwarded`; it never becomes
+`externally_confirmed` merely because an upstream status arrived.
+
+The profile declares `authorization: {"status": "not_evaluated"}`. Glassport
+observes server declarations and local gate actions, not caller authorization.
+`analysis_limit` with reason `request_correlation` says this request reused an
+in-flight id, leaving its reply ambiguous. It does not weaken a known tool
+declaration, so both default and strict gate modes retain a proved exclusion.
+Other analysis limits remain evidence gaps; strict mode refuses them.
+
+Journal schema `/1` is unsupported by this reader (`profile_mismatch_schema`),
+including `/1` journals written with `glassport.policy/2`. Generate a new
+capture and journal to replay under `/2`; no old record is silently upgraded.
+
 ```bash
 glassport observe --url http://127.0.0.1:8000/mcp \
     --log-dir ./private-captures [--journal-dir DIR] \

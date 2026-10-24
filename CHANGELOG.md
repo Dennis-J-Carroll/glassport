@@ -7,7 +7,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versions follow 
 ## [Unreleased]
 
 ### Added
-- add opt-in strict HTTP evidence-gap blocking
+- label evidence levels; policy/2 journal /1 replay unsupported
+- add opt-in strict HTTP evidence-gap blocking (#112)
 - accept --port for http wrap and gate (#101)
 
 ### Fixed
