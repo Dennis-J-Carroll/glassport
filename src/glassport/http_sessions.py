@@ -476,18 +476,23 @@ class HTTPLease:
                 facts['admitted'] = False
                 text = None   # the entry changed after it was serialized
         persisted = self._write_locked(context, entry, text)
+        final = Observation(context.epoch, context.seq, event, annotations, persisted,
+                            facts.get('loss') or inherited
+                            or ('http_log_failed' if not persisted else None))
         if defer:
-            # An unpersisted observation is uncertain evidence: the relay will
-            # not enforce on it (the final observation below carries
-            # `http_log_failed`, and the verdict is recomputed from it), so the
-            # request is forwarded and must correlate like any admitted one.
-            if admitted or not persisted:
+            # A failed write changes the evidence AFTER the first admission
+            # decision. Ask the same pure callback again: default forwards
+            # and correlates, strict refuses and leaves no pending request.
+            if not persisted:
+                try:
+                    admitted = bool(admit(final))
+                except Exception:
+                    admitted = True
+            if admitted:
                 context.builder.commit_correlation()
             else:
                 context.builder.discard_correlation()
-        return Observation(context.epoch, context.seq, event, annotations, persisted,
-                           facts.get('loss') or inherited
-                           or ('http_log_failed' if not persisted else None))
+        return final
 
     @staticmethod
     def _write_locked(context, entry, text) -> bool:

@@ -113,7 +113,7 @@ def _read_records(path):
 
 def _profile_core(record) -> tuple:
     """The identity of a configuration profile, ignoring per-write fields."""
-    return (record.get("schema"), record.get("mode"),
+    return (record.get("schema"), record.get("mode"), record.get("strict"),
             record.get("policy_version"), record.get("detector_engine"),
             record.get("pattern_digest"), record.get("pattern_status"),
             json.dumps(record.get("registry_limits"), sort_keys=True),
@@ -159,6 +159,8 @@ def verify_journal(journal_path, wire_path, *, patterns=None) -> ReplayResult:
                                  ("pattern_digest", current.digest)):
         if profile.get(field_name) != expected:
             return _unsupported(f"profile_mismatch_{field_name}", epoch, recorded_engine)
+    if type(profile.get("strict")) is not bool:
+        return _unsupported("profile_invalid_strict", epoch, recorded_engine)
 
     result = ReplayResult(STATUS_EQUIVALENT, epoch)
     result.recorded_engine = recorded_engine if isinstance(recorded_engine, str) else None

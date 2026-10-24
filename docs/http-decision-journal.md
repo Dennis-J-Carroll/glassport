@@ -1,14 +1,17 @@
-# Decision and delivery records (observation mode)
+# HTTP decision and delivery records
 
-This stage records what analysis concluded and what the transport actually did,
-for an explicitly observed HTTP session. **No gate exists.** A candidate BLOCK
-is recorded as a candidate and the request is still forwarded; nothing here
-changes which bytes are sent or when.
+The HTTP observer records what analysis concluded and what transport did.
+`observe` records candidate blocks but forwards. `gate --transport http`
+enforces proved exclusions; opt-in `--strict` also refuses `tools/call` when
+required evidence is missing. See [enforcement contract](enforcement-contract.md).
 
 ```bash
 glassport observe --url http://127.0.0.1:8000/mcp \
     --log-dir ./private-captures [--journal-dir DIR] \
     [--bind HOST] [--port N] [--max-sessions N]
+
+glassport gate --transport http --url http://127.0.0.1:8000/mcp \
+    --strict
 
 glassport replay-decisions ./private-captures/decisions/<epoch>.jsonl \
     --wire ./private-captures/<epoch>.jsonl [--json]
@@ -47,6 +50,7 @@ outcomes are deliberately precise:
 | `sent` | the complete request left the socket and upstream returned a status | `upstream_response` |
 | `failed` | a status was received; the transfer failed afterwards | `body_transfer_failed` |
 | `unknown` | indeterminate — a partial send, or `getresponse()` failed after the request had already returned | `send_indeterminate`, `response_indeterminate`, `handler_aborted` |
+| `blocked` | locally refused before upstream connection | `http_gate_blocked`, `http_gate_strict_blocked` (with fixed reason) |
 
 A `getresponse()` failure is **never** `not_sent`: the request had already left.
 For HTTPS, `connect()` assigns the socket before the TLS handshake, so a
@@ -199,16 +203,17 @@ so an evicted epoch that later resumes can never reuse a number an earlier
 delivery record links to. These are in-memory and per-file bounds, not a disk
 retention quota.
 
-## Fail-open
+## Recording failure and enforcement
 
 Every recording entry point returns a falsy value instead of raising: an
 unwritable directory, a mid-write error or an exhausted bound produces no record
-and no exception. The relay never observes journaling at all — the hooks are
-wrapped the same way `_observe_call` wraps analysis, and with `journal=None`
-(every path except the new `observe` command) not one additional statement runs.
-Unavailable evidence stays fail-open, which is also why a request with no
-routable epoch is journaled not at all rather than attributed to a guess.
+and no exception. The relay computes its enforcement verdict before recording,
+so failed journal writes cannot change that verdict. Passive and default HTTP
+gate modes forward when observation evidence is unavailable. Opt-in HTTP
+`--strict` refuses `tools/call` on missing evidence, including `http_log_failed`;
+a missing wire entry leaves replay incomplete. A request with no routable epoch
+is not attributed to a guessed epoch.
 
-Delivery records are shaped to supply a later transport-owned gate precondition
-— a valid complete request, an unambiguous epoch, successful evidence
-persistence, no relevant analysis fault. Building the gate is a separate stage.
+Delivery records describe what transport did. A strict refusal records
+`http_gate_strict_blocked` and its fixed evidence-gap reason when the journal
+append succeeds. Neither journal nor replay proves authorization.

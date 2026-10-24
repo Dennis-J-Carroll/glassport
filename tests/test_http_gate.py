@@ -160,11 +160,11 @@ class GateCase(unittest.TestCase):
         self.addCleanup(srv.shutdown)
         return f'http://127.0.0.1:{srv.server_address[1]}/mcp'
 
-    def proxy(self, mode=dj.MODE_GATE, remote=None, limits=None):
+    def proxy(self, mode=dj.MODE_GATE, remote=None, limits=None, strict=False):
         remote = remote or self.upstream()
         self.observer = HTTPObserver(self.root / 'wire', limits=limits)
         self.journal = dj.DecisionJournal(self.root / 'decisions', self.observer,
-                                          mode=mode)
+                                          mode=mode, strict=strict)
         ready, box = threading.Event(), []
         threading.Thread(
             target=run_http_tap, args=(remote, self.root / 'wire'),
@@ -1343,17 +1343,16 @@ class TestGateCLISurface(unittest.TestCase):
             with contextlib.redirect_stderr(io.StringIO()):
                 self.assertEqual(tap.main(args), 2, args)
 
-    def test_strict_over_http_is_refused_not_ignored(self):
-        """--strict configures the stdio Gate only; the HTTP gate must refuse
-        it rather than start without the fail-closed posture it asked for."""
-        import contextlib
-        import io
-        with mock.patch.object(tap, '_run_http_gate', return_value=0) as run:
-            with contextlib.redirect_stderr(io.StringIO()) as err:
-                self.assertEqual(tap.main(['gate', '--strict', '--transport', 'http',
-                                           '--url', 'http://127.0.0.1:1/mcp']), 2)
-        run.assert_not_called()
-        self.assertIn('--strict', err.getvalue())
+    def test_strict_over_http_reaches_gate_journal(self):
+        """Both CLI placements enable strict mode instead of silently dropping it."""
+        for args in (['gate', '--strict', '--transport', 'http', '--url',
+                      'http://127.0.0.1:1/mcp'],
+                     ['gate', '--transport', 'http', '--url',
+                      'http://127.0.0.1:1/mcp', '--strict']):
+            with self.subTest(args=args), mock.patch.object(
+                    tap, '_run_http_gate', return_value=0) as run:
+                self.assertEqual(tap.main(args), 0)
+                self.assertTrue(run.call_args.kwargs['strict'])
 
     def test_passive_wrap_over_http_is_unchanged(self):
         """`wrap --transport http` must not acquire a gate by accident."""
