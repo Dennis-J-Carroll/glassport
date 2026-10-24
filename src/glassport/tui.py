@@ -9,7 +9,7 @@ from_mcp_session_file() and re-annotated. The log file is the single
 source of truth; derived state is always recomputed, exactly like
 watch.py does for baselines.
 
-Layout (spec: docs/superpowers/specs/2026-06-10-tui-design.md):
+Layout (design spec 2026-06-10-tui-design, kept in the maintainers' notes):
   header    — server identity, LIVE/IDLE, declared surface, counters
   timeline  — one line per trace event, severity-colored
   findings  — annotations only; Enter jumps to the offending event
