@@ -440,6 +440,8 @@ When observation has earned enough trust, swap `wrap` for `gate` in your MCP con
 
 The gate inspects every client-to-server frame before the server sees it, and every `resources/read` reply before the client sees it. A blocked request never reaches the server; the client gets a synthesized JSON-RPC error (code `-32000`) whose `error.data` carries `{"glassport": "gate_blocked", "reason": ...}` — the gate's voice is always distinguishable from the server's.
 
+For enforced rules, failure behavior, persisted records, and bypass controls on every execution path, see the [enforcement contract](enforcement-contract.md).
+
 ```
 ... tools/call "shadow_tool" →
 ← {"error": {"code": -32000, "message": "glassport gate: tools/call
