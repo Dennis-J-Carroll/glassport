@@ -19,6 +19,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from glassport import health as health_mod
 from glassport.adapters.mcp_session import from_mcp_session_file
@@ -50,6 +51,36 @@ class TestMetricsLine(unittest.TestCase):
         self.assertEqual(last["frames_blocked"], 2)
         self.assertEqual(last["session_duration_s"], 1.5)
         self.assertGreater(last["log_bytes"], 0)
+        self.assertEqual(last["write_failures"], 0)
+
+    def test_failed_writes_warn_once_and_appear_in_metrics(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp) / "s.jsonl"
+            log = SessionLog(p)
+            original = log._fh
+            writer = mock.Mock(wraps=original)
+            attempts = 0
+
+            def flaky_write(text):
+                nonlocal attempts
+                attempts += 1
+                if attempts <= 2:
+                    raise OSError("disk full")
+                return original.write(text)
+
+            writer.write.side_effect = flaky_write
+            log._fh = writer
+            stderr = io.StringIO()
+            with contextlib.redirect_stderr(stderr):
+                self.assertIsNone(log.record("c2s", b'{"method":"a"}\n'))
+                self.assertIsNone(log.record("c2s", b'{"method":"b"}\n'))
+                self.assertIsNotNone(log.record("c2s", b'{"method":"c"}\n'))
+                log.write_metrics()
+            log.close()
+            records = [json.loads(line) for line in p.read_text().splitlines()]
+        self.assertEqual(stderr.getvalue().count("session log write failed"), 1)
+        self.assertEqual(records[-1]["write_failures"], 2)
+        self.assertEqual(records[-1]["frames_seen"], 3)
 
     def test_adapter_skips_metrics_line(self):
         with tempfile.TemporaryDirectory() as tmp:

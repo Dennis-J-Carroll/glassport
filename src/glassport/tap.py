@@ -287,7 +287,24 @@ class SessionLog:
             self._fh = open(path, "a", buffering=1, encoding="utf-8")
         self._lock = threading.Lock()
         self._seq = 0
+        self.write_failures = 0
+        self._warned_write_failure = False
         self.path = path
+
+    def _write(self, text: str) -> None:
+        """Count failed append calls once; caller holds the session lock."""
+        try:
+            self._fh.write(text)
+        except Exception:
+            self.write_failures += 1
+            if not self._warned_write_failure:
+                self._warned_write_failure = True
+                try:
+                    print("[glassport] session log write failed; capture incomplete; "
+                          "relay continues", file=sys.stderr)
+                except Exception:
+                    pass
+            raise
 
     def file_mode(self) -> int | None:
         """POSIX permission bits of the open log, or None (non-POSIX / error)."""
@@ -333,7 +350,7 @@ class SessionLog:
                 entry, text = build_session_entry(
                     direction, line, gate=gate, metadata=metadata,
                     observation=observation, wire_bytes=wire_bytes, seq=seq)
-                self._fh.write(text + "\n")
+                self._write(text + "\n")
                 return entry
         except Exception:
             return None  # logging is best-effort; the relay is sacred
@@ -358,7 +375,7 @@ class SessionLog:
                 self._claim_sequence(entry.get("seq"))
                 if text is None:
                     text = _serialize_entry(entry)
-                self._fh.write(text + "\n")
+                self._write(text + "\n")
             return True
         except Exception:
             return False
@@ -374,7 +391,7 @@ class SessionLog:
         try:
             line = json.dumps(entry, ensure_ascii=False) + "\n"
             with self._lock:
-                self._fh.write(line)
+                self._write(line)
             return True
         except Exception:
             return False  # journaling is best-effort; the relay is sacred
@@ -389,8 +406,9 @@ class SessionLog:
             with self._lock:
                 entry = {"type": "glassport.metrics", "ts": _now_iso(),
                          "frames_seen": self._seq, **fields}
+                entry["write_failures"] = self.write_failures
                 entry.setdefault("log_bytes", self._fh.tell())
-                self._fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
+                self._write(json.dumps(entry, ensure_ascii=False) + "\n")
         except Exception:
             pass  # metrics are best-effort; the relay is sacred
 
@@ -1684,8 +1702,9 @@ usage: glassport <command> [options]   (`glassport help <command>`, `glassport -
                     only: nothing is ever blocked)
   replay-decisions: glassport replay-decisions <journal.jsonl>
                         --wire <session.jsonl> [--json]
-                   (re-run one epoch's analysis and verify the recorded
-                    decisions; exit 0 only when equivalence is proved)
+                   (re-derive one epoch's decisions under identical code;
+                    digests cross-check artifacts, not signatures.
+                    exit 0 only when analysis is equivalent)
   summarize:       glassport summarize [--json|--sarif] <session.jsonl>
   detect:          glassport detect [--sarif] <session.jsonl>
                    (run all behavioral detectors; exit 1 if findings,

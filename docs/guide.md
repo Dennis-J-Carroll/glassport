@@ -517,7 +517,7 @@ glassport audit ./some-mcp-server --provenance --provenance-cache ~/.glassport/p
 glassport audit ./some-mcp-server --provenance --provenance-refresh                    # force re-fetch past the cache
 ```
 
-It reads `package.json` / `requirements.txt` / `pyproject.toml` (direct deps only) and flags: **not in the registry** (possible typosquat, `high`), **deprecated / yanked** (`medium`), **no release in 2+ years** (`low`), **single maintainer** (`note`, npm), and **no build-provenance attestation** (`note`).
+It reads `package.json` / `requirements.txt` / `pyproject.toml` (direct deps only) and flags: **not in the registry** (possible typosquat, `high`), **deprecated / yanked** (`medium`), **no release in 2+ years** (`low`), **single maintainer** (`note`, npm), and **no registry-reported attestation field** (`note`). These are unverified registry enrichments, not proof of package origin or signature validity.
 
 Three invariants make this safe to bolt onto a security tool:
 
@@ -750,7 +750,7 @@ M0 (tap) through M5 (gate) are built. The static `audit` is folded in. Observe f
 Still on the horizon:
 
 - HTTP enforcement parity: incremental built-in detectors and a separate policy interface, plus HTTP session routing, decision/delivery journaling, and explicit transport integration~~ ✅ Built (`gate --transport http`) — the same narrow proved-out-of-surface case the stdio gate enforces. The stdio `gate` still runs its own, separate mechanism and has not been migrated onto this engine.
-- Network-enriched audit mode: npm / PyPI / GitHub provenance lookups, as an explicit opt-in flag (kept off the default path so the core audit stays reproducible and offline)~~ ✅ Built (`audit --provenance`)
+- Network-enriched audit mode: npm / PyPI registry enrichment (unverified), as an explicit opt-in flag (kept off the default path so the core audit stays reproducible and offline)~~ ✅ Built (`audit --provenance`); GitHub lookups remain unbuilt.
 - Agent↔Agent trace coverage for Google A2A protocol
 - TUI: terminal interface for live session inspection and drift review~~ ✅ Built (`glassport tui`)
 - CI integration: JSON + SARIF export and a GitHub Action that uploads audit findings to the Security tab~~ ✅ Built (`audit --sarif`, `.github/workflows/ci.yml`)

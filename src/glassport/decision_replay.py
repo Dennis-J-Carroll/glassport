@@ -1,4 +1,7 @@
-"""Verify a recorded decision journal against the wire capture of its epoch.
+"""Re-derive a recorded journal under identical code against its wire capture.
+
+Matching digests show artifact equivalence, not a signature or independent
+proof that the capture is complete and authentic.
 
 Equivalence is a claim about two runs of the same analysis over the same
 evidence, so this module refuses to make it unless it can first prove the
