@@ -14,6 +14,22 @@ STRICT_MARKER = "http_gate_strict_blocked"
 
 
 class TestStrictHttpGate(GateCase):
+    def test_strict_journal_replays_equivalent(self):
+        self.proxy(strict=True)
+        self.handshake()
+        since = self.intent_watermark(self._handshake_request_count)
+        before = self.upstream_calls()
+        _, body = self.call("ghost")
+        self.assert_blocked(body, before)
+        intent, delivery = self.last_call_records(since=since)
+        self.assertEqual(intent["evidence_level"], "blocked_policy")
+        self.assertEqual(delivery["evidence_level"], "blocked_policy")
+        epoch = intent["epoch"]
+        replay = dr.verify_journal(self.journal.path_for(epoch),
+                                   self.observer.log_dir / f"{epoch}.jsonl")
+        self.assertEqual(replay.status, "equivalent", replay.as_dict())
+        self.assertGreater(replay.compared, 0)
+
     def assert_strict_blocked(self, body, before, reason, rid=7):
         self.quiesce()
         frame = json.loads(body)

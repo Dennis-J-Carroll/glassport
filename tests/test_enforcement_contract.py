@@ -62,6 +62,12 @@ class TestStdioContract(unittest.TestCase):
                                 "gate", "--log-dir", str(self.root / "logs"), "--"])
         self.assertEqual(reply["error"]["data"]["glassport"], "gate_blocked")
         self.assertEqual(self._received(), [])
+        entries = [json.loads(line) for path in (self.root / "logs").glob("*.jsonl")
+                   for line in path.read_text().splitlines()]
+        self.assertIn("blocked_policy", [e.get("gate", {}).get("evidence_level")
+                                         for e in entries])
+        self.assertIn("forwarded", [e.get("gate", {}).get("evidence_level")
+                                    for e in entries])
 
     def test_stdio_wrap(self):
         reply = self._exchange([sys.executable, str(ROOT / "glassport_tap.py"),
@@ -91,13 +97,18 @@ class TestHttpContract(GateCase):
     def test_http_gate(self):
         self.proxy()
         self.handshake()
+        since = self.intent_watermark(self._handshake_request_count)
         before = self.upstream_calls()
         _, body = self.call("ghost")
         self.assert_blocked(body, before)
+        intent, delivery = self.last_call_records(since=since)
+        self.assertEqual(intent["evidence_level"], "blocked_policy")
+        self.assertEqual(delivery["evidence_level"], "blocked_policy")
 
     def test_http_gate_strict(self):
         self.proxy(strict=True)
         self.handshake(declare=False)
+        since = self.intent_watermark(self._handshake_request_count)
         before = self.upstream_calls()
         _, body = self.call("search")
         frame = json.loads(body)
@@ -107,13 +118,20 @@ class TestHttpContract(GateCase):
         self.quiesce()
         self.assertEqual(self.upstream_calls(), before,
                          "strict contract call reached upstream")
+        intent, delivery = self.last_call_records(since=since)
+        self.assertEqual(intent["evidence_level"], "blocked_evidence_gap")
+        self.assertEqual(delivery["evidence_level"], "blocked_evidence_gap")
 
     def test_http_observe(self):
         self.proxy(mode=dj.MODE_OBSERVE)
         self.handshake()
+        since = self.intent_watermark(self._handshake_request_count)
         before = self.upstream_calls()
         _, body = self.call("ghost")
         self.assert_forwarded(body, before)
+        intent, delivery = self.last_call_records(since=since)
+        self.assertEqual(intent["evidence_level"], "intended_block")
+        self.assertEqual(delivery["evidence_level"], "intended_block")
 
     def test_http_wrap(self):
         remote = self.upstream()

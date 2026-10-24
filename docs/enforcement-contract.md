@@ -5,6 +5,14 @@ Glassport sees a call only when the client routes it through glassport. A
 Decision profiles record `authorization.status: not_evaluated`; evidence-level
 labels describe local observation and forwarding, never caller permission or
 proof that an upstream tool executed.
+
+For paths that produce gate or journal records, the claim is explicit:
+`stdio-gate` and `http-gate` refusals are `blocked_policy`; HTTP strict
+missing-evidence refusals are `blocked_evidence_gap`; HTTP `observe` records
+an `intended_block` while forwarding. A stdio gate's injected reply is
+`forwarded` to the client. Passive wrap and probe paths produce `analyzed`
+runtime findings when detectors fire. A direct server path has no glassport
+evidence-level claim.
 No path validates the caller's right to invoke a tool. The table describes
 whether a `tools/call` can reach its upstream server; a client-visible error
 alone is not evidence of a block. `tests/test_enforcement_contract.py` checks
