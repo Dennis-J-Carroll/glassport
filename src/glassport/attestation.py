@@ -1,8 +1,7 @@
 """
 attestation.py — structural checks for glassport's own _meta identity
-extension. See docs/superpowers/plans/2026-09-22-security-hardening-
-outline/APPENDIX.md §5 for why this is a glassport extension and not
-enforcement of a real MCP mechanism.
+extension. See docs/attestation.md for why this is a glassport extension
+and not enforcement of a real MCP mechanism.
 
 Detect-only by design: no real client populates this key today, so
 enforcing its presence would break every live session. See Task 13 for

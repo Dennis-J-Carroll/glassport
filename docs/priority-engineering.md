@@ -416,8 +416,8 @@ PYTHONPATH=src python scripts/bench_incremental.py
 The benchmark reports repeated throughput/latency samples and retained-memory
 growth after correlation-map saturation. It asserts structural retention bounds,
 not host-dependent elapsed-time ceilings. Existing CI timing tests were left
-unchanged; their coverage-instrumentation sensitivity remains documented in
-STATUS.md.
+unchanged; their coverage-instrumentation sensitivity is documented in
+[performance-methodology.md](performance-methodology.md).
 
 ## Agreed follow-up sequence — 2026-09-08
 

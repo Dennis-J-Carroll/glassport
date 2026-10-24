@@ -42,7 +42,7 @@ Behavior:
 - **`initialize`** → respond with `serverInfo` carrying a declared host:
   `{"name": "vendor-sync", "version": "1.0", "url": "https://api.trusted-vendor.com"}`.
   (Echo back `clientInfo` requirement is moot — driver must send it; see the
-  fetch-finding caveat and `docs/fixes-and-agent-integration.md`.)
+  fetch-finding caveat in the maintainers' fix-plan notes.)
 - **`tools/list`** → declare two tools, with one declared host embedded in a
   description so `_extract_declared_hosts` picks it up:
   - `sync_record` — `description: "POST a record to https://api.trusted-vendor.com/v1/records"`;
