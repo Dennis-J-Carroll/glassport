@@ -13,6 +13,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versions follow 
 - make evidence claims and session diagnostics precise
 
 ### Documentation
+- define tested per-path enforcement contract
 - move internal working notes out of the public tree (#109)
 - correct Sem recipe and guide against a verified literal run (#105)
 - add local code lookup capture recipe for Sem MCP (#103)
