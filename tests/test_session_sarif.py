@@ -107,8 +107,24 @@ class TestRenderSessionSarif(unittest.TestCase):
         res = [r for r in doc["runs"][0]["results"]
                if r["ruleId"] == "glassport/fabricated_tool_call"][0]
         self.assertIn("glassportSeq", res["partialFingerprints"])
-        self.assertTrue(res["partialFingerprints"]["glassportSeq"]
-                        .endswith(":6"))
+        self.assertIn(":6:", res["partialFingerprints"]["glassportSeq"])
+
+    def test_same_category_and_seq_get_distinct_stable_fingerprints(self):
+        lines = handshake([{"name": "web_search"}]) + [
+            call(6, 3, "web_search", {
+                "first": "first@example.org", "second": "second@example.org"})]
+        first, _ = render_lines(lines)
+        second, _ = render_lines(lines)
+
+        def fingerprints(doc):
+            return [r["partialFingerprints"]["glassportSeq"]
+                    for r in doc["runs"][0]["results"]
+                    if r["ruleId"] == "glassport/pii_email_address"]
+
+        found = fingerprints(first)
+        self.assertEqual(len(found), 2)
+        self.assertEqual(len(set(found)), 2)
+        self.assertEqual(found, fingerprints(second))
 
     def test_distinct_subcategory_yields_one_rule(self):
         doc, _ = self._fabricated()

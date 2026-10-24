@@ -15,6 +15,7 @@ import unittest
 from pathlib import Path
 
 import glassport
+from glassport import sarif
 
 PYPROJECT = Path(__file__).resolve().parent.parent / "pyproject.toml"
 
@@ -25,6 +26,9 @@ class TestVersionSync(unittest.TestCase):
         m = re.search(r'^version\s*=\s*"([^"]+)"', text, re.MULTILINE)
         assert m, "pyproject.toml has no version field"
         self.assertEqual(glassport.__version__, m.group(1))
+
+    def test_sarif_driver_matches_package_version(self):
+        self.assertEqual(sarif.DRIVER_VERSION, glassport.__version__)
 
 
 if __name__ == "__main__":

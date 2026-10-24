@@ -68,10 +68,11 @@ only what the wire proves* — implies a specific trust posture:
   and judges the wire. It does not execute, sandbox, or patch the server.
 
 **Doctrinal consequence:** "observe first" means the tap never trusts the
-wire to be honest — but it does trust it to be *evidence*. The tap logs
-raw bytes verbatim; judgment happens offline in detectors that cannot
-mutate the record. A detector bug can therefore never corrupt the wire
-record, and the record can be re-analyzed as detectors improve.
+wire to be honest — but it does trust it to be *evidence*. The stdio tap
+decodes wire lines as UTF-8 text with replacement for invalid bytes; it does
+not preserve raw bytes verbatim. Detectors cannot alter the stored record,
+so a detector bug cannot corrupt it during analysis. The record is not
+tamper evidence and does not prove complete capture.
 
 ## Supported versions
 

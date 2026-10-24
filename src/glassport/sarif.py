@@ -20,6 +20,7 @@ upload cleanly:
 from __future__ import annotations
 
 import json
+import hashlib
 import os.path
 import posixpath
 from pathlib import Path
@@ -28,9 +29,9 @@ from typing import Union
 from glassport.audit import Report, RULES_BY_ID
 from glassport.detectors import (clamp_text, neutralize_text,
                                   redact_display, redact_secrets_strict)
-from glassport import provenance
+from glassport import __version__, provenance
 
-DRIVER_VERSION = "0.2.0"
+DRIVER_VERSION = __version__
 _INFO_URI = "https://github.com/Dennis-J-Carroll/glassport"
 
 # string (audit) and int (detector) severities collapse to one scale
@@ -227,7 +228,7 @@ _PROV_RULE_TEXT = {
     "prov-deprecated": "Dependency's latest release is deprecated/yanked",
     "prov-stale": "Dependency has no recent release",
     "prov-single-maintainer": "Dependency has a single maintainer",
-    "prov-unsigned": "Dependency's latest release has no provenance attestation",
+    "prov-unsigned": "No registry-reported attestation field (unverified enrichment)",
     "prov-unavailable": "Some dependencies could not be checked",
     # Fallback for a provenance finding whose rule id is not recognized. A
     # provenance record comes from the (possibly hostile) manifest scan, so an
@@ -317,12 +318,13 @@ def render_session_sarif(trace, session_path: str = "", base: str = "") -> str:
     is `session_path` (prefixed with `base` so it resolves from the repo root
     in the GitHub Security tab; absolute paths pass through unchanged),
     region.startLine is the annotation's event's line in that log. `seq` rides
-    in partialFingerprints for stable identity."""
+    and finding metadata ride in partialFingerprints for stable identity."""
     seq_line = _seq_to_line(session_path)
     uri = _repo_uri(session_path, base)
     event_by_id = {e.id: e for e in trace.events}
     rules: dict = {}
     results: list = []
+    fingerprints: dict[str, int] = {}
 
     for a in trace.annotations:
         rule_id = f"glassport/{a.subcategory or 'annotation'}"
@@ -331,6 +333,14 @@ def render_session_sarif(trace, session_path: str = "", base: str = "") -> str:
         ev = event_by_id.get(a.event_id)
         seq = ev.metadata.get("seq") if ev else None
         line = seq_line.get(seq, 1)
+        detector = a.metadata.get("detector") or a.annotator or "unknown"
+        metadata = json.dumps(a.metadata, sort_keys=True, ensure_ascii=True,
+                              default=str)
+        digest = hashlib.sha256(metadata.encode("utf-8")).hexdigest()[:16]
+        stem = f"{a.subcategory}:{seq}:{detector}:{digest}"
+        duplicate = fingerprints.get(stem, 0)
+        fingerprints[stem] = duplicate + 1
+        fingerprint = f"{stem}:{duplicate}" if duplicate else stem
         results.append({
             "ruleId": rule_id,
             "level": _sarif_level(a.severity),
@@ -343,7 +353,7 @@ def render_session_sarif(trace, session_path: str = "", base: str = "") -> str:
                 },
             }],
             "partialFingerprints": {
-                "glassportSeq": f"{a.subcategory}:{seq}"},
+                "glassportSeq": fingerprint},
             "properties": {"severity": a.severity, "kind": a.kind.value,
                            "subcategory": a.subcategory},
         })

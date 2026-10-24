@@ -6,11 +6,34 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versions follow 
 
 ## [Unreleased]
 
+### Added
+- accept --port for http wrap and gate (#101)
+
+### Fixed
+- make evidence claims and session diagnostics precise
+
+### Documentation
+- move internal working notes out of the public tree (#109)
+- correct Sem recipe and guide against a verified literal run (#105)
+- add local code lookup capture recipe for Sem MCP (#103)
+- add recipes policy (#104)
+- add a Parallel Search MCP capture recipe (#99)
+
+### Internal
+- skip journal permission test when running as root (#108)
+- skip journal permission test when running as root (#106)
+- pin server-filesystem and wait for the tools/call reply (#102)
+
+## [0.7.1] - 2026-10-15
+
 ### Fixed
 - no catalog downgrade for tool files; scan shipped bundles >1 MB
 - close comment-demotion bypasses in tool-poisoning scoring
 - real --version, help and <verb> --help; refuse unknown commands
 - scan shipped dist/, root identity, context-scored tool-poisoning
+
+### Changed
+- 0.7.1 — audit credibility floor
 
 ### Documentation
 - correct stale gate claims and document audit context rules
