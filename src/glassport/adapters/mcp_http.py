@@ -5,20 +5,21 @@ Streamable-HTTP transport, logging every JSON-RPC message into the same JSONL
 the stdio tap writes (`SessionLog` is transport-neutral). The tap stays dumb —
 it frames at the JSON-RPC-message boundary (a POST body; an SSE `data:` event)
 but never interprets method/id/params — and fail-open: SSE bytes reach the
-client as they arrive, independent of framing/logging. A logging failure never
-alters, delays, or kills a live session.
+client as they arrive, independent of framing/logging. Passive logging failure
+never alters, delays, or kills a live session.
 
 The optional observer API isolates live analysis and wire captures per HTTP
 session epoch. It folds complete frames before completing client delivery;
-analysis failures still fail open.
+analysis failures fail open in passive and default gate modes.
 
 Enforcement is off unless a journal in gate mode is supplied (`glassport gate
---transport http`). With one, and ONLY then, a frame whose analysis proves a
+--transport http`). By default a frame whose analysis proves a
 severity-3 tools/call against an observed declared surface is answered locally
 with a JSON-RPC error and never forwarded: no upstream connection is opened for
 it at all. Missing *evidence* — missing, partial or malformed declarations, a
 faulted detector pass, a lost or stale epoch, a call with no JSON-RPC id —
-forwards, with the would-block recorded. A request gate mode cannot *read*
+forwards by default, with the would-block recorded. Opt-in strict mode refuses
+tools/call when evidence is missing or faulted. A request gate mode cannot *read*
 (oversized, encoded, not exactly one unambiguous JSON object) or whose
 Host/Origin is not the loopback proxy is refused before connecting. Passive
 wrap and observation mode keep byte-for-byte identical behavior, because with
@@ -355,10 +356,11 @@ def _observe_call(lease, method, *args, **kwargs):
 
 
 def _journal_call(journal, method, *args, **kwargs):
-    """Decision recording never gains control over passive delivery either.
+    """Decision recording never changes a transport verdict after the fact.
 
-    A journal write failure is exactly as fail-open as an analysis failure: the
-    relay forwards, and the absent record is the honest evidence of absence.
+    A journal write failure is swallowed; the relay acts on its already-computed
+    decision. Passive/default traffic remains fail-open, while a strict
+    evidence-gap refusal still blocks before upstream connection.
     """
     try:
         return getattr(journal, method)(*args, **kwargs)
@@ -375,12 +377,12 @@ def _lease_epoch(lease):
 _NO_ID = object()   # sentinel: this frame cannot be answered locally
 
 
-def _blockable_id(observation):
+def _blockable_id(observation, request_frame=None):
     """The exact JSON-RPC id a synthesized block must echo, or :data:`_NO_ID`.
 
-    The id is read from the folded event's metadata, which holds the value the
-    wire carried with its original type — so a numeric id comes back numeric
-    and a string id comes back a string, never normalized between the two.
+    The id is read from the folded event's metadata, or from admission's
+    validated request frame when folding failed. Both hold the original wire
+    type: numeric ids remain numeric and string ids remain strings.
 
     MCP defines ``tools/call`` as a request that expects a result. A
     ``tools/call``-shaped frame carrying no id is therefore a notification
@@ -397,7 +399,14 @@ def _blockable_id(observation):
     event = getattr(observation, "event", None)
     metadata = getattr(event, "metadata", None)
     rid = metadata.get("jsonrpc_id") if isinstance(metadata, dict) else None
-    return rid if type(rid) is int or type(rid) is str else _NO_ID
+    if type(rid) is int or type(rid) is str:
+        return rid
+    # Admission parsed this request even when analysis produced no event.
+    if isinstance(request_frame, dict) and request_frame.get("method") == "tools/call":
+        rid = request_frame.get("id")
+        if type(rid) is int or type(rid) is str:
+            return rid
+    return _NO_ID
 
 
 def _blocked_tool(observation):
@@ -411,7 +420,7 @@ def _blocked_tool(observation):
     return None
 
 
-def _gate_verdict(journal, observation) -> bool:
+def _gate_verdict(journal, observation, request_frame=None) -> bool:
     """Should this frame be refused? Computed BEFORE anything is recorded.
 
     This is the single decision point for enforcement, and it is deliberately
@@ -424,11 +433,11 @@ def _gate_verdict(journal, observation) -> bool:
     if journal is None:
         return False
     try:
-        if not journal.evaluate(observation):
+        if not journal.evaluate(observation, request_frame=request_frame):
             return False
     except Exception:
         return False
-    return _blockable_id(observation) is not _NO_ID
+    return _blockable_id(observation, request_frame) is not _NO_ID
 
 
 def _observe_json_response(resp, wfile, lease, cap, *, expected=None, interpret=True):
@@ -693,23 +702,21 @@ def _make_handler(remote, log: SessionLog, observer=None, journal=None,
             request's pending correlation exists, so a request the gate
             refuses never becomes one. The answer is the same pure
             `_gate_verdict` that `_relay` recomputes on the final observation
-            (which additionally knows whether the entry persisted): the two
-            can only differ when the wire write failed, and then both the
-            observer and the relay fall open — the request correlates and is
-            forwarded, because unpersisted evidence is never enforced on.
+            (which additionally knows whether the entry persisted). A failed
+            wire write forwards by default and blocks under strict mode.
             """
-            return not _gate_verdict(journal, observation)
+            return not _gate_verdict(journal, observation, self._request_frame)
 
-        def _send_block(self, observation) -> bytes:
+        def _send_block(self, observation, strict_reason=None) -> bytes:
             """Answer a refused tools/call locally, in glassport's own voice.
 
             The client gets an ordinary 200 carrying a JSON-RPC error — the
             same shape a server's own error would take, so a conforming client
             surfaces it through its normal error path — with the request's
             exact id echoed back so it correlates. `-32000` matches the stdio
-            gate's convention, but the marker is `http_gate_blocked` rather
-            than the stdio gate's `gate_blocked`: two independent enforcement
-            paths must stay distinguishable in a log.
+            gate's convention. Default policy blocks use `http_gate_blocked`;
+            strict evidence-gap blocks use `http_gate_strict_blocked` plus a
+            fixed reason. Both differ from stdio's `gate_blocked` marker.
 
             Nothing attacker-influenced is echoed. The client already knows
             which call it made (the id says so), and the tool name and declared
@@ -717,15 +724,22 @@ def _make_handler(remote, log: SessionLog, observer=None, journal=None,
             response is trying to keep honest; the wire log and the decision
             journal carry that evidence instead.
             """
+            marker = "http_gate_strict_blocked" if strict_reason else "http_gate_blocked"
+            message = (("glassport gate: tools/call blocked — strict mode: "
+                        "required evidence unavailable") if strict_reason else
+                       ("glassport gate: tools/call blocked — the "
+                        "requested tool is outside the surface this "
+                        "server declared"))
+            data = {"glassport": marker}
+            if strict_reason:
+                data["reason"] = strict_reason
             body = json.dumps({
                 "jsonrpc": "2.0",
-                "id": _blockable_id(observation),
+                "id": _blockable_id(observation, self._request_frame),
                 "error": {
                     "code": -32000,
-                    "message": ("glassport gate: tools/call blocked — the "
-                                "requested tool is outside the surface this "
-                                "server declared"),
-                    "data": {"glassport": "http_gate_blocked"},
+                    "message": message,
+                    "data": data,
                 },
             }, ensure_ascii=False).encode("utf-8")
             self.send_response(200)
@@ -795,6 +809,7 @@ def _make_handler(remote, log: SessionLog, observer=None, journal=None,
                     status, why, self._refusal_code = problem
                     self._reject(status, why)
                     return None, False
+                self._request_frame = problem
                 modern = _modern_problem(problem, self.headers, endpoint_era)
                 if modern is not None:
                     self._refusal_code = "invalid_mcp_request"
@@ -833,6 +848,7 @@ def _make_handler(remote, log: SessionLog, observer=None, journal=None,
             self._refusal_code = "framing_rejected"
             self._observation_lease = None
             self._c2s_observation = None
+            self._request_frame = None
             if gate_mode and not self._local_request_ok():
                 self._reject(403, "origin or host not allowed")
                 return
@@ -856,6 +872,7 @@ def _make_handler(remote, log: SessionLog, observer=None, journal=None,
             # them, so the forwarded bytes are identical with journal=None.
             intent = None
             delivery = ("unknown", "handler_aborted", None)
+            delivery_reason = None
             request_sent = completed = False
             if observer is not None:
                 try:
@@ -886,10 +903,11 @@ def _make_handler(remote, log: SessionLog, observer=None, journal=None,
                     # proved should not be forwarded.
                     # In gate mode `_admit` already gave the observer this same
                     # verdict while the request's correlation was held back;
-                    # recomputing it on the final observation adds exactly one
-                    # fact, whether the entry persisted, and an unpersisted
-                    # one forwards (the observer committed its correlation).
-                    enforce = _gate_verdict(journal, self._c2s_observation)
+                    # Recomputing on the final observation adds whether the
+                    # entry persisted. Strict mode blocks a failed write;
+                    # default mode forwards and commits correlation.
+                    enforce = _gate_verdict(journal, self._c2s_observation,
+                                            self._request_frame)
                     # Intent is persisted BEFORE the upstream request begins, so
                     # a crash mid-delivery still leaves what analysis concluded.
                     epoch = _lease_epoch(self._observation_lease)
@@ -903,8 +921,11 @@ def _make_handler(remote, log: SessionLog, observer=None, journal=None,
                         # socket is opened, so not one byte of this request can
                         # reach upstream. The finally block below records the
                         # terminal outcome, exactly as on every other path.
-                        delivery = ("blocked", "http_gate_blocked", 200)
-                        reply = self._send_block(self._c2s_observation)
+                        delivery_reason = journal.strict_reason(self._c2s_observation)
+                        code = ("http_gate_strict_blocked" if delivery_reason else
+                                "http_gate_blocked")
+                        delivery = ("blocked", code, 200)
+                        reply = self._send_block(self._c2s_observation, delivery_reason)
                         # The log records what each side saw: the client got
                         # this frame, the server never sent it. Marked
                         # `injected`, as the stdio gate marks its own.
@@ -1065,7 +1086,8 @@ def _make_handler(remote, log: SessionLog, observer=None, journal=None,
                             if delivery[0] == "sent" and not completed:
                                 delivery = ("failed", "body_transfer_failed", delivery[2])
                             _journal_call(journal, "record_delivery", intent,
-                                          delivery[0], code=delivery[1], status=delivery[2])
+                                          delivery[0], code=delivery[1],
+                                          status=delivery[2], reason=delivery_reason)
 
         def do_POST(self):
             self._relay("POST")
@@ -1134,8 +1156,10 @@ def run_http_tap(remote_url: str, log_dir: Path, bind: str = "127.0.0.1",
             from glassport.decision_journal import MODE_GATE
             gating = getattr(journal, "mode", None) == MODE_GATE
             print(f"[glassport] decision journal: {journal.dir} "
-                  + ("(GATE: proved out-of-surface tools/call is blocked; "
-                     "everything else forwards)" if gating else
+                  + (("(GATE strict: missing evidence and proved exclusions "
+                      "are blocked)" if getattr(journal, "strict", False) else
+                      "(GATE: proved out-of-surface tools/call is blocked; "
+                      "everything else forwards)") if gating else
                      "(observation only; nothing is blocked)"),
                   file=sys.stderr)
     if ready is not None:

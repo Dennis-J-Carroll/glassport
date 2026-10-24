@@ -95,6 +95,19 @@ class TestHttpContract(GateCase):
         _, body = self.call("ghost")
         self.assert_blocked(body, before)
 
+    def test_http_gate_strict(self):
+        self.proxy(strict=True)
+        self.handshake(declare=False)
+        before = self.upstream_calls()
+        _, body = self.call("search")
+        frame = json.loads(body)
+        self.assertEqual(frame["error"]["data"], {
+            "glassport": "http_gate_strict_blocked",
+            "reason": "call_before_declaration"})
+        self.quiesce()
+        self.assertEqual(self.upstream_calls(), before,
+                         "strict contract call reached upstream")
+
     def test_http_observe(self):
         self.proxy(mode=dj.MODE_OBSERVE)
         self.handshake()
@@ -124,6 +137,7 @@ class TestContractRowGuard(unittest.TestCase):
         expected = {
             "stdio-gate": TestStdioContract.test_stdio_gate,
             "http-gate": TestHttpContract.test_http_gate,
+            "http-gate-strict": TestHttpContract.test_http_gate_strict,
             "stdio-wrap": TestStdioContract.test_stdio_wrap,
             "http-wrap": TestHttpContract.test_http_wrap,
             "observe": TestHttpContract.test_http_observe,

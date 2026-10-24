@@ -7,6 +7,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versions follow 
 ## [Unreleased]
 
 ### Added
+- add opt-in strict HTTP evidence-gap blocking
 - accept --port for http wrap and gate (#101)
 
 ### Fixed

@@ -106,7 +106,7 @@ class ScopeCase(unittest.TestCase):
         StatelessUpstream.listen_release = threading.Event()
 
     def proxy(self, *, scope_headers=(), public_surface=False, mode=dj.MODE_GATE,
-              session_limits=None, limits=None):
+              session_limits=None, limits=None, strict=False):
         srv = ThreadingHTTPServer(('127.0.0.1', 0), StatelessUpstream)
         threading.Thread(target=srv.serve_forever, daemon=True).start()
         self.addCleanup(srv.server_close)
@@ -114,7 +114,8 @@ class ScopeCase(unittest.TestCase):
         self.observer = HTTPObserver(self.root / 'wire', scope_headers=scope_headers,
                                      public_surface=public_surface,
                                      session_limits=session_limits, limits=limits)
-        journal = dj.DecisionJournal(self.root / 'decisions', self.observer, mode=mode)
+        journal = dj.DecisionJournal(self.root / 'decisions', self.observer,
+                                     mode=mode, strict=strict)
         ready, box = threading.Event(), []
         threading.Thread(target=run_http_tap,
                          args=(f'http://127.0.0.1:{srv.server_address[1]}/mcp', self.root / 'wire'),
@@ -173,6 +174,19 @@ class ScopeCase(unittest.TestCase):
 
 
 class TestStatelessEnforcement(ScopeCase):
+    def test_strict_anonymous_scope_blocks_until_public_surface_is_proven(self):
+        self.proxy(strict=True)
+        self.lists(1, auth=None)
+        before = len(StatelessUpstream.calls)
+        status, body = self.send('tools/call', 2, name='search', auth=None)
+        self.settle()
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)['error']['data'], {
+            'glassport': 'http_gate_strict_blocked',
+            'reason': 'http_unproven_scope'})
+        self.assertEqual(len(StatelessUpstream.calls), before,
+                         'anonymous strict call reached upstream')
+
     def test_a_listed_scope_blocks_undeclared_calls_across_posts(self):
         self.proxy()
         self.lists(1)

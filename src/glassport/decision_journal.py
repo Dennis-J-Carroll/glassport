@@ -47,12 +47,12 @@ import re
 import threading
 
 from glassport import detectors, policy
-from glassport.interaction_trace import AnnotationKind
+from glassport.interaction_trace import AnnotationKind, EventKind
 
 # Bumped by hand whenever the record shape or the decision semantics change.
 # Replay refuses to claim equivalence across a change in any of the three.
 JOURNAL_SCHEMA = "glassport.decision-journal/1"
-POLICY_VERSION = "glassport.policy/1"
+POLICY_VERSION = "glassport.policy/2"  # opt-in strict blocks missing evidence
 # /2: the fold changed. A client request the gate refuses is folded for
 # analysis but never becomes a pending correlation (its wire entry says
 # `admitted: false`), and the reply the gate injects for it (`gate:
@@ -86,7 +86,8 @@ DELIVERY_OUTCOMES = frozenset({
 DELIVERY_CODES = frozenset({
     "not_begun", "framing_rejected", "connect_failed", "send_indeterminate",
     "response_indeterminate", "upstream_response", "body_transfer_failed",
-    "handler_aborted", "http_gate_blocked", "invalid_mcp_request", "unspecified"})
+    "handler_aborted", "http_gate_blocked", "http_gate_strict_blocked",
+    "invalid_mcp_request", "unspecified"})
 
 # A candidate BLOCK computed alongside any of these is never enforced: each one
 # says the analysis pass that produced it was itself incomplete, so the
@@ -99,6 +100,11 @@ NON_ENFORCEABLE = frozenset({
     "declaration_unavailable",        # no complete declaration to check against
     "http_observation_unavailable",   # epoch evidence lost/stale/uninterpreted
 })
+
+# A call made before any tools/list request also lacks declaration evidence.
+# Default mode keeps its existing forward; strict mode refuses it. ContextDetector
+# emits this instead of declaration_unavailable for that specific case.
+_STRICT_EVIDENCE_GAPS = NON_ENFORCEABLE | {"call_before_declaration"}
 
 # The one analysis limit that says nothing about the surface: this request's
 # own id is ambiguous (reused while another request with it is in flight), so
@@ -319,8 +325,9 @@ class DecisionJournal:
     `observer` supplies the epoch's frozen PII pattern snapshot and the limits
     in force; only `.pattern_snapshot(epoch)`, `.limits` and `.session_limits`
     are used, so a test or an alternative transport can pass any object with
-    that surface. Every public method is fail-open: an unwritable directory, a
-    mid-write error or an exhausted bound yields a falsy return, never a raise.
+    that surface. Recording methods swallow I/O failure; enforcement uses a
+    pure verdict computed before recording, so failed journal writes cannot
+    change an already-decided strict block.
 
     `mode` selects whether a candidate BLOCK is merely recorded (`observe`, the
     default) or actually enforced by the transport (`gate`). This module still
@@ -329,7 +336,7 @@ class DecisionJournal:
     """
 
     def __init__(self, journal_dir, observer, *, limits: JournalLimits | None = None,
-                 mode: str = MODE_OBSERVE):
+                 mode: str = MODE_OBSERVE, strict: bool = False):
         self.dir = Path(journal_dir)
         self.observer = observer
         self.limits = limits or JournalLimits()
@@ -338,7 +345,10 @@ class DecisionJournal:
         # fallback that could resolve either way.
         if mode not in MODES:
             raise ValueError(f"unknown journal mode {mode!r}")
+        if type(strict) is not bool or (strict and mode != MODE_GATE):
+            raise ValueError("strict requires gate mode and a boolean value")
         self.mode = mode
+        self.strict = strict
         self._lock = threading.Lock()
         self._epochs: OrderedDict[str, _EpochJournal] = OrderedDict()
         # One monotonic ordinal across every epoch of this journal: an evicted
@@ -445,7 +455,7 @@ class DecisionJournal:
         return {
             "kind": "profile", "schema": JOURNAL_SCHEMA, "epoch": epoch,
             "n": next(self._counter), "ts": _now_iso(), "mode": self.mode,
-            "policy_version": POLICY_VERSION,
+            "policy_version": POLICY_VERSION, "strict": self.strict,
             "detector_engine": DETECTOR_ENGINE_VERSION,
             "pattern_digest": profile.digest,
             "pattern_status": (profile.status if exact else PROFILE_INCOMPLETE),
@@ -459,24 +469,39 @@ class DecisionJournal:
 
     # -- enforcement verdict -----------------------------------------------
 
-    def evaluate(self, observation=None) -> bool:
+    def strict_reason(self, observation=None) -> str | None:
+        """Fixed evidence-gap code for a strict block, independent of policy."""
+        if self.mode != MODE_GATE or not self.strict:
+            return None
+        diagnostic = getattr(observation, "diagnostic", None)
+        if diagnostic:
+            return _safe_token(diagnostic)
+        for ann in getattr(observation, "annotations", ()) or ():
+            subcategory = getattr(ann, "subcategory", None)
+            if isinstance(subcategory, str) and subcategory in _STRICT_EVIDENCE_GAPS:
+                return _safe_token(subcategory)
+        return None
+
+    def evaluate(self, observation=None, *, request_frame=None) -> bool:
         """Should the transport actually refuse to forward this frame?
 
-        True requires ALL of: gate mode; a frame that folded to a real event;
-        no diagnostic on the observation (a lost, stale, incomplete, truncated
-        or unpersisted observation is uncertain evidence); no annotation from
-        :data:`NON_ENFORCEABLE` (a faulted or bounded analysis pass); and a
-        policy verdict of BLOCK with the blocking rule armed — which itself
-        requires a severity-3 fabricated call against an *observed* surface.
+        Default: a foldable event, no diagnostic or vetoing annotation, and a
+        proved fabricated call. Strict: a tools/call with any evidence gap is
+        refused before applying the usual one-rule policy. The admission-
+        parsed request frame identifies a call even if observation failed.
 
         Pure: reads nothing from disk, writes nothing, and never raises. Every
-        error and every uncertainty returns False, which means "forward" — the
-        one default that can only fail in the safe direction.
+        unexpected error returns False; transport owns the final refusal.
         """
         if self.mode != MODE_GATE:
             return False
         try:
             event = getattr(observation, "event", None)
+            if self.strict and self.strict_reason(observation) is not None:
+                if request_frame is not None:
+                    return (isinstance(request_frame, dict)
+                            and request_frame.get("method") == "tools/call")
+                return getattr(event, "kind", None) == EventKind.TOOL_CALL
             event_id = getattr(event, "id", None) if event is not None else None
             if not isinstance(event_id, str) or not event_id:
                 return False
@@ -506,7 +531,8 @@ class DecisionJournal:
         acts on a block MUST compute it with :meth:`evaluate` *before* calling
         this method and pass it in, so that no failure inside recording can
         change what the transport does. None (the default) recomputes it here,
-        for callers that only record.
+        for callers that only record. A failed record cannot revoke a strict
+        verdict already supplied by the transport.
         """
         if self._closed or not isinstance(epoch, str) or not epoch:
             return None
@@ -589,7 +615,8 @@ class DecisionJournal:
             written = self._write(entry, record)
         return Intent(epoch, record["n"], event_seq, action, written, enforce)
 
-    def record_delivery(self, intent, outcome, *, code=None, status=None) -> bool:
+    def record_delivery(self, intent, outcome, *, code=None, status=None,
+                        reason=None) -> bool:
         """Record the terminal delivery outcome for one recorded intent.
 
         A "sent" outcome means the complete request left the local socket and
@@ -618,6 +645,8 @@ class DecisionJournal:
                         and outcome == OUTCOME_BLOCKED,
             "candidate_action": intent.action,
         }
+        if code == "http_gate_strict_blocked":
+            record["reason"] = _safe_token(reason, default="evidence_unavailable")
         with self._lock:
             if self._closed:
                 return False
