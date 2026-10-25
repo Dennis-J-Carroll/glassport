@@ -38,6 +38,15 @@ class TestPublicGate(unittest.TestCase):
         severity sha-256 sha256 source stable_id started_at strict text tool
         tool_sha256 trailer_log_sha256 transport ts type uri version versions wire
         wire_seq write_failures
+        authorization candidate_action candidate_block delivery_n enforce enforced
+        event_seq faults_total final_record_sha256 findings_digest findings_total
+        host_sha256 idle_ttl intent intent_n journal_limits kind max_epochs
+        max_faults max_findings max_frame_bytes max_identifier_chars
+        max_name_chars max_pending max_records max_sessions max_sse_ids
+        max_state_bytes max_tools n outcome path_sha256 pattern_digest
+        pattern_snapshot_exact pattern_status persisted port prev_sha256 records
+        registry_limits remote scheme session_limits status wire_b64_sha256
+        wire_entry_sha256
     """.split())
 
     @classmethod
@@ -60,10 +69,13 @@ class TestPublicGate(unittest.TestCase):
                      "public_redaction_not_replay_equivalent",
                      "public_raw_bytes_removed", "public_peer_text_removed",
                      "public_gate_tool_hashed",
+                     "public_remote_host_hashed", "allow", "not_evaluated",
+                     "reproducible", "sent", "upstream_response", "warn",
                  })
         return bool(
             value in fixed or
             re.fullmatch(r"[0-9a-f]{64}|[0-9a-f]{24}(?:-[0-9a-f]{8}(?:-[0-9]+)?)?", value) or
+            re.fullmatch(r"epoch-\d{4}", value) or
             re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?\+00:00", value) or
             re.fullmatch(r"(?:evidence/(?:stdio|epoch-\d{4})\.(?:wire|journal)\.jsonl|"
                          r"index/findings\.sarif\.json|manifest\.json|manifest\.sig)", value)
@@ -73,23 +85,7 @@ class TestPublicGate(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             out, _, _ = self._capture(Path(tmp), "unknown_tool")
             self.assertFalse(self._public_string_allowed("c2stQUFBQUFB"))
-
-            def walk(value, path):
-                if isinstance(value, dict):
-                    for key, child in value.items():
-                        self.assertTrue(self._public_string_allowed(key), f"{path}: key {key!r}")
-                        walk(child, f"{path}/{key}")
-                elif isinstance(value, list):
-                    for index, child in enumerate(value):
-                        walk(child, f"{path}/{index}")
-                elif isinstance(value, str):
-                    self.assertTrue(self._public_string_allowed(value),
-                                    f"{path}: value {value!r}")
-
-            for path in (out / "public").rglob("*"):
-                if path.is_file() and path.suffix in (".json", ".jsonl"):
-                    for line in path.read_text().splitlines():
-                        walk(json.loads(line), str(path))
+            assert_public_strings(self, out / "public")
 
     def test_gate_projection_keeps_only_fixed_codes_and_tool_digest(self):
         marker = {"action": "blocked", "reason": "no_surface_timeout",
@@ -109,6 +105,17 @@ class TestPublicGate(unittest.TestCase):
         self.assertEqual(projected["reason"], "redacted")
         self.assertNotIn("also_skipped", projected)
         self.assertIsNone(bundle._public_gate({})["tool_sha256"])
+
+    def test_remote_projection_hashes_operator_host(self):
+        projected = bundle._public_remote({
+            "scheme": "https", "host": "private.example", "port": 8443,
+            "path_sha256": "a" * 64, "uri": "peer-controlled"})
+        self.assertEqual(projected, {
+            "scheme": "https",
+            "host_sha256": hashlib.sha256(b"private.example").hexdigest(),
+            "path_sha256": "a" * 64})
+        self.assertEqual(bundle._public_remote({"scheme": "peer", "host": None}), {
+            "scheme": "redacted", "host_sha256": None, "path_sha256": None})
 
     def _capture(self, root: Path, tool: str):
         gate = tap.Gate()
@@ -157,6 +164,31 @@ class TestPublicGate(unittest.TestCase):
                     data = path.read_bytes()
                     for form, value in encoded.items():
                         self.assertNotIn(value, data, f"{path}: {form}")
+
+
+def assert_public_strings(test: unittest.TestCase, public: Path):
+    """Every public JSON key and string value must be fixed or structured."""
+    unknown = {}
+
+    def walk(value, path):
+        if isinstance(value, dict):
+            for key, child in value.items():
+                if not TestPublicGate._public_string_allowed(key):
+                    unknown.setdefault(key, f"{path}: key")
+                walk(child, f"{path}/{key}")
+        elif isinstance(value, list):
+            for index, child in enumerate(value):
+                walk(child, f"{path}/{index}")
+        elif isinstance(value, str):
+            if not TestPublicGate._public_string_allowed(value):
+                unknown.setdefault(value, f"{path}: value")
+
+    for path in public.rglob("*"):
+        if path.is_file() and path.suffix in (".json", ".jsonl"):
+            for line in path.read_text().splitlines():
+                walk(json.loads(line), str(path))
+    if unknown:
+        test.fail(f"unexpected public strings: {sorted(unknown)}")
 
 
 if __name__ == "__main__":

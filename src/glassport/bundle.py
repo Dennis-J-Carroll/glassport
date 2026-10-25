@@ -217,6 +217,24 @@ def _public_gate(gate: dict) -> dict:
     return out
 
 
+def _public_remote(remote: dict) -> dict:
+    """Expose only fixed transport scheme and digests from upstream target."""
+    host = remote.get("host")
+    try:
+        host_hash = _digest(host.encode("utf-8")) if isinstance(host, str) else None
+    except UnicodeEncodeError:
+        host_hash = None
+    path_hash = remote.get("path_sha256")
+    return {
+        "scheme": remote.get("scheme") if remote.get("scheme") in ("http", "https")
+        else "redacted",
+        "host_sha256": host_hash,
+        "path_sha256": path_hash if isinstance(path_hash, str) and
+        len(path_hash) == 64 and all(char in "0123456789abcdef" for char in path_hash)
+        else None,
+    }
+
+
 def _write_private(path: Path, data: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     with path.open("xb") as output:
@@ -229,6 +247,11 @@ def _public_tier(root: Path, manifest: dict, key=None) -> None:
     public = root / "public"
     public.mkdir(mode=0o700)
     redacted = _redact_value(deepcopy(manifest))
+    original_header = manifest.get("profile", {}).get("header") or {}
+    public_header = redacted.get("profile", {}).get("header") or {}
+    remote_hashed = isinstance(original_header.get("remote"), dict)
+    if remote_hashed:
+        public_header["remote"] = _public_remote(original_header["remote"])
     raw_hashes: dict[str, str] = {}
     raw_bytes_removed = 0
     for index, epoch in enumerate(redacted["evidence"]["epochs"], 1):
@@ -246,6 +269,9 @@ def _public_tier(root: Path, manifest: dict, key=None) -> None:
                 record = _redact_value(original_record)
                 records[position] = record
                 if kind == "wire":
+                    if (original_record.get("type") == "glassport.header" and
+                            isinstance(original_record.get("remote"), dict)):
+                        record["remote"] = _public_remote(original_record["remote"])
                     if isinstance(original_record.get("gate"), dict):
                         record["gate"] = _public_gate(original_record["gate"])
                     encoded = original_record.get("wire_b64")
@@ -342,6 +368,8 @@ def _public_tier(root: Path, manifest: dict, key=None) -> None:
                                 "entries": raw_bytes_removed})
     redacted["limits"].append({"code": "public_peer_text_removed"})
     redacted["limits"].append({"code": "public_gate_tool_hashed"})
+    if remote_hashed:
+        redacted["limits"].append({"code": "public_remote_host_hashed"})
     public_bytes = canonical_bytes(redacted)
     _write_private(public / "manifest.json", public_bytes)
     if key:
