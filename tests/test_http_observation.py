@@ -177,7 +177,8 @@ class TestObservedHTTP(unittest.TestCase):
             live = [o for o in self.seen if o.epoch == path.stem]
             self.assertEqual(semantic_findings([o.event for o in live if o.event],
                 [a for o in live for a in o.annotations]), semantic_findings(trace.events, replay(trace)))
-            rows = [json.loads(line) for line in path.read_text().splitlines()]
+            rows = [entry for line in path.read_text().splitlines()
+                    if (entry := json.loads(line)).get('seq') is not None]
             self.assertTrue(all('wire_b64' in row for row in rows))
             self.assertTrue(all(base64.b64decode(row['wire_b64']) for row in rows))
 

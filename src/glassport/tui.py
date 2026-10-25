@@ -1,8 +1,8 @@
 """
 glassport tui — live curses inspector for Glassport session logs.
 
-Attach to a session JSONL while the tap writes it (SessionLog is
-line-buffered, so tailing the file is real-time observation) or replay
+Attach to a session JSONL while the tap writes it (SessionLog appends each
+complete line directly, so tailing the file is real-time observation) or replay
 a finished one — same code path either way. Stateless re-ingest: each
 time the file grows, the whole log is re-lifted through
 from_mcp_session_file() and re-annotated. The log file is the single
@@ -601,7 +601,20 @@ def list_sessions(log_dir: Path, now: float | None = None) -> list[SessionEntry]
         try:
             st = p.stat()
             with open(p, "rb") as fh:
-                frames = sum(1 for _ in fh)
+                frames = 0
+                for line in fh:
+                    # Header/trailer are tap metadata, not wire frames.
+                    # Parse only candidate metadata lines to keep the picker
+                    # cheap for large captures.
+                    if b'"glassport.' in line:
+                        try:
+                            entry = json.loads(line)
+                        except (ValueError, UnicodeDecodeError):
+                            entry = None
+                        if isinstance(entry, dict) and str(
+                                entry.get("type", "")).startswith("glassport."):
+                            continue
+                    frames += 1
         except OSError:
             continue
         entries.append(SessionEntry(

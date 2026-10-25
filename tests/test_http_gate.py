@@ -600,7 +600,8 @@ class TestConservativeForwarding(GateCase):
         # way `TestGateModeReplay` reads the wire log, rather than trusting
         # only the derived annotation.
         wire_lines = (self.root / 'wire' / f"{intent['epoch']}.jsonl").read_text().splitlines()
-        wire_entry = next(json.loads(l) for l in wire_lines if json.loads(l)['seq'] == intent['wire_seq'])
+        wire_entry = next(json.loads(l) for l in wire_lines
+                          if json.loads(l).get('seq') == intent['wire_seq'])
         self.assertEqual(wire_entry['dir'], 'c2s')
         self.assertIsNone(wire_entry['frame'], wire_entry)
         self.assertTrue(wire_entry['http_observation'].get('uninterpreted'))

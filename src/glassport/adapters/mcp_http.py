@@ -1139,8 +1139,13 @@ def run_http_tap(remote_url: str, log_dir: Path, bind: str = "127.0.0.1",
     # An explicitly observed proxy has one capture per opaque epoch. Never
     # create a second multiplexed capture that a single-session reader could
     # accidentally interpret as a combined declaration surface.
-    log = (open_session_log(log_path) or _NullLog()) if observer is None else _NullLog()
+    log = (open_session_log(log_path, transport="http", mode="wrap",
+                            remote_url=remote_url) or _NullLog()) if observer is None else _NullLog()
     journal = journal if observer is not None else None
+    if observer is not None:
+        observer.capture_mode = journal.mode if journal is not None else "observe"
+        observer.capture_strict = bool(journal is not None and journal.strict)
+        observer.capture_remote_url = remote_url
     httpd = ThreadingHTTPServer((bind, port),
                                 _make_handler(remote, log, observer, journal,
                                               endpoint_era))
@@ -1170,6 +1175,8 @@ def run_http_tap(remote_url: str, log_dir: Path, bind: str = "127.0.0.1",
         try:
             httpd.server_close()
         finally:
+            if observer is None and isinstance(log, SessionLog):
+                log.write_metrics()
             log.close()
             if observer is not None:
                 observer.close()
