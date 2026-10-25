@@ -179,7 +179,7 @@ class TestRefusedRequestIsNotCorrelated(CorrelationCase):
         self.assertNotIn('gate', refused[0], 'the decision record is the journal')
         injected = [e for e in entries if isinstance(e.get('gate'), dict)]
         self.assertEqual([e['gate'] for e in injected], [
-            {'action': 'injected', 'tool': 'nope', 'evidence_level': 'forwarded'}])
+            {'action': 'injected', 'tool': 'nope', 'evidence_level': 'injected_locally'}])
         self.assertEqual(injected[0]['dir'], 's2c')
         self.assertEqual(injected[0]['frame']['id'], 7)
         self.assertEqual(injected[0]['frame']['error']['data']['glassport'], 'http_gate_blocked')

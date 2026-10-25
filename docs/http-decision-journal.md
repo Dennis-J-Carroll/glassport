@@ -20,6 +20,7 @@ HTML finding badge. It describes observed evidence, not caller permission.
 | `blocked_evidence_gap` | strict gate refused because a required check could not finish |
 | `blocked_admission` | malformed, uninspectable, or unsupported request refused at admission |
 | `forwarded` | transport sent a frame; remote execution remains unproved |
+| `injected_locally` | glassport synthesized a client-facing frame; upstream never sent it |
 | `externally_confirmed` | reserved for independent confirmation; never emitted by glassport |
 
 Intent is written before delivery, so its `blocked_*` label describes the

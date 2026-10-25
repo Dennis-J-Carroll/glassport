@@ -1,7 +1,10 @@
 """Closed evidence-level claims across journal, gate marker, and readers."""
 from __future__ import annotations
 
+import ast
+
 import json
+import inspect
 import tempfile
 import unittest
 from pathlib import Path
@@ -13,6 +16,35 @@ from glassport.interaction_trace import AnnotationKind, Event
 
 
 class TestEvidenceVocabulary(unittest.TestCase):
+    def test_stdio_gate_reason_classifier_covers_source(self):
+        tree = ast.parse(inspect.getsource(tap.Gate))
+        emitted = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Dict):
+                for key, value in zip(node.keys, node.values):
+                    if (isinstance(key, ast.Constant) and key.value == "reason"
+                            and isinstance(value, ast.Constant)
+                            and isinstance(value.value, str)):
+                        emitted.add(value.value)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) \
+                    and node.func.id == "_note_skip":
+                emitted.update(arg.value for arg in node.args
+                               if isinstance(arg, ast.Constant)
+                               and isinstance(arg.value, str))
+        classified = {
+            **{r: evidence.BLOCKED_ADMISSION for r in evidence._ADMISSION_REASONS},
+            **{r: evidence.BLOCKED_EVIDENCE_GAP for r in evidence._GAP_REASONS},
+            **{r: evidence.BLOCKED_POLICY for r in (
+                "attestation_failed", "params_too_deep", "params_too_large",
+                "retry_loop_exceeded", "taint_detected", "schema_violation",
+                "pii_exfiltration", "gate_blocked")},
+        }
+        self.assertEqual(emitted - set(classified), set())
+        for reason in emitted:
+            self.assertEqual(evidence.gate_level({"action": "blocked",
+                                                  "reason": reason}),
+                             classified[reason])
+
     def test_every_gate_path_has_a_closed_level(self):
         cases = [
             ({"action": "blocked", "reason": "uninspectable_frame"},
@@ -21,11 +53,11 @@ class TestEvidenceVocabulary(unittest.TestCase):
              evidence.BLOCKED_EVIDENCE_GAP),
             ({"action": "blocked", "reason": "pii_exfiltration"},
              evidence.BLOCKED_POLICY),
-            ({"action": "injected"}, evidence.FORWARDED),
+            ({"action": "injected"}, evidence.INJECTED_LOCALLY),
             ({"action": "gate_skipped", "reason": "no_surface_timeout"},
              evidence.FORWARDED),
             ({"action": "quarantined"}, evidence.BLOCKED_POLICY),
-            ({"action": "quarantine_replacement"}, evidence.FORWARDED),
+            ({"action": "quarantine_replacement"}, evidence.INJECTED_LOCALLY),
             ({"action": "quarantine_dropped", "reason": "frame_too_deep"},
              evidence.BLOCKED_ADMISSION),
             ({"action": "quarantine_withheld", "reason": "quarantine_scan_error"},

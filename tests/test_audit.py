@@ -135,6 +135,21 @@ class TestPythonAst(unittest.TestCase):
         f = next(f for f in r.findings if f.rule == "net-egress")
         self.assertEqual(f.severity, "low")
 
+    def test_network_import_submodules(self):
+        cases = {
+            "from urllib.parse import urlsplit\n": False,
+            "import urllib.request\n": True,
+            "from urllib import request\n": True,
+            "from http import HTTPStatus\n": False,
+            "from http import client\n": True,
+            "import http.client\n": True,
+            "import http.cookies\n": False,
+        }
+        for source, expected in cases.items():
+            with self.subTest(source=source):
+                self.assertEqual("net-egress" in rule_ids(audit_src(source)),
+                                 expected)
+
     def test_syntax_error_falls_back_to_patterns(self):
         # broken Python still gets the regex pass instead of a crash
         r = audit_src("def broken(:\n    API_KEY = 'sk-" + "a" * 40 + "'\n")
@@ -312,9 +327,14 @@ class TestOutput(unittest.TestCase):
     def test_no_network_imports_in_audit_module(self):
         # the audit is local-only by design; importing a fetch layer
         # would silently break reproducibility
-        src = Path(audit.__file__).read_text(encoding="utf-8")
-        self.assertNotIn("urllib.request", src.split('"""', 2)[-1]
-                         .replace("# ", ""))
+        import ast
+        src = ast.parse(Path(audit.__file__).read_text(encoding="utf-8"))
+        imports = [node for node in ast.walk(src)
+                   if isinstance(node, (ast.Import, ast.ImportFrom))]
+        self.assertFalse(any(
+            any(alias.name == "urllib.request" for alias in node.names)
+            if isinstance(node, ast.Import) else node.module == "urllib.request"
+            for node in imports))
 
 
 class TestProvenanceRedactionInRenderers(unittest.TestCase):
