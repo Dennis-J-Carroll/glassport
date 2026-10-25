@@ -92,7 +92,12 @@ signature without a usable trusted key exits `2` when other checks hold.
 SARIF index, and a public manifest. It removes peer payload fields (`frame`,
 `raw`, `sse_meta`, `http_observation`, `wire_b64`), replaces each `wire_b64`
 with SHA-256 of its decoded bytes, and removes journal text and custom pattern
-lists. Audit JSON is withheld. SARIF messages, source locations, rule text,
+lists. Gate markers keep only fixed `action`, `reason`, and `evidence_level`
+codes; unknown actions and reasons become `redacted`. A tool name becomes
+`tool_sha256` (SHA-256 of its UTF-8 bytes, or null). `also_skipped` remains
+only when every entry is a known reason code. Other gate fields are dropped.
+The public manifest records `public_gate_tool_hashed`. Audit JSON is withheld.
+SARIF messages, source locations, rule text,
 and properties are removed; stable IDs remain. The manifest records
 `public_raw_bytes_removed`, `public_peer_text_removed`, and, when applicable,
 `public_audit_removed`. It records both public artifact hashes and raw artifact

@@ -13,7 +13,7 @@ import os
 from pathlib import Path
 import sys
 
-from glassport import __version__, audit, decision_replay, detectors, sarif
+from glassport import __version__, audit, decision_replay, detectors, evidence, sarif
 from glassport.adapters.mcp_session import from_mcp_session_file
 from glassport.limits import compute_limits
 
@@ -191,6 +191,32 @@ def _redact_value(value):
     return value
 
 
+def _public_gate(gate: dict) -> dict:
+    """Retain tap-owned gate facts, never peer-chosen names or URIs."""
+    action = gate.get("action")
+    reason = gate.get("reason")
+    tool = gate.get("tool")
+    try:
+        tool_hash = _digest(tool.encode("utf-8")) if isinstance(tool, str) else None
+    except UnicodeEncodeError:
+        tool_hash = None
+    out = {
+        "action": action if isinstance(action, str) and
+        action in evidence.GATE_ACTIONS else "redacted",
+        "reason": reason if isinstance(reason, str) and
+        reason in evidence.GATE_REASONS else "redacted",
+        "tool_sha256": tool_hash,
+    }
+    level = gate.get("evidence_level")
+    if isinstance(level, str) and level in evidence.LEVELS:
+        out["evidence_level"] = level
+    also = gate.get("also_skipped")
+    if isinstance(also, list) and all(isinstance(item, str) and
+                                      item in evidence.GATE_REASONS for item in also):
+        out["also_skipped"] = also
+    return out
+
+
 def _write_private(path: Path, data: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     with path.open("xb") as output:
@@ -220,6 +246,8 @@ def _public_tier(root: Path, manifest: dict, key=None) -> None:
                 record = _redact_value(original_record)
                 records[position] = record
                 if kind == "wire":
+                    if isinstance(original_record.get("gate"), dict):
+                        record["gate"] = _public_gate(original_record["gate"])
                     encoded = original_record.get("wire_b64")
                     if isinstance(encoded, str):
                         record["wire_b64_sha256"] = _digest(base64.b64decode(
@@ -313,6 +341,7 @@ def _public_tier(root: Path, manifest: dict, key=None) -> None:
     redacted["limits"].append({"code": "public_raw_bytes_removed",
                                 "entries": raw_bytes_removed})
     redacted["limits"].append({"code": "public_peer_text_removed"})
+    redacted["limits"].append({"code": "public_gate_tool_hashed"})
     public_bytes = canonical_bytes(redacted)
     _write_private(public / "manifest.json", public_bytes)
     if key:
