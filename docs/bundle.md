@@ -45,7 +45,7 @@ future schemas change the `schema` value rather than silently redefining one.
 | `evidence.sarif` | Path and whole-file SHA-256 of `index/findings.sarif.json`. |
 | `profile.header` | Verbatim first `glassport.header` record, including hashed remote URL path. |
 | `profile.journal_profiles` | Epoch-keyed verbatim journal profile records. Includes `authorization.status: not_evaluated`. |
-| `analysis.findings` | `stable_id`-keyed findings with epoch, rule ID, severity, evidence level, and wire sequence. Keys match SARIF `partialFingerprints.stable_id`. |
+| `analysis.findings` | `stable_id`-keyed findings with `source: wire` and a string epoch, or `source: audit` and `epoch: null`; each has rule ID, severity, evidence level, and wire sequence. Keys match SARIF `partialFingerprints.stable_id`. Public findings replace rule IDs with `rule_id_sha256`. |
 | `delivery[]` | One row per recorded delivery: epoch, intent and delivery ordinals, wire sequence and exact wire-line digest from the intent, outcome, code, evidence level. |
 | `limits[]` | Named limitations from `compute_limits`. A signed raw bundle omits `no_signature`. |
 
@@ -54,9 +54,12 @@ and **delivery evidence present** separately, then integrity, signature status,
 and the manifest's limits verbatim. It exits 0 only if every epoch replays
 `equivalent`, every intent has one delivery with a matching wire-line digest,
 the pre-trailer log digest matches, and every artifact hash and other integrity
-check passes. For stdio, replay and delivery are `unsupported`/`incomplete`
-because no journal exists; the limitations say so. A trailer missing after a
-crash is reported as `trailer_missing`.
+check passes. Exit `0` means all checkable claims hold; exit `1` means a
+contradiction (integrity failure, divergent replay, orphaned or duplicate/missing
+delivery, or manifest mismatch); exit `2` means no contradiction but an
+unprovable claim. Stdio without a journal exits `2` with
+`unsupported`/`incomplete`. A trailer missing after a crash is reported as
+`trailer_missing`.
 
 Integrity checks also compare journal record count and last-line hash, pair
 the epoch inside wire and journal records, compare the manifest's delivery
@@ -71,23 +74,35 @@ for resistance to that rewrite.
 glassport bundle --log-dir /private/wire --journal-dir /private/decisions \
   -o /private/bundle --sign /private/ed25519.key --redact
 glassport bundle verify /private/bundle --trusted-key /private/ed25519.pub
+glassport bundle verify --public /private/bundle/public --trusted-key /private/ed25519.pub
 ```
 
 `--sign` accepts an existing Ed25519 private key in raw 32-byte or PEM form;
 glassport never creates a key. Signing needs the optional
 `glassport[attestation]` extra. If that extra is absent, `--sign` fails
 explicitly. `manifest.sig` contains a detached base64 Ed25519 signature over
-the exact JCS manifest bytes. `--trusted-key` accepts a raw 32-byte or PEM
+the exact JCS raw manifest bytes. With `--redact`, `--sign` also writes
+`public/manifest.sig` over the separate public JCS manifest. `--trusted-key` accepts a raw 32-byte or PEM
 public key. Status is `valid (fingerprint …)`, `invalid`,
 `present, not verified (cryptography not installed)`,
-`present, no trusted key given`, or `absent`. An unverified signature does not
-fail an otherwise valid raw-bundle verification.
+`present, no trusted key given`, `trusted_key_unreadable`, or `absent`. A present
+signature without a usable trusted key exits `2` when other checks hold.
 
-`--redact` adds `OUT/public/`: redacted wire, journal, audit, SARIF, and a
-public manifest. It uses `detectors.redact_secrets_strict` on string values,
-replaces epoch-derived file names with ordinal names, and records both public
-artifact hashes and raw artifact hashes under `raw_hashes`. The public manifest
-adds `raw_tier: withheld` and `public_redaction_not_replay_equivalent` limit.
+`--redact` adds `OUT/public/`: projected wire and journal records, a reduced
+SARIF index, and a public manifest. It removes peer payload fields (`frame`,
+`raw`, `sse_meta`, `http_observation`, `wire_b64`), replaces each `wire_b64`
+with SHA-256 of its decoded bytes, and removes journal text and custom pattern
+lists. Audit JSON is withheld. SARIF messages, source locations, rule text,
+and properties are removed; stable IDs remain. The manifest records
+`public_raw_bytes_removed`, `public_peer_text_removed`, and, when applicable,
+`public_audit_removed`. It records both public artifact hashes and raw artifact
+hashes under `raw_hashes`; those raw hashes cannot be checked from public files.
+Without signing it keeps `no_signature`. With signing it records
+`signed: public_manifest` and omits `no_signature`.
+
+`bundle verify --public OUT/public` checks public file hashes and that public
+manifest's signature. It reports analysis `not_applicable_redacted` and delivery
+`records_present_digests_withheld`, so a clean public verify exits `2`.
 Redaction changes wire bytes and journal chains, so the **raw tier** is what
 replay verifies. Distribute **only `public/`**; keep `OUT/evidence/`,
 `OUT/index/`, raw manifest, and any signing key private. Inspect the public

@@ -1788,7 +1788,8 @@ usage: glassport <command> [options]   (`glassport help <command>`, `glassport -
   bundle:          glassport bundle (--wire PATH... | --log-dir DIR)
                         [--journal-dir DIR] [--audit PATH] -o OUT
                         [--sign KEYFILE] [--redact]
-                   glassport bundle verify OUT [--trusted-key PUB] [--json]
+                   glassport bundle verify [--public] OUT [--trusted-key PUB] [--json]
+                   (exit 0: proven; 1: contradicted; 2: evidence unavailable)
   summarize:       glassport summarize [--json|--sarif] <session.jsonl>
   detect:          glassport detect [--sarif] <session.jsonl>
                    (run all behavioral detectors; exit 1 if findings,

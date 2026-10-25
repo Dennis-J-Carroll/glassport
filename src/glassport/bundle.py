@@ -159,7 +159,10 @@ def _signature_status(root: Path, manifest: dict, trusted_key: Path | None) -> s
         from cryptography.exceptions import InvalidSignature
     except ImportError:
         return "present, not verified (cryptography not installed)"
-    data = trusted_key.read_bytes()
+    try:
+        data = trusted_key.read_bytes()
+    except OSError:
+        return "trusted_key_unreadable"
     try:
         try:
             key = serialization.load_pem_public_key(data)
@@ -196,11 +199,12 @@ def _write_private(path: Path, data: bytes) -> None:
         path.chmod(0o600)
 
 
-def _public_tier(root: Path, manifest: dict) -> None:
+def _public_tier(root: Path, manifest: dict, key=None) -> None:
     public = root / "public"
     public.mkdir(mode=0o700)
     redacted = _redact_value(deepcopy(manifest))
     raw_hashes: dict[str, str] = {}
+    raw_bytes_removed = 0
     for index, epoch in enumerate(redacted["evidence"]["epochs"], 1):
         original = manifest["evidence"]["epochs"][index - 1]
         alias = "stdio" if original["epoch"] == "stdio" else f"epoch-{index:04d}"
@@ -215,11 +219,26 @@ def _public_tier(root: Path, manifest: dict) -> None:
             for position, original_record in enumerate(records):
                 record = _redact_value(original_record)
                 records[position] = record
+                if kind == "wire":
+                    encoded = original_record.get("wire_b64")
+                    if isinstance(encoded, str):
+                        record["wire_b64_sha256"] = _digest(base64.b64decode(
+                            encoded, validate=True))
+                        raw_bytes_removed += 1
+                    record.pop("wire_b64", None)
+                    # Peer payloads can contain nested encodings that a text
+                    # regex cannot inspect. The raw tier retains them.
+                    for field in ("frame", "raw", "sse_meta", "http_observation"):
+                        record.pop(field, None)
+                else:
+                    # Text and custom pattern definitions can contain encoded
+                    # peer or user values. Preserve only structured decisions.
+                    for field in ("findings", "patterns", "unsupported_patterns",
+                                  "diagnostic", "reason", "wire_digest_reason",
+                                  "faults"):
+                        record.pop(field, None)
                 if kind == "journal":
                     record["epoch"] = alias
-                obs = record.get("http_observation")
-                if isinstance(obs, dict) and "epoch" in obs:
-                    obs["epoch"] = alias
             rel = f"evidence/{alias}.{kind}.jsonl"
             data = b"".join(json.dumps(record, ensure_ascii=False,
                                        separators=(",", ":")).encode("utf-8") + b"\n"
@@ -242,10 +261,13 @@ def _public_tier(root: Path, manifest: dict) -> None:
         delivery["wire_entry_sha256"] = None
     redacted["profile"]["journal_profiles"] = {
         ("stdio" if item["epoch"] == "stdio" else f"epoch-{index:04d}"):
-        _redact_value(manifest["profile"]["journal_profiles"].get(item["epoch"]))
+        {key: value for key, value in
+         _redact_value(manifest["profile"]["journal_profiles"].get(item["epoch"])).items()
+         if key not in ("patterns", "unsupported_patterns")}
         for index, item in enumerate(manifest["evidence"]["epochs"], 1)
         if item["epoch"] in manifest["profile"]["journal_profiles"]}
     for finding in redacted["analysis"]["findings"].values():
+        finding["rule_id_sha256"] = _digest(finding.pop("rule_id").encode("utf-8"))
         for index, item in enumerate(manifest["evidence"]["epochs"], 1):
             if finding.get("epoch") == item["epoch"]:
                 finding["epoch"] = "stdio" if item["epoch"] == "stdio" else f"epoch-{index:04d}"
@@ -254,15 +276,16 @@ def _public_tier(root: Path, manifest: dict) -> None:
     raw_hashes[sarif_path] = manifest["evidence"]["sarif"]["sha256"]
     public_sarif = _redact_value(json.loads(_safe_member(root, sarif_path).read_text()))
     for run in public_sarif.get("runs", []):
+        run.get("tool", {}).get("driver", {})["rules"] = []
         for result in run.get("results", []):
-            for location in result.get("locations", []):
-                physical = location.get("physicalLocation", {})
-                uri = physical.get("artifactLocation", {}).get("uri")
-                for index, item in enumerate(manifest["evidence"]["epochs"], 1):
-                    if uri == item["wire"]["path"]:
-                        physical["artifactLocation"]["uri"] = (
-                            f"evidence/epoch-{index:04d}.wire.jsonl" if item["epoch"] != "stdio"
-                            else "evidence/stdio.wire.jsonl")
+            # Messages and source paths can carry encoded peer text. Stable IDs
+            # still join this index to the public manifest's findings.
+            result["ruleId"] = "glassport/public-redacted"
+            result["message"] = {"text": "Redacted in public bundle"}
+            result.pop("locations", None)
+            result["partialFingerprints"] = {
+                "stable_id": result["partialFingerprints"]["stable_id"]}
+            result.pop("properties", None)
     for index, item in enumerate(manifest["evidence"]["epochs"], 1):
         alias = "stdio" if item["epoch"] == "stdio" else f"epoch-{index:04d}"
         profile = redacted["profile"]["journal_profiles"].get(alias)
@@ -272,10 +295,8 @@ def _public_tier(root: Path, manifest: dict) -> None:
     if audit_meta:
         audit_path = audit_meta["path"]
         raw_hashes[audit_path] = audit_meta["sha256"]
-        public_audit = canonical_bytes(_redact_value(json.loads(
-            _safe_member(root, audit_path).read_text())))
-        _write_private(public / audit_path, public_audit)
-        redacted["evidence"]["audit"]["sha256"] = _digest(public_audit)
+        redacted["evidence"]["audit"] = None
+        redacted["limits"].append({"code": "public_audit_removed"})
     sarif_data = canonical_bytes(public_sarif)
     _write_private(public / sarif_path, sarif_data)
     redacted["evidence"]["sarif"]["sha256"] = _digest(sarif_data)
@@ -284,10 +305,19 @@ def _public_tier(root: Path, manifest: dict) -> None:
     if (root / "manifest.sig").exists():
         raw_hashes["manifest.sig"] = _digest((root / "manifest.sig").read_bytes())
     redacted["raw_hashes"] = raw_hashes
-    redacted["limits"] = [limit for limit in redacted["limits"]
-                          if limit.get("code") != "no_signature"]
+    if key:
+        redacted["limits"] = [limit for limit in redacted["limits"]
+                              if limit.get("code") != "no_signature"]
+        redacted["signed"] = "public_manifest"
     redacted["limits"].append({"code": "public_redaction_not_replay_equivalent"})
-    _write_private(public / "manifest.json", canonical_bytes(redacted))
+    redacted["limits"].append({"code": "public_raw_bytes_removed",
+                                "entries": raw_bytes_removed})
+    redacted["limits"].append({"code": "public_peer_text_removed"})
+    public_bytes = canonical_bytes(redacted)
+    _write_private(public / "manifest.json", public_bytes)
+    if key:
+        _write_private(public / "manifest.sig",
+                       base64.b64encode(key.sign(public_bytes)) + b"\n")
 
 
 def build_bundle(wire_paths: list[Path], journal_dir: Path | None,
@@ -394,7 +424,7 @@ def build_bundle(wire_paths: list[Path], journal_dir: Path | None,
                                     f"{epoch}:{len(sarif_results)}")
             result["partialFingerprints"]["stable_id"] = stable
             manifest["analysis"]["findings"][stable] = {
-                "epoch": epoch, "rule_id": result["ruleId"],
+                "source": "wire", "epoch": epoch, "rule_id": result["ruleId"],
                 "severity": result["properties"]["severity"],
                 "evidence_level": result["properties"]["evidence_level"],
                 "wire_seq": events_by_id[annotation.event_id].metadata.get("seq")
@@ -430,7 +460,7 @@ def build_bundle(wire_paths: list[Path], journal_dir: Path | None,
                                     f"audit:{ordinal}")
             result.setdefault("partialFingerprints", {})["stable_id"] = stable
             manifest["analysis"]["findings"][stable] = {
-                "epoch": "audit", "rule_id": result.get("ruleId"),
+                "source": "audit", "epoch": None, "rule_id": result.get("ruleId"),
                 "severity": result.get("properties", {}).get("severity"),
                 "evidence_level": "analyzed", "wire_seq": None}
             sarif_results.append(result)
@@ -446,7 +476,7 @@ def build_bundle(wire_paths: list[Path], journal_dir: Path | None,
     if key:
         _write_private(out / "manifest.sig", base64.b64encode(key.sign(manifest_bytes)) + b"\n")
     if redact:
-        _public_tier(out, manifest)
+        _public_tier(out, manifest, key)
     return manifest
 
 
@@ -585,7 +615,14 @@ def _verify_bundle_impl(root: Path, trusted_key: Path | None = None) -> dict:
         indexed = {result.get("partialFingerprints", {}).get("stable_id")
                    for run in sarif_doc.get("runs", [])
                    for result in run.get("results", [])}
-        if indexed != set(manifest.get("analysis", {}).get("findings", {})):
+        findings = manifest.get("analysis", {}).get("findings", {})
+        wire_epochs = {item.get("epoch") for item in
+                       manifest.get("evidence", {}).get("epochs", [])}
+        if (indexed != set(findings) or any(
+                finding.get("source") not in ("wire", "audit") or
+                (finding.get("source") == "audit" and finding.get("epoch") is not None) or
+                (finding.get("source") == "wire" and finding.get("epoch") not in wire_epochs)
+                for finding in findings.values())):
             integrity.append("manifest_findings_mismatch")
     states = [item["analysis"]["status"] for item in epochs_out]
     analysis_status = next((state for state in ("divergent", "incomplete", "unsupported")
@@ -607,10 +644,68 @@ def _verify_bundle_impl(root: Path, trusted_key: Path | None = None) -> dict:
     }
 
 
-def verify_bundle(root: Path, trusted_key: Path | None = None) -> dict:
+def _verify_public_impl(root: Path, trusted_key: Path | None = None) -> dict:
+    raw_manifest = (root / "manifest.json").read_bytes()
+    manifest = json.loads(raw_manifest)
+    if (not isinstance(manifest, dict) or manifest.get("schema") != SCHEMA
+            or manifest.get("raw_tier") != "withheld"):
+        raise ValueError("unsupported_public_bundle_schema")
+    reasons = []
+    if manifest.get("canonicalization") != "RFC8785" or raw_manifest != canonical_bytes(manifest):
+        reasons.append("manifest_not_canonical")
+    signature = _signature_status(root, manifest, trusted_key)
+    if signature == "invalid":
+        reasons.append("signature_invalid")
+    if manifest.get("signed") == "public_manifest" and signature == "absent":
+        reasons.append("public_signature_missing")
+    artifacts = []
+    for epoch in manifest.get("evidence", {}).get("epochs", []):
+        artifacts.append(("wire", epoch.get("wire")))
+        if epoch.get("journal") is not None:
+            artifacts.append(("journal", epoch["journal"]))
+    for name in ("sarif", "audit"):
+        if manifest.get("evidence", {}).get(name):
+            artifacts.append((name, manifest["evidence"][name]))
+    for name, meta in artifacts:
+        path = _safe_member(root, meta["path"])
+        try:
+            data = path.read_bytes()
+        except OSError:
+            reasons.append(f"{name}_missing")
+            continue
+        if _digest(data) != meta.get("sha256"):
+            reasons.append(f"{name}_sha256_mismatch")
+    if not artifacts:
+        reasons.append("public_artifacts_missing")
+    findings = manifest.get("analysis", {}).get("findings", {})
+    if any(item.get("source") not in ("wire", "audit") or
+           (item.get("source") == "audit") != (item.get("epoch") is None)
+           for item in findings.values()):
+        reasons.append("manifest_findings_mismatch")
+    sarif_meta = manifest.get("evidence", {}).get("sarif")
+    if sarif_meta:
+        sarif_doc = json.loads(_safe_member(root, sarif_meta["path"]).read_text())
+        indexed = {result.get("partialFingerprints", {}).get("stable_id")
+                   for run in sarif_doc.get("runs", [])
+                   for result in run.get("results", [])}
+        if indexed != set(findings):
+            reasons.append("manifest_findings_mismatch")
+    return {
+        "analysis_reproduced": {"status": "not_applicable_redacted", "epochs": []},
+        "delivery_evidence_present": {
+            "status": "records_present_digests_withheld", "epochs": []},
+        "integrity": {"status": "passed" if not reasons else "failed",
+                      "reasons": sorted(set(reasons)), "signature": signature},
+        "limits": manifest.get("limits", []),
+    }
+
+
+def verify_bundle(root: Path, trusted_key: Path | None = None, *,
+                  public: bool = False) -> dict:
     """Always return both verdicts, integrity, and available limits."""
     try:
-        return _verify_bundle_impl(root, trusted_key)
+        return (_verify_public_impl(root, trusted_key) if public else
+                _verify_bundle_impl(root, trusted_key))
     except (OSError, ValueError, UnicodeError, TypeError, KeyError,
             IndexError, RecursionError) as exc:
         try:
@@ -627,12 +722,33 @@ def verify_bundle(root: Path, trusted_key: Path | None = None) -> dict:
         }
 
 
+def verify_exit_code(result: dict) -> int:
+    """Separate contradictions from evidence that cannot be checked."""
+    integrity = result["integrity"]
+    if integrity["status"] == "failed":
+        return 1
+    analysis = result["analysis_reproduced"]
+    delivery = result["delivery_evidence_present"]
+    if analysis["status"] == "divergent" or any(
+            reason in ("delivery_orphaned", "delivery_missing_or_duplicate")
+            for epoch in delivery["epochs"] for reason in epoch.get("reasons", [])):
+        return 1
+    if (analysis["status"] != "equivalent" or delivery["status"] != "present"
+            or integrity["signature"] in ("present, no trusted key given",
+                                         "present, not verified (cryptography not installed)",
+                                         "trusted_key_unreadable")):
+        return 2
+    return 0
+
+
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(prog="glassport bundle")
     sub = parser.add_subparsers(dest="verb")
     verify = sub.add_parser("verify")
     verify.add_argument("out", type=Path)
     verify.add_argument("--trusted-key", type=Path)
+    verify.add_argument("--public", action="store_true",
+                        help="verify public copy hashes and its own signature")
     verify.add_argument("--json", action="store_true")
     source = parser.add_mutually_exclusive_group()
     source.add_argument("--wire", type=Path, nargs="+", action="append")
@@ -645,7 +761,7 @@ def main(argv: list[str]) -> int:
     try:
         args = parser.parse_args(argv)
         if args.verb == "verify":
-            result = verify_bundle(args.out, args.trusted_key)
+            result = verify_bundle(args.out, args.trusted_key, public=args.public)
             if args.json:
                 print(json.dumps(result, indent=2, ensure_ascii=False))
             else:
@@ -661,9 +777,7 @@ def main(argv: list[str]) -> int:
                       f"({', '.join(result['integrity']['reasons'])})")
                 print(f"signature: {result['integrity']['signature']}")
                 print("limits: " + json.dumps(result["limits"], ensure_ascii=False))
-            return 0 if (result["analysis_reproduced"]["status"] == "equivalent"
-                         and result["delivery_evidence_present"]["status"] == "present"
-                         and result["integrity"]["status"] == "passed") else 1
+            return verify_exit_code(result)
         if not args.out or not (args.wire or args.log_dir):
             parser.error("provide --wire PATH... or --log-dir DIR and -o OUT")
         paths = ([path for group in args.wire for path in group] if args.wire
@@ -672,6 +786,6 @@ def main(argv: list[str]) -> int:
                      args.sign, args.redact)
         print(args.out)
         return 0
-    except (OSError, ValueError, json.JSONDecodeError) as exc:
+    except (OSError, ValueError, UnicodeError) as exc:
         print(f"glassport bundle: {exc}", file=sys.stderr)
         return 2

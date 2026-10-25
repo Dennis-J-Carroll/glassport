@@ -8,7 +8,7 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from glassport.bundle import build_bundle, verify_bundle
+from glassport.bundle import build_bundle, verify_bundle, verify_exit_code
 from tests.test_http_gate import GateCase
 
 
@@ -36,10 +36,8 @@ def main() -> int:
         if not required <= levels:
             raise RuntimeError(f"CI fixture missing delivery levels: {required - levels}")
         result = verify_bundle(args.out)
-        if (result["analysis_reproduced"]["status"] != "equivalent"
-                or result["delivery_evidence_present"]["status"] != "present"
-                or result["integrity"]["status"] != "passed"):
-            raise RuntimeError(f"CI bundle did not verify: {result}")
+        if verify_exit_code(result) != 0:
+            raise RuntimeError(f"CI bundle verify exit must be 0: {result}")
         print(args.out)
         return 0
     finally:
