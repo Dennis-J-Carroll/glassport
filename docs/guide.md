@@ -267,11 +267,13 @@ See [Agent advisory](#agent-advisory) for the full interface and the anti-poison
 
 ## The session log
 
-One JSON object per wire line, append-only, crash-safe:
+New captures start with `glassport.header`, continue with one JSON object per
+wire line, and end with `glassport.metrics` when the writer closes normally.
+Each record occupies one physical line:
 
 ```json
 {
-  "schema_version": "0.1",
+  "schema_version": "0.2",
   "seq": 5,
   "ts": "2026-06-09T18:39:29Z",
   "dir": "c2s",
@@ -287,9 +289,32 @@ One JSON object per wire line, append-only, crash-safe:
 
 - `dir` is `c2s` (client→server) or `s2c` (server→client)
 - `frame` is the parsed JSON-RPC frame; lines that fail to parse are preserved verbatim in `raw` — nothing is dropped on ingest
-- `schema_version` is frozen at `0.1`; old logs stay readable forever
+- New wire entries use `schema_version: "0.2"`; existing `0.1` logs remain
+  readable. Readers skip tap-owned `glassport.*` records as wire events.
+- Header records version, transport, mode, strict flag, redacted remote URL,
+  policy/detector/journal versions, and start time. Commit is an explicit
+  installed VCS or `GLASSPORT_COMMIT` value, otherwise `null`; it is never
+  guessed from a nearby checkout. URL userinfo, query, fragment, and HTTP
+  header values are withheld.
+- Trailer records successful wire entries, claimed sequence range, failed
+  writes, and SHA-256 of exact file bytes *before* the trailer. A missing
+  trailer means closure was not recorded, not that the capture is complete.
+  The digest is an artifact cross-check, not a signature or proof of full
+  capture. SARIF includes it as the session artifact hash.
+- Third-party JSONL consumers must skip records whose top-level `type` starts
+  with `glassport.`. For example, `jq -c 'select((.type // "" | startswith("glassport.")) | not)' session.jsonl`
+  selects wire entries; counting physical lines now overcounts frames.
 
-**The relay is sacred.** Logging is best-effort: a logging failure can never alter, delay, or kill a live session.
+`glassport.limits.compute_limits(header, trailer, journal_records, wire_entries)`
+derives named limitations without mutating its inputs: `header_missing`,
+`stdio_decoded_text_no_raw_bytes`, `seq_gap`, `write_failures`,
+`missing_wire_entry`, `strict_profile` or `default_profile`,
+`no_journal_for_path`, `authorization_not_evaluated`, and `no_signature`.
+These mark what a capture cannot establish; they are not detector findings.
+
+**The relay is sacred.** Logging is best-effort: a logging failure cannot kill
+or change a live session. A successful append receipt is not an `fsync` or
+durability guarantee.
 
 ---
 

@@ -51,7 +51,8 @@ from glassport.interaction_trace import AnnotationKind, EventKind
 
 # Bumped by hand whenever the record shape or the decision semantics change.
 # Replay refuses to claim equivalence across a change in any of the three.
-JOURNAL_SCHEMA = "glassport.decision-journal/2"
+JOURNAL_SCHEMA = "glassport.decision-journal/3"
+GENESIS_SHA256 = "0" * 64
 POLICY_VERSION = "glassport.policy/2"  # opt-in strict blocks missing evidence
 # /2: the fold changed. A client request the gate refuses is folded for
 # analysis but never becomes a pending correlation (its wire entry says
@@ -318,6 +319,22 @@ class _EpochJournal:
         self.epoch, self.log, self.path = epoch, log, path
         self.records = 0
         self.truncated = False
+        self.prev_sha256 = GENESIS_SHA256
+        # An epoch may be evicted from the open-file LRU and later resume.
+        # Continue its chain and bound from the existing exact file bytes.
+        try:
+            with open(path, "rb") as fh:
+                for raw in fh:
+                    if not raw.strip():
+                        continue
+                    self.records += 1
+                    self.prev_sha256 = hashlib.sha256(raw).hexdigest()
+                    try:
+                        self.truncated |= json.loads(raw).get("kind") == "truncated"
+                    except (ValueError, UnicodeDecodeError, AttributeError):
+                        pass
+        except OSError:
+            pass
 
 
 class DecisionJournal:
@@ -398,7 +415,12 @@ class DecisionJournal:
         if entry.log is None:
             return False
         try:
-            return bool(entry.log.write_json(record))
+            record["prev_sha256"] = entry.prev_sha256
+            line = json.dumps(record, ensure_ascii=False) + "\n"
+            if not entry.log.write_json(record):
+                return False
+            entry.prev_sha256 = hashlib.sha256(line.encode("utf-8")).hexdigest()
+            return True
         except Exception:
             return False
 
@@ -416,7 +438,7 @@ class DecisionJournal:
         from glassport.tap import open_session_log
         path = self.path_for(epoch)
         try:
-            log = open_session_log(path)
+            log = open_session_log(path, session=False)
         except Exception:
             log = None
         entry = _EpochJournal(epoch, log, path)
@@ -605,6 +627,8 @@ class DecisionJournal:
                 analyzed=analyzed, candidate_block=action == policy.Action.BLOCK.value,
                 enforce=enforce, strict_gap=bool(self.strict_reason(observation))),
             "wire_seq": wire_seq,
+            "wire_entry_sha256": (getattr(observation, "wire_entry_sha256", None)
+                                  if getattr(observation, "persisted", False) else None),
             "event_seq": event_seq,
             "persisted": bool(getattr(observation, "persisted", False)),
             "diagnostic": diagnostic,
@@ -614,6 +638,10 @@ class DecisionJournal:
             "faults": faults[:self.limits.max_faults],
             "faults_total": len(faults),
         }
+        if record["wire_entry_sha256"] is None:
+            record["wire_digest_reason"] = _safe_token(
+                getattr(observation, "wire_digest_reason", None),
+                default="wire_entry_unavailable")
         with self._lock:
             if self._closed:
                 return None

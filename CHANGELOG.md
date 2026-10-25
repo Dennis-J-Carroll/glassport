@@ -7,6 +7,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versions follow 
 ## [Unreleased]
 
 ### Added
+- add v0.2 session headers and chained journal /3 (jq readers skip glassport.*)
 - label evidence levels; policy/2 journal /1 replay unsupported
 - add opt-in strict HTTP evidence-gap blocking (#112)
 - accept --port for http wrap and gate (#101)

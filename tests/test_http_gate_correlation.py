@@ -74,7 +74,8 @@ class CorrelationCase(GateCase):
         return logs[0]
 
     def wire_entries(self):
-        return [json.loads(line) for line in self.wire_log().read_text().splitlines()]
+        return [entry for line in self.wire_log().read_text().splitlines()
+                if (entry := json.loads(line)).get('seq') is not None]
 
     def subcategories(self, trace):
         return [a.subcategory for a in annotate(trace)]

@@ -1442,12 +1442,17 @@ def annotate(trace: InteractionTrace) -> list[Annotation]:
         trace.annotations.extend(found)
         return found
     # Preserve the existing extension point for explicitly installed batch passes.
+    from glassport.finding_ids import assign_stable_ids
     found: list[Annotation] = []
     for detector in DETECTORS:
         try:
-            found.extend(detector(trace))
+            detected = list(detector(trace))
+            assign_stable_ids(detected, getattr(detector, "__name__", "detector"))
+            found.extend(detected)
         except Exception as exc:                    # noqa: BLE001 — by design
-            found.append(_detector_error(
-                getattr(detector, "__name__", repr(detector)), exc))
+            name = getattr(detector, "__name__", repr(detector))
+            error = _detector_error(name, exc)
+            assign_stable_ids([error], name)
+            found.append(error)
     trace.annotations.extend(found)
     return found

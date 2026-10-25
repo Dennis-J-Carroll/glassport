@@ -22,7 +22,8 @@ from glassport.adapters.mcp_session import MCPTraceBuilder
 from glassport.detectors import snapshot_pii_patterns
 from glassport.incremental import DetectorEngine, default_detectors
 from glassport.session import SessionLimits
-from glassport.tap import _now_iso, build_session_entry, open_session_log
+from glassport.tap import (_now_iso, _serialize_entry, build_session_entry,
+                           open_session_log)
 
 
 @dataclass(frozen=True)
@@ -56,6 +57,8 @@ class Observation:
     annotations: tuple = ()
     persisted: bool = False
     diagnostic: str | None = None
+    wire_entry_sha256: str | None = None
+    wire_digest_reason: str | None = None
 
 
 @dataclass(eq=False)
@@ -149,6 +152,9 @@ class HTTPObserver:
         self._contexts: dict[str, _Context] = {}
         self._bindings: dict[tuple, _Context] = {}
         self._closed = False
+        self.capture_mode = "observe"
+        self.capture_strict = False
+        self.capture_remote_url: str | None = None
 
     def _partition(self, headers):
         # Cookie and proxy credentials also change upstream credential context.
@@ -247,7 +253,9 @@ class HTTPObserver:
         for context in contexts:
             with context.lock:
                 if context.log is not None:
+                    context.log.write_metrics()
                     context.log.close()
+                    context.log = None
 
     def begin(self, method: str, headers, **_unused):
         headers = list(headers.items()) if hasattr(headers, 'items') else list(headers)
@@ -441,7 +449,11 @@ class HTTPLease:
         context = self.context
         if not context.log_opened:
             context.log_opened = True
-            context.log = open_session_log(self.observer.log_dir / f'{context.epoch}.jsonl')
+            context.log = open_session_log(
+                self.observer.log_dir / f'{context.epoch}.jsonl',
+                transport="http", mode=self.observer.capture_mode,
+                strict=self.observer.capture_strict,
+                remote_url=self.observer.capture_remote_url)
         context.seq += 1
         facts = dict(observation or {}, epoch=context.epoch, order=context.seq)
         entry, text = build_session_entry(
@@ -476,9 +488,20 @@ class HTTPLease:
                 facts['admitted'] = False
                 text = None   # the entry changed after it was serialized
         persisted = self._write_locked(context, entry, text)
+        wire_digest = None
+        digest_reason = "http_log_failed" if not persisted else None
+        if persisted:
+            try:
+                exact_line = text if text is not None else _serialize_entry(entry)
+                wire_digest = hashlib.sha256(
+                    (exact_line + "\n").encode("utf-8")).hexdigest()
+            except Exception:
+                # A receipt without reconstructible bytes cannot be bound.
+                digest_reason = "wire_serialization_unavailable"
         final = Observation(context.epoch, context.seq, event, annotations, persisted,
                             facts.get('loss') or inherited
-                            or ('http_log_failed' if not persisted else None))
+                            or ('http_log_failed' if not persisted else None),
+                            wire_digest, digest_reason)
         if defer:
             # A failed write changes the evidence AFTER the first admission
             # decision. Ask the same pure callback again: default forwards

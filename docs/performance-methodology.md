@@ -1,4 +1,30 @@
-# Scanner timing and coverage instrumentation
+# Performance methodology
+
+## Session relay append timing (Phase 3a)
+
+From repository root, run `python3 scripts/bench_relay.py --root .` on both
+checkouts without concurrent tests or benchmarks. The driver starts seven
+fresh CPython interpreters per case and records 10,000 calls to
+`SessionLog.record` per interpreter against a private temporary file.
+`plain` logs a small `tools/call` frame; `gate_marker` adds a fixed gate
+marker. Timing includes the per-line JSONL append and digest update, then
+one trailer write and close; it excludes interpreter startup, network I/O,
+HTTP policy evaluation, and fsync. Reported median is across seven per-line
+sample means; p95 uses nearest rank, so seven-sample p95 is the maximum.
+
+Measured on the same local host, non-root, CPython 3.13; nanoseconds per line:
+
+| Case | Phase 2 base median / p95 | Phase 3a median / p95 | Median change |
+|---|---:|---:|---:|
+| Plain | 8400.4 / 8938.8 | 8443.1 / 9051.3 | +0.51% |
+| Gate marker | 9538.6 / 9959.8 | 9613.9 / 9876.4 | +0.79% |
+
+The measured medians stay within the Phase 3a 2% budget for this synthetic
+append path. P95 varies across the seven process samples and is reported for
+visibility, not treated as a population tail estimate. Raw reports live under
+`/tmp/glassport-phase3a-paired-{base,new}.json` on the measurement host.
+
+## Scanner timing and coverage instrumentation
 
 The security timing tests retain their existing inputs and deadlines. The
 opt-in coverage job uses CPython 3.13 and coverage.py 7.13.0 with

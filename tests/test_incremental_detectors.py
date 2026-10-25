@@ -69,8 +69,11 @@ class TestFabricatedParity(unittest.TestCase):
         found = engine.on_event(event, builder.state)
         self.assertEqual(len(found), 1)
         self.assertEqual(found[0].event_id, event.id)
-        self.assertEqual(found[0].metadata, {"seq": 6, "tool": "foo",
-                         "no_declaration_seen": False, "declaration_seq": 5})
+        self.assertEqual({k: v for k, v in found[0].metadata.items()
+                          if k != "stable_id"},
+                         {"seq": 6, "tool": "foo",
+                          "no_declaration_seen": False, "declaration_seq": 5})
+        self.assertRegex(found[0].metadata["stable_id"], r"^[0-9a-f]{24}$")
         self.assertEqual(engine.finish(builder.state), [])
         self.assertEqual(builder.events, [])
 

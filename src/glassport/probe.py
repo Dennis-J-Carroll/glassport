@@ -187,6 +187,7 @@ def _spawn_tap(cmd: list[str], log_dir: Path) -> subprocess.Popen:
         [sys.executable, "-c", _BOOT, pkg_parent, "wrap",
          "--log-dir", str(log_dir), "--", *cmd],
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        env={**os.environ, "GLASSPORT_INTERNAL_PROBE": "1"},
         start_new_session=(os.name == "posix"),
     )
 

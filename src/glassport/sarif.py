@@ -70,7 +70,8 @@ def _sarif_level(severity: Union[str, int]) -> str:
     return "warning"
 
 
-def _sarif_document(rules: list, results: list, props: dict | None = None) -> str:
+def _sarif_document(rules: list, results: list, props: dict | None = None,
+                    artifacts: list | None = None) -> str:
     """Wrap rules + results in the SARIF 2.1.0 run envelope. Shared by the
     static-audit and runtime-annotation renderers."""
     doc = {
@@ -89,6 +90,8 @@ def _sarif_document(rules: list, results: list, props: dict | None = None) -> st
             "properties": props or {},
         }],
     }
+    if artifacts is not None:
+        doc["runs"][0]["artifacts"] = artifacts
     return json.dumps(doc, indent=2, ensure_ascii=False)
 
 
@@ -285,6 +288,32 @@ def _seq_to_line(session_path: str) -> dict:
     return out
 
 
+def _session_log_digest(session_path: str) -> str | None:
+    """Use pre-trailer running digest when present; hash legacy file whole."""
+    if not session_path:
+        return None
+    hasher = hashlib.sha256()
+    trailer_digest = None
+    try:
+        with open(session_path, "rb") as fh:
+            for raw in fh:
+                hasher.update(raw)
+                if b'"glassport.metrics"' not in raw:
+                    continue
+                try:
+                    entry = json.loads(raw)
+                except (ValueError, UnicodeDecodeError):
+                    continue
+                if isinstance(entry, dict) and entry.get("type") == "glassport.metrics":
+                    value = entry.get("log_sha256")
+                    if isinstance(value, str) and len(value) == 64 and all(
+                            c in "0123456789abcdef" for c in value):
+                        trailer_digest = value
+    except OSError:
+        return None
+    return trailer_digest or hasher.hexdigest()
+
+
 def _runtime_rule_object(ann) -> dict:
     """SARIF reportingDescriptor for one annotation's subcategory.
 
@@ -326,6 +355,8 @@ def render_session_sarif(trace, session_path: str = "", base: str = "") -> str:
     rules: dict = {}
     results: list = []
     fingerprints: dict[str, int] = {}
+    stable_ordinals: dict[tuple, int] = {}
+    from glassport.finding_ids import stable_id
 
     for a in trace.annotations:
         rule_id = f"glassport/{a.subcategory or 'annotation'}"
@@ -342,6 +373,13 @@ def render_session_sarif(trace, session_path: str = "", base: str = "") -> str:
         duplicate = fingerprints.get(stem, 0)
         fingerprints[stem] = duplicate + 1
         fingerprint = f"{stem}:{duplicate}" if duplicate else stem
+        stable_key = (str(detector), a.subcategory or "annotation", a.kind.value,
+                      seq if type(seq) is int else None)
+        stable_ordinal = stable_ordinals.get(stable_key, 0)
+        stable_ordinals[stable_key] = stable_ordinal + 1
+        finding_id = a.metadata.get("stable_id") or stable_id(
+            str(detector), a.subcategory or "annotation", a.kind.value,
+            seq if type(seq) is int else None, stable_ordinal)
         results.append({
             "ruleId": rule_id,
             "level": _sarif_level(a.severity),
@@ -354,7 +392,7 @@ def render_session_sarif(trace, session_path: str = "", base: str = "") -> str:
                 },
             }],
             "partialFingerprints": {
-                "glassportSeq": fingerprint},
+                "glassportSeq": fingerprint, "stable_id": finding_id},
             "properties": {"severity": a.severity, "kind": a.kind.value,
                            "subcategory": a.subcategory,
                            "evidence_level": annotation_level(a, ev)},
@@ -362,4 +400,7 @@ def render_session_sarif(trace, session_path: str = "", base: str = "") -> str:
 
     props = {"session": Path(session_path).name if session_path else "",
              "annotation_count": len(trace.annotations)}
-    return _sarif_document(list(rules.values()), results, props)
+    digest = _session_log_digest(session_path)
+    artifacts = ([{"location": {"uri": uri},
+                   "hashes": {"sha-256": digest}}] if digest else [])
+    return _sarif_document(list(rules.values()), results, props, artifacts)

@@ -5,7 +5,7 @@ The HTTP observer records what analysis concluded and what transport did.
 enforces proved exclusions; opt-in `--strict` also refuses `tools/call` when
 required evidence is missing. See [enforcement contract](enforcement-contract.md).
 
-## Evidence levels (decision journal schema `/2`)
+## Evidence levels (decision journal schema `/3`)
 
 `evidence_level` is a closed vocabulary. It qualifies each intent and terminal
 delivery record, each stdio gate marker, each runtime SARIF result, and each
@@ -36,9 +36,10 @@ in-flight id, leaving its reply ambiguous. It does not weaken a known tool
 declaration, so both default and strict gate modes retain a proved exclusion.
 Other analysis limits remain evidence gaps; strict mode refuses them.
 
-Journal schema `/1` is unsupported by this reader (`profile_mismatch_schema`),
-including `/1` journals written with `glassport.policy/2`. Generate a new
-capture and journal to replay under `/2`; no old record is silently upgraded.
+Journal schemas `/1` and `/2` are unsupported by this reader
+(`profile_mismatch_schema`). Generate a new capture and journal to replay
+under `/3`; no old record is silently upgraded. The `/3` transition adds
+wire-line binding and a journal hash chain.
 
 ```bash
 glassport observe --url http://127.0.0.1:8000/mcp \
@@ -104,8 +105,15 @@ sequence numbers, and digests. Findings are compared by a digest of sorted
 `(kind, subcategory, severity)` triples; annotation ids are excluded from that
 digest because they are fresh random values on every run.
 
-Wire evidence stays in its own private capture. The two streams are joined only
-by epoch id plus `event_seq`, which is the capture's own `seq`.
+Wire evidence stays in its own private capture. Each intent identifies the
+wire capture by epoch and `wire_seq`, then binds to the exact serialized JSONL
+line (including its newline) with `wire_entry_sha256`. When recording failed,
+the digest is `null` with `wire_digest_reason`; replay reports `incomplete`.
+Every journal record also carries `prev_sha256`, starting at 64 zero hex digits
+and then hashing the previous complete JSONL line. A changed wire line yields
+`wire_digest_mismatch`; deleting or changing an interior journal record yields
+`journal_chain_mismatch`. Neither digest authenticates an attacker-controlled
+capture, and truncating the final record has no later link to break.
 
 ## Versioned configuration profile
 
@@ -132,9 +140,10 @@ patterns are never silently dropped.
 
 ## What replay proves, and what it does not
 
-`replay-decisions` re-folds the epoch's wire log through a fresh builder and
-detector engine under the recorded session limits, recomputes each candidate
-action, and compares.
+`replay-decisions` first checks the journal chain and each intent's wire-line
+digest, then re-folds the epoch's wire log through a fresh builder and detector
+engine under the recorded session limits, recomputes each candidate action,
+and compares.
 
 | Status | Meaning | Exit |
 |---|---|---:|

@@ -35,6 +35,7 @@ in this module claims otherwise.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import hashlib
 import json
 from pathlib import Path
 import sys
@@ -91,24 +92,24 @@ def _unsupported(reason, epoch=None, recorded_engine=None) -> ReplayResult:
 
 
 def _read_records(path):
-    """Parse a JSONL artifact; returns (records, error_reason)."""
-    records = []
+    """Parse JSONL and retain each exact line for integrity checks."""
+    records, lines = [], []
     try:
-        with open(path, encoding="utf-8") as fh:
-            for line in fh:
-                line = line.strip()
-                if not line:
+        with open(path, "rb") as fh:
+            for raw in fh:
+                if not raw.strip():
                     continue
                 try:
-                    obj = json.loads(line)
-                except ValueError:
-                    return records, "malformed_line"
+                    obj = json.loads(raw)
+                except (ValueError, UnicodeDecodeError):
+                    return records, "malformed_line", lines
                 if not isinstance(obj, dict):
-                    return records, "malformed_line"
+                    return records, "malformed_line", lines
                 records.append(obj)
+                lines.append(raw)
     except OSError:
-        return records, "unreadable"
-    return records, None
+        return records, "unreadable", lines
+    return records, None, lines
 
 
 def _profile_core(record) -> tuple:
@@ -134,7 +135,7 @@ def _session_limits(record) -> SessionLimits | None:
 
 def verify_journal(journal_path, wire_path, *, patterns=None) -> ReplayResult:
     """Replay one epoch's journal against its wire log under the same profile."""
-    journal, err = _read_records(journal_path)
+    journal, err, journal_lines = _read_records(journal_path)
     if err:
         return _unsupported(f"journal_{err}")
     if not journal:
@@ -165,6 +166,15 @@ def verify_journal(journal_path, wire_path, *, patterns=None) -> ReplayResult:
     if profile.get("authorization") != {"status": "not_evaluated"}:
         return _unsupported("profile_invalid_authorization", epoch, recorded_engine)
 
+    previous_hash = dj.GENESIS_SHA256
+    for record, raw in zip(journal, journal_lines):
+        if record.get("prev_sha256") != previous_hash:
+            result = ReplayResult(STATUS_DIVERGENT, epoch,
+                                  reasons=["journal_chain_mismatch"])
+            result.recorded_engine = recorded_engine
+            return result
+        previous_hash = hashlib.sha256(raw).hexdigest()
+
     result = ReplayResult(STATUS_EQUIVALENT, epoch)
     result.recorded_engine = recorded_engine if isinstance(recorded_engine, str) else None
     if profile.get("pattern_status") != dj.PROFILE_REPRODUCIBLE:
@@ -186,23 +196,25 @@ def verify_journal(journal_path, wire_path, *, patterns=None) -> ReplayResult:
     if any(r.get("epoch") != epoch for r in journal):
         return _unsupported("journal_epoch_mismatch", epoch)
 
-    wire, err = _read_records(wire_path)
+    wire, err, wire_lines = _read_records(wire_path)
     if err:
         return _unsupported(f"wire_{err}", epoch)
 
     by_seq, last = {}, None
+    wire_hashes = {}
     limits = _session_limits(profile)
     builder = MCPTraceBuilder(retain_events=False, limits=limits)
     engine = DetectorEngine(default_detectors(
         detectors.snapshot_pii_patterns() if patterns is None else patterns))
-    for entry in wire:
+    for entry, raw in zip(wire, wire_lines):
         seq = entry.get("seq")
-        if entry.get("type") == "glassport.metrics":
+        if str(entry.get("type", "")).startswith("glassport."):
             continue
         if isinstance(seq, int) and not isinstance(seq, bool):
             if last is not None and seq <= last:
                 return _unsupported("wire_reordered", epoch)
             last = seq
+            wire_hashes[seq] = hashlib.sha256(raw).hexdigest()
         observation = entry.get("http_observation")
         if isinstance(observation, dict) and observation.get("epoch") not in (None, epoch):
             return _unsupported("wire_epoch_mismatch", epoch)
@@ -213,6 +225,25 @@ def verify_journal(journal_path, wire_path, *, patterns=None) -> ReplayResult:
         if event is None or not isinstance(seq, int):
             continue
         by_seq[seq] = (event, tuple(engine.on_event(event, builder.state)))
+
+    missing_digests = []
+    for record in intents:
+        seq = record.get("wire_seq")
+        if type(seq) is not int:
+            continue
+        if seq not in wire_hashes:
+            continue  # existing missing-wire path below reports incomplete
+        expected = record.get("wire_entry_sha256")
+        if expected is None:
+            missing_digests.append(seq)
+        elif expected != wire_hashes[seq]:
+            result.status = STATUS_DIVERGENT
+            result.reasons.append("wire_digest_mismatch")
+            result.mismatched.append({"event_seq": seq,
+                                      "problems": ["wire_digest_mismatch"],
+                                      "recorded_action": record.get("action"),
+                                      "replayed_action": None})
+            return result
 
     previous = None
     for record in intents:
@@ -265,6 +296,9 @@ def verify_journal(journal_path, wire_path, *, patterns=None) -> ReplayResult:
     if result.missing_evidence:
         result.status = STATUS_INCOMPLETE
         result.reasons.append("missing_wire_evidence")
+    if missing_digests:
+        result.status = STATUS_INCOMPLETE
+        result.reasons.append("wire_digest_missing")
     if result.recorded_faults:
         result.status = STATUS_INCOMPLETE
         result.reasons.append("recorded_fault_not_re_executed")

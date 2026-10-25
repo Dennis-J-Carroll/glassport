@@ -5,6 +5,7 @@ from collections.abc import Iterable
 from dataclasses import asdict
 
 from glassport import detectors
+from glassport.finding_ids import assign_stable_ids
 from glassport.interaction_trace import Annotation, Event, EventKind, InteractionTrace, _new_id
 from glassport.session import SessionState
 
@@ -180,6 +181,7 @@ class DetectorEngine:
                 # must not leak partial findings from a failed detector pass.
                 found = list(detector.on_event(event, state) if event is not None
                              else detector.finish(state))
+                assign_stable_ids(found, detector.name)
                 out.extend(found)
             except Exception as exc:
                 # Exception messages can contain secrets from hostile payloads.
@@ -193,6 +195,7 @@ class DetectorEngine:
                 if event is not None:
                     ann.event_id = event.id
                     ann.metadata["seq"] = event.metadata.get("seq")
+                assign_stable_ids([ann], detector.name)
                 out.append(ann)
         return out
 
@@ -203,12 +206,16 @@ class DetectorEngine:
         found = self._run("on_event", state, event)
         reasons = state.limit_reasons | ({"request_correlation"}
                   if event.metadata.get("correlation_limited") else set())
+        limit_anns = []
         for reason in sorted(reasons - self._reported_limits):
-            found.append(detectors._ann(
+            limit_ann = detectors._ann(
                 event, detectors.AnnotationKind.ANOMALY, "analysis_limit",
                 f"session state limit reached ({reason}); analysis may be incomplete",
-                severity=1, reason=reason, limits=asdict(state.limits)))
+                severity=1, reason=reason, limits=asdict(state.limits))
+            limit_anns.append(limit_ann)
             self._reported_limits.add(reason)
+        assign_stable_ids(limit_anns, "session_limits")
+        found.extend(limit_anns)
         return found
 
     def finish(self, state: SessionState) -> list[Annotation]:

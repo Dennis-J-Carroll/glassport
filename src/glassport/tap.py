@@ -32,9 +32,9 @@ Design constraints honored:
     don't parse as JSON are relayed verbatim and logged as raw.
   * Crash-isolated: a logging bug must not kill the session.
 
-Frame log schema (one JSON object per line):
+Frame log schema (one JSON object per wire line, between header and trailer):
   {
-    "schema_version": "0.1",
+    "schema_version": "0.2",
     "seq":  int,            # monotonic per session, both directions
     "ts":   str,            # ISO 8601 UTC
     "dir":  "c2s" | "s2c",  # client→server or server→client
@@ -61,6 +61,7 @@ from glassport.detectors import (
 
 import difflib
 import hashlib
+import importlib.metadata
 import json
 import math
 import os
@@ -76,14 +77,54 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
-SCHEMA_VERSION = "0.1"
+SCHEMA_VERSION = "0.2"
 DEFAULT_LOG_DIR = Path(os.environ.get("GLASSPORT_LOG_DIR",
                                       Path.home() / ".glassport" / "sessions"))
 
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _source_commit() -> str | None:
+    """Installed VCS provenance or explicit build metadata; never infer HEAD."""
+    candidate = os.environ.get("GLASSPORT_COMMIT")
+    if candidate is None:
+        try:
+            direct_url = importlib.metadata.distribution("glassport").read_text(
+                "direct_url.json")
+            candidate = (json.loads(direct_url or "{}").get("vcs_info") or {}).get(
+                "commit_id")
+        except (importlib.metadata.PackageNotFoundError, ValueError, AttributeError):
+            return None
+    if isinstance(candidate, str) and re.fullmatch(r"[0-9a-fA-F]{7,64}", candidate):
+        return candidate.lower()
+    return None
+
+
+def build_session_header(*, transport: str, mode: str, strict: bool = False,
+                         remote_url: str | None = None) -> dict:
+    """Tap-owned provenance, with no credential-bearing URL or header value."""
+    from glassport import __version__
+    from glassport.decision_journal import (DETECTOR_ENGINE_VERSION,
+                                            JOURNAL_SCHEMA, POLICY_VERSION)
+
+    header = {"type": "glassport.header", "schema_version": SCHEMA_VERSION,
+              "glassport_version": __version__, "commit": _source_commit(),
+              "transport": transport, "mode": mode, "strict": bool(strict),
+              "redacted": ["url_userinfo", "url_query", "url_fragment",
+                           "header_values"],
+              "policy_version": POLICY_VERSION,
+              "detector_engine": DETECTOR_ENGINE_VERSION,
+              "journal_schema": JOURNAL_SCHEMA, "started_at": _now_iso()}
+    if remote_url is not None:
+        parsed = urlsplit(remote_url)
+        header["remote_url"] = urlunsplit((parsed.scheme,
+                                             parsed.netloc.rsplit("@", 1)[-1],
+                                             parsed.path, "", ""))
+    return header
 
 
 # tools/call arguments nested deeper than this are blocked before any
@@ -260,7 +301,7 @@ def build_session_entry(direction: str, line: bytes, gate: dict | None = None,
 
 
 class SessionLog:
-    def __init__(self, path: Path):
+    def __init__(self, path: Path, header: dict | None = None):
         # Create the session dir private (0o700) and the log file private
         # (0o600) explicitly, independent of the caller's umask. Glassport
         # logs full MCP traffic — credentials, PII — so world/group access is
@@ -282,20 +323,34 @@ class SessionLog:
                 os.fchmod(fd, 0o600)
             except OSError:
                 pass
-            self._fh = open(fd, "a", buffering=1, encoding="utf-8")
+            self._fh = os.fdopen(fd, "ab", buffering=0)
         else:
             # Non-POSIX: st_mode is advisory; do not fake enforcement.
-            self._fh = open(path, "a", buffering=1, encoding="utf-8")
+            self._fh = open(path, "ab", buffering=0)
         self._lock = threading.Lock()
         self._seq = 0
         self.write_failures = 0
         self._warned_write_failure = False
         self.path = path
+        self._digest = hashlib.sha256()
+        self._entries_written = 0
+        if header is not None:
+            try:
+                self._write(json.dumps(header, ensure_ascii=True) + "\n")
+            except Exception:
+                self.close()
+                raise
 
     def _write(self, text: str) -> None:
         """Count failed append calls once; caller holds the session lock."""
         try:
-            self._fh.write(text)
+            encoded = text.encode("utf-8")
+            written = self._fh.write(encoded)
+            if type(written) is not int or written < 0 or written > len(encoded):
+                raise OSError("invalid session log write count")
+            self._digest.update(encoded[:written])
+            if written != len(encoded):
+                raise OSError("short session log write")
         except Exception:
             self.write_failures += 1
             if not self._warned_write_failure:
@@ -333,8 +388,8 @@ class SessionLog:
 
         `gate` marks frames the gate acted on: {"action": "blocked"} on a
         c2s frame the server never received, {"action": "injected"} on an
-        s2c frame the server never sent. Optional field — schema 0.1 logs
-        without it stay readable, readers without it stay correct.
+        s2c frame the server never sent. Optional field — older schema 0.1
+        logs without it stay readable.
 
         `metadata` carries transport-level annotations that must not be
         smashed into the parseable frame. For SSE it holds fields such as
@@ -352,6 +407,7 @@ class SessionLog:
                     direction, line, gate=gate, metadata=metadata,
                     observation=observation, wire_bytes=wire_bytes, seq=seq)
                 self._write(text + "\n")
+                self._entries_written += 1
                 return entry
         except Exception:
             return None  # logging is best-effort; the relay is sacred
@@ -377,6 +433,7 @@ class SessionLog:
                 if text is None:
                     text = _serialize_entry(entry)
                 self._write(text + "\n")
+                self._entries_written += 1
             return True
         except Exception:
             return False
@@ -409,6 +466,9 @@ class SessionLog:
                          "frames_seen": self._seq, **fields}
                 entry["write_failures"] = self.write_failures
                 entry.setdefault("log_bytes", self._fh.tell())
+                entry["log_sha256"] = self._digest.hexdigest()
+                entry["entries_written"] = self._entries_written
+                entry["seq_range"] = [1, self._seq] if self._seq else None
                 self._write(json.dumps(entry, ensure_ascii=False) + "\n")
         except Exception:
             pass  # metrics are best-effort; the relay is sacred
@@ -420,13 +480,19 @@ class SessionLog:
             pass
 
 
-def open_session_log(path: Path) -> "SessionLog | None":
+def open_session_log(path: Path, *, transport: str = "stdio",
+                     mode: str = "wrap", strict: bool = False,
+                     remote_url: str | None = None,
+                     session: bool = True) -> "SessionLog | None":
     """Create a verified-private session log, or return None so the relay
     runs without recording. The relay is sacred: neither an unwritable dir
     nor a permission we could not secure may kill the session — we disable
     logging loudly instead."""
     try:
-        log = SessionLog(path)
+        header = (build_session_header(transport=transport, mode=mode,
+                                       strict=strict, remote_url=remote_url)
+                  if session else None)
+        log = SessionLog(path, header=header)
     except OSError as exc:
         print(f"[glassport] logging disabled: cannot write to {path.parent} "
               f"({exc}) -- check permissions or set $GLASSPORT_LOG_DIR; "
@@ -1267,7 +1333,10 @@ def run_tap(server_cmd: list[str], log_dir: Path,
     # The relay is sacred: a logging failure must never alter, delay, or kill
     # a live session. If the log dir is unwritable, disable logging and relay
     # anyway — pump() already tolerates a None log.
-    log = open_session_log(log_path)
+    probe_capture = os.environ.pop("GLASSPORT_INTERNAL_PROBE", None) == "1"
+    mode = "gate" if gate is not None else "probe" if probe_capture else "wrap"
+    log = open_session_log(log_path, transport="stdio", mode=mode,
+                           strict=bool(gate is not None and gate.strict))
 
     # Announce on stderr only — stdout belongs to the protocol.
     print(f"[glassport] tapping: {shlex.join(server_cmd)}", file=sys.stderr)

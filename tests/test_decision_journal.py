@@ -6,6 +6,7 @@ gate-mode journal ever enforces one. The gate's transport behavior is covered
 by tests/test_http_gate.py.
 """
 import contextlib
+import hashlib
 import io
 import json
 import os
@@ -26,6 +27,18 @@ from glassport import tap
 from glassport.adapters.mcp_http import run_http_tap
 from glassport.http_sessions import HTTPObserver
 from glassport.session import SessionLimits
+
+
+def rewrite_chained(path, records):
+    """Test fixture for semantic edits that intentionally preserve chain links."""
+    previous = dj.GENESIS_SHA256
+    lines = []
+    for record in records:
+        record["prev_sha256"] = previous
+        raw = (json.dumps(record, ensure_ascii=False) + "\n").encode("utf-8")
+        previous = hashlib.sha256(raw).hexdigest()
+        lines.append(raw)
+    path.write_bytes(b"".join(lines))
 
 
 def wire(**kw):
@@ -116,7 +129,7 @@ class TestIntentAndDelivery(JournalCase):
         profile, rec_intent, delivery = entries
         self.assertEqual(profile['mode'], 'observe')
         self.assertEqual(profile['authorization'], {'status': 'not_evaluated'})
-        self.assertEqual(profile['schema'], 'glassport.decision-journal/2')
+        self.assertEqual(profile['schema'], 'glassport.decision-journal/3')
         self.assertEqual(profile['pattern_status'], 'reproducible')
         self.assertEqual(rec_intent['action'], 'block')
         self.assertTrue(rec_intent['candidate_block'])
@@ -252,11 +265,10 @@ class TestProfileVerification(JournalCase):
         self.journal.close()
         records = [json.loads(x) for x in path.read_text().splitlines() if x.strip()]
         profile = dict(records[0])
-        with path.open('a') as fh:
-            fh.write(json.dumps(dict(profile, ts='later')) + '\n')  # benign repeat
+        rewrite_chained(path, records + [dict(profile, ts='later')])
         self.assertEqual(self.verify(lease).status, 'equivalent')
-        with path.open('a') as fh:
-            fh.write(json.dumps(dict(profile, policy_version='other')) + '\n')
+        rewrite_chained(path, records + [dict(profile, ts='later'),
+                                         dict(profile, policy_version='other')])
         result = self.verify(lease)
         self.assertEqual(result.status, 'unsupported')
         self.assertEqual(result.reasons, ['profile_conflict'])
@@ -312,7 +324,7 @@ class TestWireEvidence(JournalCase):
         self.journal.close()
         path = self.wire_path(lease.context.epoch)
         kept = [x for x in path.read_text().splitlines()
-                if x.strip() and json.loads(x)['seq'] != obs.seq]
+                if x.strip() and json.loads(x).get('seq') != obs.seq]
         path.write_text('\n'.join(kept) + '\n')
         result = self.verify(lease)
         self.assertEqual(result.status, 'incomplete')
@@ -327,14 +339,14 @@ class TestWireEvidence(JournalCase):
         lease.release()
         self.journal.close()
         path = self.journal.path_for(lease.context.epoch)
-        lines = []
+        records = []
         for raw in path.read_text().splitlines():
             record = json.loads(raw)
             if record['kind'] == 'intent' and record['event_seq'] == obs.seq:
                 record['action'] = 'warn'
                 record['findings_digest'] = '0' * 64
-            lines.append(json.dumps(record))
-        path.write_text('\n'.join(lines) + '\n')
+            records.append(record)
+        rewrite_chained(path, records)
         result = self.verify(lease)
         self.assertEqual(result.status, 'divergent')
         self.assertEqual(result.mismatched[0]['event_seq'], obs.seq)
@@ -568,9 +580,9 @@ class TestMalformedArtifacts(JournalCase):
     def test_records_from_a_foreign_epoch_are_unsupported(self):
         lease = self.prepared()
         path = self.journal.path_for(lease.context.epoch)
-        with path.open('a') as fh:
-            fh.write(json.dumps({'kind': 'intent', 'epoch': 'someone-else',
-                                 'n': 99, 'event_seq': 1}) + '\n')
+        records = [json.loads(x) for x in path.read_text().splitlines()]
+        rewrite_chained(path, records + [{'kind': 'intent', 'epoch': 'someone-else',
+                                          'n': 99, 'event_seq': 1}])
         self.assertEqual(self.verify(lease).reasons, ['journal_epoch_mismatch'])
 
     def test_journal_with_no_comparable_records_is_incomplete(self):
@@ -592,8 +604,7 @@ class TestMalformedArtifacts(JournalCase):
         path = self.journal.path_for(lease.context.epoch)
         records = [json.loads(x) for x in path.read_text().splitlines() if x.strip()]
         intent = [r for r in records if r['kind'] == 'intent'][0]
-        with path.open('a') as fh:
-            fh.write(json.dumps(dict(intent, n=99, event_seq=1)) + '\n')
+        rewrite_chained(path, records + [dict(intent, n=99, event_seq=1)])
         self.assertEqual(self.verify(lease).reasons, ['journal_reordered'])
 
     def test_metrics_lines_and_custom_limits_survive_replay(self):
