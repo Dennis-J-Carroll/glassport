@@ -6,6 +6,24 @@ on:
   pull_request:
 
 jobs:
+  bundle-artifact:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Build fresh strict HTTP gate bundle
+        run: PYTHONPATH=src python scripts/build_ci_bundle.py --out ci-bundle
+      - name: Verify bundle before upload
+        run: PYTHONPATH=src python -c 'from glassport.tap import main; import sys; sys.exit(main(["bundle", "verify", "ci-bundle", "--json"]))'
+      - name: Upload verified bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: glassport-bundle-${{ github.sha }}
+          path: ci-bundle/
+          if-no-files-found: error
+
   test:
     # README claims "OS Independent"; CI must prove it, not just classify it
     # (roadmap H1.06). POSIX-only semantics (symlinks, st_mode) carry

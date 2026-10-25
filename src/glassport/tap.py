@@ -1784,7 +1784,11 @@ usage: glassport <command> [options]   (`glassport help <command>`, `glassport -
                         --wire <session.jsonl> [--json]
                    (re-derive one epoch's decisions under identical code;
                     digests cross-check artifacts, not signatures.
-                    exit 0 only when analysis is equivalent)
+                   exit 0 only when analysis is equivalent)
+  bundle:          glassport bundle (--wire PATH... | --log-dir DIR)
+                        [--journal-dir DIR] [--audit PATH] -o OUT
+                        [--sign KEYFILE] [--redact]
+                   glassport bundle verify OUT [--trusted-key PUB] [--json]
   summarize:       glassport summarize [--json|--sarif] <session.jsonl>
   detect:          glassport detect [--sarif] <session.jsonl>
                    (run all behavioral detectors; exit 1 if findings,
@@ -1815,7 +1819,7 @@ usage: glassport <command> [options]   (`glassport help <command>`, `glassport -
 """
 
 
-VERBS = ("probe", "wrap", "gate", "audit", "observe", "replay-decisions",
+VERBS = ("probe", "wrap", "gate", "audit", "observe", "replay-decisions", "bundle",
          "summarize", "detect", "advise", "report", "watch", "serve", "tui",
          "prune", "health")
 _VERB_HEAD = re.compile(r"^  ([a-z-]+)(?: \([a-z]+\))?:", re.M)
@@ -1966,6 +1970,10 @@ def main(argv: list[str]) -> int:
         # Verify recorded decisions against their wire evidence. Lazy import.
         from glassport import decision_replay
         return decision_replay.main(argv[1:])
+
+    if argv[0] == "bundle":
+        from glassport import bundle as bundle_mod
+        return bundle_mod.main(argv[1:])
 
     if argv[0] == "health":
         # tap self-metrics over recent sessions. Lazy import.
