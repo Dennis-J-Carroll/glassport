@@ -487,17 +487,9 @@ class HTTPLease:
             if not admitted:
                 facts['admitted'] = False
                 text = None   # the entry changed after it was serialized
-        persisted = self._write_locked(context, entry, text)
-        wire_digest = None
+        wire_digest = self._write_locked(context, entry, text)
+        persisted = bool(wire_digest)
         digest_reason = "http_log_failed" if not persisted else None
-        if persisted:
-            try:
-                exact_line = text if text is not None else _serialize_entry(entry)
-                wire_digest = hashlib.sha256(
-                    (exact_line + "\n").encode("utf-8")).hexdigest()
-            except Exception:
-                # A receipt without reconstructible bytes cannot be bound.
-                digest_reason = "wire_serialization_unavailable"
         final = Observation(context.epoch, context.seq, event, annotations, persisted,
                             facts.get('loss') or inherited
                             or ('http_log_failed' if not persisted else None),
@@ -522,7 +514,7 @@ class HTTPLease:
         """Failed logging never pretends to provide persisted linkage."""
         if context.log is None:
             return False
-        return bool(context.log.write_entry(entry, text))
+        return context.log.write_entry(entry, text)
 
     def _loss_locked(self, reason):
         """Return the first loss observation; callers emit outside context locks."""

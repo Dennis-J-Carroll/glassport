@@ -66,7 +66,7 @@ class TestStdioContract(unittest.TestCase):
                    for line in path.read_text().splitlines()]
         self.assertIn("blocked_policy", [e.get("gate", {}).get("evidence_level")
                                          for e in entries])
-        self.assertIn("forwarded", [e.get("gate", {}).get("evidence_level")
+        self.assertIn("injected_locally", [e.get("gate", {}).get("evidence_level")
                                     for e in entries])
 
     def test_stdio_wrap(self):

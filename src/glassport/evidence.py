@@ -12,20 +12,23 @@ BLOCKED_POLICY = "blocked_policy"
 BLOCKED_EVIDENCE_GAP = "blocked_evidence_gap"
 BLOCKED_ADMISSION = "blocked_admission"
 FORWARDED = "forwarded"
+INJECTED_LOCALLY = "injected_locally"
 EXTERNALLY_CONFIRMED = "externally_confirmed"  # reserved; never emitted here
 
 LEVELS = frozenset({OBSERVED, ANALYZED, INTENDED_BLOCK, BLOCKED_POLICY,
                     BLOCKED_EVIDENCE_GAP, BLOCKED_ADMISSION, FORWARDED,
+                    INJECTED_LOCALLY,
                     EXTERNALLY_CONFIRMED})
 
 _ADMISSION_REASONS = frozenset({
     "uninspectable_frame", "frame_too_deep", "batch_unsupported",
+    "unencodable_reply",
 })
 _GAP_REASONS = frozenset({
     "no_surface_timeout", "gate_check_error", "resource_tracking_error",
     "attestation_unavailable", "attestation_check_error",
     "schema_scan_error", "pii_scan_error", "quarantine_scan_error",
-    "surface_observe_error",
+    "surface_observe_error", "idempotency_check_error", "taint_scan_error",
 })
 
 
@@ -47,8 +50,9 @@ def gate_level(gate: dict) -> str:
                 else BLOCKED_POLICY)
     if action == "quarantined":
         return BLOCKED_POLICY  # original server frame was not delivered
-    if action in ("injected", "quarantine_replacement", "gate_skipped",
-                  "gate_disabled", "quarantine_scan_error"):
+    if action in ("injected", "quarantine_replacement"):
+        return INJECTED_LOCALLY
+    if action in ("gate_skipped", "gate_disabled", "quarantine_scan_error"):
         return FORWARDED
     return OBSERVED
 
@@ -84,9 +88,6 @@ def annotation_level(annotation, event=None) -> str:
     if not isinstance(subcategory, str):
         return ANALYZED
     if subcategory == "gate_blocked":
-        gate = getattr(event, "metadata", {}).get("gate", {}) if event else {}
-        return gate_level(gate) if isinstance(gate, dict) else OBSERVED
-    if subcategory.startswith("gate_"):
         gate = getattr(event, "metadata", {}).get("gate", {}) if event else {}
         return gate_level(gate) if isinstance(gate, dict) else OBSERVED
     return ANALYZED

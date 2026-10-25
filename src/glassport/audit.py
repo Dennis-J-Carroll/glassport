@@ -264,8 +264,15 @@ JS_PATTERNS = [
                               r"\b(axios|node-fetch|undici)\b")),
 ]
 
-NET_MODULES = {"socket", "urllib", "http", "requests", "aiohttp", "httpx",
-               "ftplib", "smtplib", "websockets"}
+NET_MODULES = {"socket", "requests", "aiohttp", "httpx", "ftplib",
+               "smtplib", "websockets"}
+NET_SUBMODULES = {"urllib.request", "http.client", "http.server"}
+
+
+def _network_module(name: str) -> bool:
+    return (name.split(".")[0] in NET_MODULES
+            or any(name == module or name.startswith(module + ".")
+                   for module in NET_SUBMODULES))
 
 
 def _line_of(text: str, pos: int) -> int:
@@ -437,7 +444,7 @@ class _PyVisitor(ast.NodeVisitor):
     def visit_Import(self, node: ast.Import) -> None:
         for n in node.names:
             self.aliases[n.asname or n.name.split(".")[0]] = n.name
-            if n.name.split(".")[0] in NET_MODULES:
+            if _network_module(n.name):
                 self.hits.append(("net-egress", node.lineno,
                                   f"imports {n.name}"))
         self.generic_visit(node)
@@ -446,7 +453,8 @@ class _PyVisitor(ast.NodeVisitor):
         mod = node.module or ""
         for n in node.names:
             self.aliases[n.asname or n.name] = f"{mod}.{n.name}"
-        if mod.split(".")[0] in NET_MODULES:
+        if (_network_module(mod) or any(_network_module(f"{mod}.{n.name}")
+                                        for n in node.names)):
             self.hits.append(("net-egress", node.lineno,
                               f"imports from {mod}"))
         self.generic_visit(node)

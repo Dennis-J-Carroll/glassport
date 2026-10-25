@@ -16,6 +16,9 @@ def compute_limits(header, trailer, journal_records, wire_entries) -> list[dict]
     journal = [r for r in (journal_records or ()) if isinstance(r, dict)]
     if header is None or header.get("type") != "glassport.header":
         out.append({"code": "header_missing"})
+        out.append({"code": "unknown_transport_raw_bytes"})
+    if trailer is None or trailer.get("type") != "glassport.metrics":
+        out.append({"code": "trailer_missing"})
     if header is not None and header.get("transport") == "stdio":
         missing_raw = sum(1 for e in entries if e.get("dir") in ("c2s", "s2c")
                           and "wire_b64" not in e)
@@ -52,6 +55,8 @@ def compute_limits(header, trailer, journal_records, wire_entries) -> list[dict]
     if not journal:
         out.append({"code": "no_journal_for_path"})
     else:
+        if any(r.get("kind") == "truncated" for r in journal):
+            out.append({"code": "journal_truncated"})
         absent = sorted({r["wire_seq"] for r in journal
                          if r.get("kind") == "intent"
                          and type(r.get("wire_seq")) is int

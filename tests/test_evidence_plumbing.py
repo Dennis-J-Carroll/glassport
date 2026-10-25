@@ -19,13 +19,27 @@ from tests.test_http_gate import GateCase
 
 
 class TestSessionHeaderTrailer(unittest.TestCase):
+    def test_write_receipts_hash_exact_persisted_lines(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "receipt.jsonl"
+            log = tap.SessionLog(path)
+            entry = {"seq": 1, "frame": {"text": "é"}}
+            receipt = log.write_entry(entry)
+            self.assertEqual(receipt,
+                             hashlib.sha256(path.read_bytes()).hexdigest())
+            before = path.stat().st_size
+            journal_receipt = log.write_json({"kind": "profile", "epoch": "é"})
+            self.assertEqual(journal_receipt,
+                             hashlib.sha256(path.read_bytes()[before:]).hexdigest())
+            log.close()
+
     def test_new_capture_hashes_exact_pretrailer_bytes_and_redacts_url(self):
         with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
                 os.environ, {"GLASSPORT_COMMIT": "abcdef1234567"}):
             path = Path(tmp) / "s.jsonl"
             log = tap.open_session_log(
                 path, transport="http", mode="gate", strict=True,
-                remote_url="https://alice:secret@example.test/mcp?token=secret#secret")
+                remote_url="https://alice:secret@example.test/s/path-canary/mcp?token=secret#secret")
             self.assertIsNotNone(log)
             log.record("c2s", b'{"jsonrpc":"2.0","id":7,"method":"ping"}\n')
             log.write_metrics()
@@ -37,7 +51,11 @@ class TestSessionHeaderTrailer(unittest.TestCase):
             self.assertEqual(header["commit"], "abcdef1234567")
             self.assertEqual((header["transport"], header["mode"], header["strict"]),
                              ("http", "gate", True))
-            self.assertEqual(header["remote_url"], "https://example.test/mcp")
+            self.assertEqual(header["remote"], {
+                "scheme": "https", "host": "example.test", "port": None,
+                "path_sha256": hashlib.sha256(b"/s/path-canary/mcp").hexdigest(),
+            })
+            self.assertNotIn(b"path-canary", lines[0])
             self.assertNotIn(b"alice", lines[0])
             self.assertNotIn(b"secret", lines[0])
             self.assertIn("header_values", header["redacted"])
@@ -145,7 +163,8 @@ class TestHeaderReaders(unittest.TestCase):
 class TestComputedLimits(unittest.TestCase):
     def test_each_known_gap_has_code_and_ranges(self):
         header = {"type": "glassport.header", "transport": "stdio", "strict": True}
-        trailer = {"seq_range": [1, 5], "write_failures": 2}
+        trailer = {"type": "glassport.metrics", "seq_range": [1, 5],
+                   "write_failures": 2}
         journal = [{"kind": "profile", "strict": True,
                     "authorization": {"status": "not_evaluated"}},
                    {"kind": "intent", "wire_seq": 4}]
@@ -164,7 +183,8 @@ class TestComputedLimits(unittest.TestCase):
     def test_legacy_default_without_journal_names_missing_claims(self):
         codes = {x["code"] for x in compute_limits(
             None, None, None, [{"seq": 1, "dir": "c2s"}])}
-        self.assertEqual(codes, {"header_missing", "no_journal_for_path",
+        self.assertEqual(codes, {"header_missing", "unknown_transport_raw_bytes",
+                                 "trailer_missing", "no_journal_for_path",
                                  "authorization_not_evaluated", "no_signature"})
         codes = {x["code"] for x in compute_limits(
             {"type": "glassport.header", "transport": "http", "strict": False},
@@ -174,10 +194,21 @@ class TestComputedLimits(unittest.TestCase):
 
     def test_huge_claimed_sequence_range_is_bounded_work(self):
         result = compute_limits({"type": "glassport.header"},
-                                {"seq_range": [1, 10**12]}, None,
+                                {"type": "glassport.metrics", "seq_range": [1, 10**12]}, None,
                                 [{"seq": 1}, {"seq": 10**12}])
         self.assertEqual(next(x for x in result if x["code"] == "seq_gap")["ranges"],
                          [[2, 10**12 - 1]])
+
+    def test_missing_trailer(self):
+        codes = {x["code"] for x in compute_limits(
+            {"type": "glassport.header", "transport": "http"}, None, [], [])}
+        self.assertIn("trailer_missing", codes)
+
+    def test_journal_truncated(self):
+        codes = {x["code"] for x in compute_limits(
+            {"type": "glassport.header"}, {"type": "glassport.metrics"},
+            [{"kind": "profile"}, {"kind": "truncated"}], [])}
+        self.assertIn("journal_truncated", codes)
 
 
 class TestStableFindingIds(unittest.TestCase):

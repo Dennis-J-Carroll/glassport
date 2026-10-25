@@ -291,7 +291,7 @@ Each record occupies one physical line:
 - `frame` is the parsed JSON-RPC frame; lines that fail to parse are preserved verbatim in `raw` — nothing is dropped on ingest
 - New wire entries use `schema_version: "0.2"`; existing `0.1` logs remain
   readable. Readers skip tap-owned `glassport.*` records as wire events.
-- Header records version, transport, mode, strict flag, redacted remote URL,
+- Header records version, transport, mode, strict flag, remote scheme/host/port and SHA-256 of the raw URL path,
   policy/detector/journal versions, and start time. Commit is an explicit
   installed VCS or `GLASSPORT_COMMIT` value, otherwise `null`; it is never
   guessed from a nearby checkout. URL userinfo, query, fragment, and HTTP

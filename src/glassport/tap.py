@@ -77,7 +77,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import urlsplit
 
 SCHEMA_VERSION = "0.2"
 DEFAULT_LOG_DIR = Path(os.environ.get("GLASSPORT_LOG_DIR",
@@ -114,16 +114,18 @@ def build_session_header(*, transport: str, mode: str, strict: bool = False,
     header = {"type": "glassport.header", "schema_version": SCHEMA_VERSION,
               "glassport_version": __version__, "commit": _source_commit(),
               "transport": transport, "mode": mode, "strict": bool(strict),
-              "redacted": ["url_userinfo", "url_query", "url_fragment",
+              "redacted": ["url_userinfo", "url_query", "url_fragment", "url_path",
                            "header_values"],
               "policy_version": POLICY_VERSION,
               "detector_engine": DETECTOR_ENGINE_VERSION,
               "journal_schema": JOURNAL_SCHEMA, "started_at": _now_iso()}
     if remote_url is not None:
         parsed = urlsplit(remote_url)
-        header["remote_url"] = urlunsplit((parsed.scheme,
-                                             parsed.netloc.rsplit("@", 1)[-1],
-                                             parsed.path, "", ""))
+        header["remote"] = {
+            "scheme": parsed.scheme, "host": parsed.hostname,
+            "port": parsed.port,
+            "path_sha256": hashlib.sha256(parsed.path.encode("utf-8")).hexdigest(),
+        }
     return header
 
 
@@ -341,7 +343,7 @@ class SessionLog:
                 self.close()
                 raise
 
-    def _write(self, text: str) -> None:
+    def _write(self, text: str) -> bytes:
         """Count failed append calls once; caller holds the session lock."""
         try:
             encoded = text.encode("utf-8")
@@ -351,6 +353,7 @@ class SessionLog:
             self._digest.update(encoded[:written])
             if written != len(encoded):
                 raise OSError("short session log write")
+            return encoded
         except Exception:
             self.write_failures += 1
             if not self._warned_write_failure:
@@ -422,8 +425,8 @@ class SessionLog:
             self._seq += 1
         return self._seq
 
-    def write_entry(self, entry: dict, text: str | None = None) -> bool:
-        """Append one envelope built by :func:`build_session_entry`; True on
+    def write_entry(self, entry: dict, text: str | None = None) -> str | None:
+        """Append one envelope built by :func:`build_session_entry`; SHA-256 on
         a successful write call. `text` is its serialization when the caller
         still holds the one build_session_entry returned and has not changed
         the entry since; otherwise it is serialized here. Never raises."""
@@ -432,14 +435,14 @@ class SessionLog:
                 self._claim_sequence(entry.get("seq"))
                 if text is None:
                     text = _serialize_entry(entry)
-                self._write(text + "\n")
+                written = self._write(text + "\n")
                 self._entries_written += 1
-            return True
+            return hashlib.sha256(written).hexdigest()
         except Exception:
-            return False
+            return None
 
-    def write_json(self, entry: dict) -> bool:
-        """Append one caller-shaped JSON record; True on a successful write.
+    def write_json(self, entry: dict) -> str | None:
+        """Append one caller-shaped JSON record; SHA-256 on a successful write.
 
         Not a wire frame and not part of the session schema: this is the
         private-file append primitive (0700 dir, 0600 file, one lock, never
@@ -449,10 +452,10 @@ class SessionLog:
         try:
             line = json.dumps(entry, ensure_ascii=False) + "\n"
             with self._lock:
-                self._write(line)
-            return True
+                written = self._write(line)
+            return hashlib.sha256(written).hexdigest()
         except Exception:
-            return False  # journaling is best-effort; the relay is sacred
+            return None  # journaling is best-effort; the relay is sacred
 
     def write_metrics(self, **fields) -> None:
         """One self-observation line at session end (H1.09): what the tap
@@ -909,7 +912,8 @@ class Gate:
                 if withheld is None:
                     return ("drop", None, {"action": "quarantine_dropped",
                                            "uri": uri, "reason": "quarantine_scan_error"})
-                return ("rewrite", withheld, {"action": "quarantine_withheld", "uri": uri})
+                return ("rewrite", withheld, {"action": "quarantine_withheld",
+                                              "uri": uri, "reason": "quarantine_scan_error"})
             return ("forward", None,
                     {"action": "quarantine_scan_error", "uri": uri})
         return ("rewrite", new_line, {"action": "quarantined", "uri": uri})

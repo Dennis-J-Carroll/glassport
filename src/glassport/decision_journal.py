@@ -416,10 +416,10 @@ class DecisionJournal:
             return False
         try:
             record["prev_sha256"] = entry.prev_sha256
-            line = json.dumps(record, ensure_ascii=False) + "\n"
-            if not entry.log.write_json(record):
+            digest = entry.log.write_json(record)
+            if not digest:
                 return False
-            entry.prev_sha256 = hashlib.sha256(line.encode("utf-8")).hexdigest()
+            entry.prev_sha256 = digest
             return True
         except Exception:
             return False
