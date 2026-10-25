@@ -53,6 +53,7 @@ from __future__ import annotations
 
 from glassport.adapters.mcp_session import MCPTraceBuilder
 from glassport.attestation import ATTESTATION_KEY, validate_public_key
+from glassport.evidence import gate_level
 from glassport.detectors import (
     MAX_SCAN_BYTES, find_taint, _schema_problems, _scan_pii, _redact,
     neutralize_text, _TAINT_PATTERNS,
@@ -234,7 +235,7 @@ def build_session_entry(direction: str, line: bytes, gate: dict | None = None,
         "raw": raw,
     }
     if gate is not None:
-        entry["gate"] = gate
+        entry["gate"] = {**gate, "evidence_level": gate_level(gate)}
     if metadata is not None:
         entry["sse_meta"] = metadata
     if observation is not None:

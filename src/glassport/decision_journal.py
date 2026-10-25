@@ -46,12 +46,12 @@ from pathlib import Path
 import re
 import threading
 
-from glassport import detectors, policy
+from glassport import detectors, evidence, policy
 from glassport.interaction_trace import AnnotationKind, EventKind
 
 # Bumped by hand whenever the record shape or the decision semantics change.
 # Replay refuses to claim equivalence across a change in any of the three.
-JOURNAL_SCHEMA = "glassport.decision-journal/1"
+JOURNAL_SCHEMA = "glassport.decision-journal/2"
 POLICY_VERSION = "glassport.policy/2"  # opt-in strict blocks missing evidence
 # /2: the fold changed. A client request the gate refuses is folded for
 # analysis but never becomes a pending correlation (its wire entry says
@@ -300,8 +300,8 @@ class Intent:
     """Handle linking a later delivery record back to its decision record.
 
     `enforce` is the *enforcement* verdict, not the candidate one: True only in
-    gate mode, only for a candidate BLOCK, and only when the analysis pass that
-    produced it was complete. It is computed before any record is written, so a
+    gate mode, for a proved candidate BLOCK or a strict evidence-gap refusal.
+    It is computed before any record is written, so a
     journal write failure can never turn a proved block into a forward.
     """
     epoch: str
@@ -310,6 +310,7 @@ class Intent:
     action: str
     written: bool
     enforce: bool = False
+    analyzed: bool = False
 
 
 class _EpochJournal:
@@ -456,6 +457,7 @@ class DecisionJournal:
             "kind": "profile", "schema": JOURNAL_SCHEMA, "epoch": epoch,
             "n": next(self._counter), "ts": _now_iso(), "mode": self.mode,
             "policy_version": POLICY_VERSION, "strict": self.strict,
+            "authorization": {"status": "not_evaluated"},
             "detector_engine": DETECTOR_ENGINE_VERSION,
             "pattern_digest": profile.digest,
             "pattern_status": (profile.status if exact else PROFILE_INCOMPLETE),
@@ -479,6 +481,8 @@ class DecisionJournal:
         for ann in getattr(observation, "annotations", ()) or ():
             subcategory = getattr(ann, "subcategory", None)
             if isinstance(subcategory, str) and subcategory in _STRICT_EVIDENCE_GAPS:
+                if _limit_is_this_requests_own_id(ann):
+                    continue
                 return _safe_token(subcategory)
         return None
 
@@ -597,6 +601,9 @@ class DecisionJournal:
             # deliberately separate so the gap between them stays auditable.
             "candidate_block": action == policy.Action.BLOCK.value,
             "enforce": enforce,
+            "evidence_level": evidence.intent_level(
+                analyzed=analyzed, candidate_block=action == policy.Action.BLOCK.value,
+                enforce=enforce, strict_gap=bool(self.strict_reason(observation))),
             "wire_seq": wire_seq,
             "event_seq": event_seq,
             "persisted": bool(getattr(observation, "persisted", False)),
@@ -613,7 +620,8 @@ class DecisionJournal:
             entry = self._open(epoch)
             record["n"] = next(self._counter)
             written = self._write(entry, record)
-        return Intent(epoch, record["n"], event_seq, action, written, enforce)
+        return Intent(epoch, record["n"], event_seq, action, written, enforce,
+                      analyzed)
 
     def record_delivery(self, intent, outcome, *, code=None, status=None,
                         reason=None) -> bool:
@@ -644,6 +652,9 @@ class DecisionJournal:
             "enforced": bool(getattr(intent, "enforce", False))
                         and outcome == OUTCOME_BLOCKED,
             "candidate_action": intent.action,
+            "evidence_level": evidence.delivery_level(
+                outcome=outcome, code=code, candidate_action=intent.action,
+                analyzed=intent.analyzed),
         }
         if code == "http_gate_strict_blocked":
             record["reason"] = _safe_token(reason, default="evidence_unavailable")

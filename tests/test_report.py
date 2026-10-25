@@ -84,6 +84,7 @@ class TestAnnotations(unittest.TestCase):
     def test_fabricated_call_rendered_sev3(self):
         h = render(handshake() + [call(6, 3, "arxiv_lookup", {"q": "x"})])
         self.assertIn('data-sev="3"', h)
+        self.assertIn('data-evidence-level="analyzed"', h)
         self.assertIn("fabricated_tool_call", h)
         self.assertIn("outside the declared surface", h)
 

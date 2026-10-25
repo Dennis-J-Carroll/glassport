@@ -1109,7 +1109,8 @@ class TestGateHostileShapes(unittest.TestCase):
         self.assertEqual(out, TOOLS_LIST_RESULT)
         self.assertEqual(len(entries), 2)
         self.assertEqual(entries[0]["gate"], {"action": "quarantine_dropped",
-                                              "reason": "frame_too_deep"})
+                                              "reason": "frame_too_deep",
+                                              "evidence_level": "blocked_admission"})
         self.assertIsNotNone(entries[0]["raw"])
 
     def test_unexpected_gate_fault_forwards_original_and_relay_survives(self):
@@ -1118,7 +1119,8 @@ class TestGateHostileShapes(unittest.TestCase):
             out, entries, _ = self.pump_logged(first + second, "c2s", declared_gate())
         self.assertEqual(out, first + second)
         self.assertEqual([e["gate"] for e in entries],
-                         [{"action": "gate_skipped", "reason": "gate_check_error"}] * 2)
+                         [{"action": "gate_skipped", "reason": "gate_check_error",
+                           "evidence_level": "forwarded"}] * 2)
 
     def test_log_keeps_entry_when_frame_cannot_be_reserialized(self):
         real_dumps = json.dumps
@@ -1138,7 +1140,8 @@ class TestGateHostileShapes(unittest.TestCase):
             entry = json.loads(path.read_text())
         self.assertIsNone(entry["frame"])
         self.assertEqual(entry["raw"], raw.decode().rstrip("\n"))
-        self.assertEqual(entry["gate"], {"action": "blocked"})
+        self.assertEqual(entry["gate"], {"action": "blocked",
+                                         "evidence_level": "blocked_policy"})
 
     def id_call(self, rid_json: str, name: str = "rm_rf") -> bytes:
         return ('{"jsonrpc":"2.0","id":%s,"method":"tools/call","params":'
@@ -1218,7 +1221,8 @@ class TestGateHostileShapes(unittest.TestCase):
             entry = json.loads(path.read_text())
         self.assertEqual(entry["seq"], 1)
         self.assertEqual(entry["frame"]["params"]["name"], "x\ud800")
-        self.assertEqual(entry["gate"], {"action": "blocked"})
+        self.assertEqual(entry["gate"], {"action": "blocked",
+                                         "evidence_level": "blocked_policy"})
 
     def test_lone_surrogate_does_not_defeat_resource_quarantine(self):
         # The rewrite re-encodes the whole frame, so a surrogate in any
@@ -1273,7 +1277,8 @@ class TestGateHostileShapes(unittest.TestCase):
         out, entries, _ = self.pump_logged(deep, "s2c", self.pending_read_gate())
         self.assertEqual(out, b"")
         self.assertEqual(entries[0]["gate"], {"action": "quarantine_dropped",
-                                              "reason": "frame_too_deep"})
+                                              "reason": "frame_too_deep",
+                                              "evidence_level": "blocked_admission"})
         _require_posix_override(self)
         with tempfile.TemporaryDirectory() as tmp:
             g = self.pending_read_gate(self.disabled_gate(tmp))

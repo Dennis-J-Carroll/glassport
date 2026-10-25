@@ -7,7 +7,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versions follow 
 ## [Unreleased]
 
 ### Added
-- add opt-in strict HTTP evidence-gap blocking
+- label evidence levels; policy/2 journal /1 replay unsupported
+- add opt-in strict HTTP evidence-gap blocking (#112)
 - accept --port for http wrap and gate (#101)
 
 ### Fixed
@@ -22,6 +23,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versions follow 
 - add a Parallel Search MCP capture recipe (#99)
 
 ### Internal
+- lock Phase 2 claims on live contract paths
 - skip journal permission test when running as root (#108)
 - skip journal permission test when running as root (#106)
 - pin server-filesystem and wait for the tools/call reply (#102)

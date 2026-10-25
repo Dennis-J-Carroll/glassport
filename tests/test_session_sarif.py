@@ -92,6 +92,7 @@ class TestRenderSessionSarif(unittest.TestCase):
                if r["ruleId"] == "glassport/fabricated_tool_call"]
         self.assertTrue(res)
         self.assertEqual(res[0]["level"], "error")          # sev 3 -> error
+        self.assertEqual(res[0]["properties"]["evidence_level"], "analyzed")
 
     def test_result_locates_at_real_jsonl_line(self):
         doc, path = self._fabricated()
