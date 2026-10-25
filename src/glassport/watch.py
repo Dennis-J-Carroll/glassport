@@ -24,6 +24,40 @@ happen, 3 = hostile or hallucinated unless proven otherwise.
     python3 watch.py [~/.glassport/sessions] [--json]
 
 Exit code 1 when drift of severity >= 2 is present (cron-friendly).
+
+PLAY-BY-PLAY
+------------
+The shape of the file is a pipeline, and the order of its stages is the
+argument:
+
+1. `fingerprint()` turns one session into a flat, JSON-able summary: which
+tools were declared, hashes of their input schemas, which were called and
+how often, which hosts appear in the traffic, which requests the server
+started, and who the server says it is.
+2. `watch_paths()` reads every log, groups the fingerprints per server, sorts
+   each group by time, then replays them.
+3. `drift()` answers one question per session: what is here that has never
+   been here before? `merge()` then folds the session into the baseline.
+   That order is deliberate -- compare against history, *then* become
+history, so a session is never its own evidence.
+4. `main()` renders and exits 1 on any severity-2 drift.
+
+The vocabulary to learn before the findings make sense:
+
+* A *baseline* is the union of everything this server has ever been observed
+doing. It lives in memory, rebuilt from the logs each run, with nothing to
+corrupt and nothing to expire.
+* *Drift* is novelty relative to that baseline, not misbehavior. A new host
+is not an attack; it is a change that someone should look at.
+* Jensen-Shannon divergence (`_jsd`) compares the *shape* of tool-call
+usage, so a session that suddenly pivots from reading files to posting data
+reads as a change even though every individual call is familiar.
+
+WHAT THIS FILE DOES NOT DO
+--------------------------
+It never runs detectors and never judges a session on its own. It also
+never stores a baseline on disk: if a log is deleted, the drift it produced
+is gone with it.
 """
 from __future__ import annotations
 
@@ -59,6 +93,10 @@ class Drift:
 # ─────────────────────────────────────────────────────────────────
 # Fingerprint — one session reduced to its comparable facts.
 # ─────────────────────────────────────────────────────────────────
+# PLAY: Hashing the schema is what makes schema comparison possible at all;
+# two JSON objects with the same meaning but different key order must not
+# read as a change. sort_keys and the tightest separators give one canonical
+# byte string, and 12 hex characters is plenty to distinguish real edits.
 def _schema_hash(schema) -> str:
     canonical = json.dumps(schema, sort_keys=True, separators=(",", ":"),
                            default=str)
@@ -67,6 +105,11 @@ def _schema_hash(schema) -> str:
 
 def _hosts_in(content) -> set[str]:
     """Hostnames of URLs appearing anywhere inside a JSON-able value."""
+    # PLAY: This is deliberately a blunt regex over the serialized value and
+    # not a parser. The goal is not to understand the traffic, it is to
+    # notice a hostname that has never appeared before -- and an attacker
+    # choosing the argument shape should not be able to hide a URL from a
+    # walk that does not care about shape.
     blob = json.dumps(content, ensure_ascii=False, default=str) \
         if not isinstance(content, str) else content
     hosts = set()
@@ -82,6 +125,11 @@ def _jsd(p_counts: dict[str, int], q_counts: dict[str, int]) -> float:
     """Jensen-Shannon Divergence, base 2, bounded [0, 1]. See
     APPENDIX.md §6 for the derivation. 0.0 = identical distributions,
     1.0 = disjoint support."""
+    # PLAY: JSD rather than a plain histogram diff because it is symmetric,
+    # bounded, and does not blow up when a tool name appears in one side and
+    # not the other (KL would go to infinity). One thin helper `kl()` does the
+    # real work; the rest is normalising two count maps onto a shared
+    # vocabulary and averaging against the midpoint distribution.
     vocab = sorted(set(p_counts) | set(q_counts))
     if not vocab:
         return 0.0
@@ -102,6 +150,9 @@ def _jsd(p_counts: dict[str, int], q_counts: dict[str, int]) -> float:
     return (kl(p, m) + kl(q, m)) / 2.0
 
 
+# PLAY: The threshold is a judgment call held in one place, next to its
+# explanation. JSD_MIN_CALLS keeps short sessions from scoring: five calls on
+# each side is the minimum where a distribution means anything at all.
 JSD_DRIFT_THRESHOLD = 0.15
 JSD_MIN_CALLS = 5   # minimum total calls on both sides before scoring
 
@@ -123,6 +174,12 @@ def _premature_list_changed(trace: InteractionTrace) -> bool:
     and omitted/invalid TTLs replace, rather than inherit, the old window.
     Only responses paired with tools/list establish a cache window.
     """
+    # PLAY: The MCP cache contract, in one sentence: a tools/list response may
+    # carry a ttlMs telling clients how long they may reuse the list, and a
+    # list_changed notification tells them to refresh. A server that fires
+    # list_changed *before* its own TTL expires is either confused about its
+    # own cache or trying to force clients to re-read a surface early. This
+    # walk tracks the last valid window and flags the first premature fire.
     base, ttl_ms = None, None
     for e in trace.events:
         if e.metadata.get("method_replied_to") == "<tools/list>":
@@ -205,6 +262,10 @@ def _classify_schema_change(old: dict | None, new: dict | None) -> str:
 
 def fingerprint(trace: InteractionTrace, source_name: str = "") -> dict:
     """Reduce a trace to a JSON-serializable, order-independent summary."""
+    # PLAY: Everything compared later is computed here, once, from the trace.
+    # Note the deliberate omissions: no timings, no event ids, no message
+    # bodies. A fingerprint that carried message text would change on every
+    # session for innocent reasons and drown the real novelty.
     server_meta: dict = {}
     declared_defs: list[dict] = []
     for a in trace.actors:
@@ -267,6 +328,10 @@ def fingerprint(trace: InteractionTrace, source_name: str = "") -> dict:
 # ─────────────────────────────────────────────────────────────────
 # Baseline — the union of everything this server has been seen doing.
 # ─────────────────────────────────────────────────────────────────
+# PLAY: The baseline is a plain dict of sets, every key ending in `_ever`
+# except the three that describe "last time". Sets mean no ordering and no
+# duplicates to reason about; the `_ever` suffix is the reminder that these
+# answers are cumulative across the whole history, not just the last session.
 def new_baseline() -> dict:
     return {
         "sessions": 0,
@@ -287,6 +352,11 @@ def new_baseline() -> dict:
 
 def merge(baseline: dict, fp: dict) -> dict:
     """Fold one fingerprint into the baseline (mutates and returns it)."""
+    # PLAY: `last_declared` is overwritten, never unioned -- "removed tools"
+    # only means something against the most recent surface. The guard right
+    # below it matters for the same reason: a session that never produced a
+    # tools/list (server died during the handshake) must not erase the known
+    # surface, or every following session would look like it removed tools.
     baseline["sessions"] += 1
     baseline["declared_ever"] |= set(fp["declared_tools"])
     baseline["called_ever"] |= set(fp["called_tools"])
@@ -312,12 +382,21 @@ def merge(baseline: dict, fp: dict) -> dict:
 
 def drift(baseline: dict, fp: dict) -> list[Drift]:
     """Novelty in this fingerprint relative to the merged baseline."""
+    # PLAY: The first session returns nothing, by construction. That is not a
+    # special case to route around; it is the definition. On day one there is
+    # no history to differ from, and inventing findings from a first look is
+    # exactly the noise that teaches people to ignore a tool.
     if baseline["sessions"] == 0:
         return []   # first session IS the baseline; nothing to compare
 
     src = fp["source"]
     out: list[Drift] = []
 
+    # PLAY: One constructor, `d()`, for every finding below. Note that each
+    # finding carries the session it came from and a sentence a human can act
+    # on -- never just a diff. The severity scale is the detector one: 1 worth
+    # a look, 2 should not happen, 3 hostile or hallucinated unless proven
+    # otherwise.
     def d(kind, severity, explanation, **detail):
         out.append(Drift(session=src, kind=kind, severity=severity,
                          explanation=explanation, detail=detail))
@@ -337,6 +416,9 @@ def drift(baseline: dict, fp: dict) -> list[Drift]:
           tool=name)
 
     # only meaningful when this session actually produced a tools/list;
+    # PLAY: The mirror-image guard to merge(). Removal is only asserted when
+    # this session actually produced a tools/list; a trace that lost its head
+    # would otherwise make every declared tool look like it vanished.
     # a session with no handshake proves nothing about removal
     if fp.get("declaration_known", bool(fp["declared_tools"])):
         for name in sorted(baseline["last_declared"]
@@ -344,6 +426,9 @@ def drift(baseline: dict, fp: dict) -> list[Drift]:
             d("removed_declared_tool", 1,
               f"'{name}' disappeared from the declared surface", tool=name)
 
+    # PLAY: The distributional signal, and the only finding that needs
+    # arithmetic rather than set membership. Scaling severity with the score
+    # keeps a mild rebalance (1) apart from a wholesale pivot (3).
     baseline_calls = baseline["tool_call_counts_ever"]
     session_calls = fp["tool_call_counts"]
     if sum(baseline_calls.values()) >= JSD_MIN_CALLS and \
@@ -417,6 +502,10 @@ def drift(baseline: dict, fp: dict) -> list[Drift]:
 # ─────────────────────────────────────────────────────────────────
 # Pipeline — directory of tap logs -> per-server drift history.
 # ─────────────────────────────────────────────────────────────────
+# PLAY: Drift is only meaningful within one server's own history, so the
+# grouping key has to be right. serverInfo.name is the honest answer when the
+# server gave one; the fallback reads the tap's filename convention, and the
+# last resort is the file stem. Wrong key, wrong baseline, wrong findings.
 def _server_key(fp: dict, path: Path) -> str:
     """Server identity: serverInfo.name, else the name baked into the
     tap's log filename (<stamp>_<name>_<pid>.jsonl), else the stem."""
@@ -433,6 +522,10 @@ def watch_paths(paths: Iterable[str | Path]) -> dict[str, list[dict]]:
     each server's sessions in time order; the first session of a server
     is its baseline and carries no findings by construction.
     """
+    # PLAY: The three lines in the loop below are the core of the module and
+    # their order is load bearing: compare against the baseline, *then* merge
+    # the session into it. Flip them and every session becomes its own
+    # baseline, which is the same as having no drift detection at all.
     from glassport.adapters.mcp_session import from_mcp_session_file
 
     fps: list[tuple[Path, dict]] = []

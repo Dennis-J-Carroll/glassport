@@ -26,6 +26,40 @@ audit before you install, wrap while you run, gate when trust runs out.
     python3 audit.py --rubric
 
 Exit code 1 when any critical or high finding is present.
+
+PLAY-BY-PLAY
+------------
+This is the part of glassport that reads code instead of traffic. It never
+runs, imports, or installs what it audits -- the only execution here is
+parsing, and even that has a fallback.
+
+The flow:
+
+1. `Rule` is the catalog. Each rule carries its own published weight, a
+   severity, and a rule id. The id is what a suppression comment names and
+   what SARIF reports, so the vocabulary is the interface.
+2. A file is classified and scanned: `_scan_python()` walks an AST,
+   `_scan_js()` is pattern depth only, and both share `_scan_common()`.
+3. Hits pass `_drop_suppressed()`, which honors scoped
+   `# glassport: ignore[rule-id]` markers on the exact line.
+4. `Report` carries findings, the score, and the rubric that produced it.
+
+Three things worth remembering while reading the scanners:
+
+* The AST path exists so `model_eval(x)` is not mistaken for `eval`. When a
+  file will not parse, the pattern scanner runs instead and the report says
+  which mode was used.
+* The score is arithmetic, not judgment: 100 minus a fixed weight per rule
+  that fired, counted once per rule no matter how many lines hit. One noisy
+  pattern cannot zero a report.
+* Tool-poisoning detection looks for model-directed text planted in tool
+  descriptions -- the injection aimed at the agent, not at the machine.
+
+WHAT THIS FILE DOES NOT DO
+--------------------------
+It does not execute the target, resolve dependencies, query a registry (that
+is the opt-in provenance module), or see runtime behavior. Static audit and
+the tap compose; neither replaces the other.
 """
 from __future__ import annotations
 
@@ -79,6 +113,12 @@ class Rule:
     fix: str
 
 
+# PLAY: The catalog is the whole vocabulary of the tool and it is a literal
+# list, not a registry built at import time. Each Rule carries its published
+# reason and its published fix, because a finding that cannot tell you what to
+# do is just alarm. Adding a rule means adding a line here and nothing else,
+# which is what keeps the rubric reviewable by someone who is not a Python
+# programmer.
 RULES = [
     Rule("secret-hardcoded", "critical", "secrets",
          "Hardcoded credential in source",
@@ -167,6 +207,12 @@ RULES = [
 RULES_BY_ID = {r.id: r for r in RULES}
 
 
+# PLAY: Finding and Report are the two shapes every renderer consumes. A
+# Finding is one rule seen in one file, however many lines it hit (the count
+# carries that), and its path is always relative to the audited root so a
+# report can be compared across machines. Report adds the arithmetic outcome
+# and keeps the deduction list, so a reader can check the score rather than
+# trust it.
 @dataclass
 class Finding:
     rule: str
@@ -196,6 +242,9 @@ class Report:
 # Pattern rules (all file kinds) — secrets, poisoning, hidden unicode
 # ─────────────────────────────────────────────────────────────────
 # (label, regex); the secret value is always the last capture group
+# PLAY: The convention that makes one loop handle a dozen credential shapes:
+# whatever the pattern, the value itself is the last capture group. The scanner
+# below can then redact without knowing which vendor it is looking at.
 SECRET_PATTERNS = [
     ("possible hardcoded API key/secret",
      re.compile(r'(?i)\b(api[_-]?key|apikey|secret|token|password|passwd)'
@@ -236,6 +285,10 @@ HIDDEN_UNICODE = re.compile(
 NPX_AUTO_INSTALL = re.compile(r"\bnpx\s+(-y|--yes)\b")
 
 
+# PLAY: Hidden characters are removed for matching and remembered for
+# reporting. The second return value maps a position in the stripped text back
+# to a position in the original, so a poison match found in the clean view can
+# still be reported at the line where a reader will actually see the bytes.
 def _strip_invisible(text: str) -> tuple[str, list[int]]:
     """Return (text without invisible/bidi chars, index_map) where
     index_map[i] is the position of stripped char i in the original.
@@ -394,6 +447,9 @@ def _comment_lines(text: str, rel: str) -> set[int]:
     return _js_comment_lines(text)
 
 
+# PLAY: Not every model-directed phrase is equal. This grades the match
+# (imperative exfiltration language versus a mere mention of a tool name)
+# so the poisoning rule reports a severity rather than a boolean.
 def _poison_severity(line_text: str, line: int, rel: str,
                      comments: set[int], tool_file: bool = False) -> str:
     if line in comments:
@@ -414,6 +470,9 @@ _SUPPRESS_RE = re.compile(
     r"#\s*(?:nosec\b|glassport:\s*ignore(?:\[([a-z0-9,_\- ]+)\])?)", re.I)
 
 
+# PLAY: Suppression is scoped to one line and one rule id. A blanket
+# directive would let a single comment hide anything; naming the rule means
+# a reader can see exactly what was waived and why.
 def _is_suppressed(lines: list[str], line: int, rule: str) -> bool:
     if not 1 <= line <= len(lines):
         return False
@@ -436,6 +495,9 @@ def _drop_suppressed(hits: list[dict], text: str) -> list[dict]:
 # Python AST pass — calls resolved through import aliases, so that
 # model_eval() is not eval() and `import subprocess as sp` still counts.
 # ─────────────────────────────────────────────────────────────────
+# PLAY: The AST pass exists for one reason: precision. A pattern search
+# for `eval` matches `model_eval`; a Call node with func.id == "eval" does
+# not. Everything else about the file is deliberately shallow.
 class _PyVisitor(ast.NodeVisitor):
     def __init__(self) -> None:
         self.aliases: dict[str, str] = {}
@@ -508,16 +570,31 @@ class _PyVisitor(ast.NodeVisitor):
 # ─────────────────────────────────────────────────────────────────
 def _scan_common(text: str, rel: str) -> list[dict]:
     """Secrets, tool poisoning, hidden unicode — every file kind."""
+    # PLAY: One pass per rule family, all of them appending raw hit dicts and
+    # none of them deciding what a hit means. Aggregation, deduplication and
+    # scoring happen once at the end in _finalize_findings(). Keeping the split
+    # strict is what lets the AST scanner and the pattern scanner feed the same
+    # pipeline without either knowing about the other.
     hits = []
     for label, rx in SECRET_PATTERNS:
         for m in rx.finditer(text):
             secret = m.group(m.lastindex or 0)
+            # PLAY: The secret is redacted at the moment it is found, not at
+            # render time. Every step after this line -- JSON, SARIF, HTML, a
+            # terminal, a CI log -- then carries the tag and never the value,
+            # so there is no later path that can leak it by forgetting to
+            # redact.
             # same non-reversible tag as the runtime detectors: no prefix,
             # because a few characters are not recognizable as a secret and
             # so survive every downstream scrubber (text, JSON, SARIF)
             hits.append({"rule": "secret-hardcoded", "path": rel,
                          "line": _line_of(text, m.start()),
                          "detail": detectors._redact(secret, label)})
+    # PLAY: This is the counter to the obvious evasion: insert a zero-width
+    # character inside the word "ignore" and a naive pattern search misses the
+    # instruction while the model reading the tool description still sees
+    # something very like it. Matching happens on the stripped view, and the
+    # index map puts the finding back where it belongs.
     # poison patterns run on the invisible-stripped view (so a directive
     # split with zero-width chars is caught), then positions map back to
     # the original text for an exact line number
@@ -558,6 +635,10 @@ def _scan_common(text: str, rel: str) -> list[dict]:
 
 def _scan_python(text: str, rel: str) -> tuple[list[dict], str]:
     """AST pass; on a syntax error fall back to pattern depth."""
+    # PLAY: The second return value is the honesty marker. When a file will not
+    # parse -- because it is Python 2, or generated, or deliberately broken to
+    # dodge the AST pass -- the audit drops to pattern matching and says so in
+    # the profile, so nobody reads a shallow result as a clean one.
     try:
         tree = ast.parse(text)
     except SyntaxError:
@@ -663,6 +744,13 @@ def _finalize_findings(raw_hits: list[dict]
     """Group raw hits into Finding objects (one per rule+file), compute
     per-rule deductions, and derive score/grade. Shared by audit_path
     and audit_tool_registry so both use one scoring formula."""
+    # PLAY: Two different groupings, on purpose. Findings collapse per rule and
+    # file, so a rule that fires forty times in one file is one line with
+    # count=40. Deductions collapse further, per rule across the whole tree, so
+    # the score is "100 minus each rule that fired once" -- a single noisy
+    # pattern can never zero out a report. Both are derived from the same
+    # worst-hit-per-file pass above, which is why an earlier comment-level hit
+    # cannot mask a critical hit further down the file.
     order = {"critical": 0, "high": 1, "medium": 2, "low": 3,
              "note": 4, "info": 5}
     grouped: dict[tuple[str, str], Finding] = {}
@@ -704,6 +792,10 @@ def _finalize_findings(raw_hits: list[dict]
     return findings, deductions, score, grade
 
 
+# PLAY: The walk itself. Each file is classified once, sent to exactly one
+# scanner, and its hits merged; the depth counters record which scanner served
+# each file so the report can state its own confidence. Nothing here opens a
+# socket or imports the target, which is the promise printed in the README.
 def audit_path(path: str | Path) -> Report:
     root = Path(path).expanduser().resolve()
     base = root if root.is_dir() else root.parent
@@ -800,6 +892,10 @@ def audit_tool_registry(session_paths: list[Path]) -> Report:
     """Cross-server static audit: tool-name shadowing and unbounded
     schemas, read from a set of tap session logs (each log's declared
     tools/list surface IS the registry entry for that server)."""
+    # PLAY: The interesting question here is not "is this file suspicious" but
+    # "do two servers declare the same tool name". Shadowing is how one server
+    # answers another's calls, and it is invisible when you audit each server
+    # alone. The logs are the registry; no network, no install.
     from glassport.adapters.mcp_session import from_mcp_session_file
 
     raw_hits: list[dict] = []

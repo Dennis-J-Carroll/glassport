@@ -6,6 +6,31 @@ module renders from STRUCTURED fields only and never consumes the free-text
 Annotation.explanation / Finding.detail (which embed attacker-controlled
 tool names, hosts, and matched source). The few attacker-controlled values
 that are surfaced (host, tool, path) pass through _sanitize_inline first.
+
+PLAY-BY-PLAY
+------------
+This module writes into the one place where text becomes instructions: an
+agent-instruction file. That single fact explains everything about it.
+
+1. `render_advisory()` builds the markdown body from structured fields --
+   severity, rule id, category, counts -- and never from free-text
+   explanation or matched source.
+2. `_sanitize_inline()` is the gate for the few wire-influenced values that
+   do appear (a host, a tool name, a path). It accepts only an
+   identifier-shaped alphabet, so a value cannot forge a fence, open a code
+   span, or inject a directive.
+3. `wrap_block()` / `splice_block()` place the result inside a delimited
+   block in the target file, and splicing is idempotent: running twice
+   replaces the block rather than appending a second one.
+
+The reason for the strictness: an advisory that quoted a hostile tool name
+verbatim would be a tool-poisoning delivery mechanism aimed at the agent
+that reads the file next. Findings are described, never retold.
+
+WHAT THIS FILE DOES NOT DO
+--------------------------
+It does not read findings from disk or write files -- `tap._cmd_advise`
+does the I/O. This module is pure so the grills can drive it directly.
 """
 from __future__ import annotations
 
@@ -40,6 +65,9 @@ def _severity_int(severity: str | int) -> int:
     return _LEVEL_INT[_sarif_level(severity)]
 
 
+# PLAY: The allowlist, not a denylist. A value made of identifier
+# characters cannot close a code span, escape a fence, or start a new
+# markdown construct, no matter what the server named its tool.
 def _sanitize_inline(s: object, *, label: str = "value", cap: int = 64) -> str:
     """Render an attacker-controlled value safely. Identifier-shaped values are
     quoted as an inline-code span; anything carrying whitespace, markdown,
@@ -78,6 +106,10 @@ def wrap_block(content: str) -> str:
     return f"{BEGIN}\n{content}\n{END}"
 
 
+# PLAY: Idempotent by construction: find the delimited block and replace
+# it, otherwise append exactly one. Running this on every CI pass must not
+# grow the file, and a half-written block must be an error rather than a
+# reason to guess where the old one ended.
 def splice_block(existing: str, content: str) -> str:
     """Insert or replace the single glassport-owned fenced block.
 
@@ -166,6 +198,10 @@ def _static_line(f, base: str = "") -> str:
     return f"**[{sev}] {rule}** — {loc}: {desc}. Open the file to inspect."
 
 
+# PLAY: Note what this function is given: a static report and a list of
+# annotations, both already computed. It renders; it does not analyze. That
+# separation is what makes "the advisory contains only structured facts"
+# checkable by reading this function alone.
 def render_advisory(report, annotations, *, min_severity: int = 2, base: str = "") -> str:
     runtime = [a for a in (annotations or [])
                if _severity_int(a.severity) >= min_severity]

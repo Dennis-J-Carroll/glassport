@@ -3,6 +3,44 @@
 A registry belongs to one configured upstream. Headers route only within an
 opaque credential partition. Each epoch has its own wire log and no-history
 builder/engine. Neither raw credentials nor session tokens enter that log.
+
+PLAY-BY-PLAY
+------------
+HTTP has no pipe to sit in. Requests arrive as independent POSTs that
+may belong to one MCP session, several, or none, and the proxy has to
+decide which conversation each one continues before it can analyze
+anything. That is what this file does, and it is the whole file.
+
+The objects, in order:
+
+1. `HTTPRegistryLimits` bounds everything: sessions, idle time, identifier
+   length, retained SSE ids, frame size.
+2. `Observation` is the receipt for one frame, carrying its epoch, seq,
+   and whether the write actually succeeded.
+3. `_Context` is one conversation: its own log, builder, detector engine,
+   sequence counter, and frozen PII patterns.
+4. `HTTPObserver` is the registry. `begin()` routes a request to a
+   context, `resume_verifiable()` answers resume questions read-only, and
+   `reset()`/`close()` retire state.
+5. `HTTPLease` is one request in flight. It records frames, reports loss,
+   and releases its slot.
+
+Three rules shape the routing:
+
+* Credentials define a partition, and the partition key is an HMAC with a
+  per-process random salt -- never a plain digest, which would be
+  linkable across runs.
+* A context is never evicted while it holds a declaration. Otherwise a
+  caller who can cheaply mint bogus credentials could displace the real
+  session and switch enforcement off.
+* Anything the proxy cannot attribute is observed and reported as
+  `http_*` loss, never guessed into somebody else's session.
+
+WHAT THIS FILE DOES NOT DO
+--------------------------
+It does not send, forward, or enforce. It has no sockets: the transport
+adapter above it owns those. It records what it can attribute and names
+the reason when it cannot.
 """
 from __future__ import annotations
 
@@ -35,6 +73,9 @@ class HTTPRegistryLimits:
     max_frame_bytes: int = 1_000_000
 
     def __post_init__(self):
+        # PLAY: The integer fields reject bools by type, and idle_ttl gets a
+        # separate check for the same reason plus a finiteness test: an
+        # infinite idle TTL would mean contexts are never reclaimed.
         import math
         if (any(type(getattr(self, key)) is not int or getattr(self, key) < 1
                 for key in ('max_sessions', 'max_identifier_chars', 'max_sse_ids', 'max_frame_bytes'))
@@ -51,6 +92,10 @@ class Observation:
     persisted means this exact entry was accepted by SessionLog.write; it is
     neither fsync durability nor proof of a socket write or remote execution.
     """
+    # PLAY: Read `persisted` narrowly. It licenses exactly one claim: this
+    # entry was accepted by the writer. Everything stronger -- that the
+    # bytes reached the kernel, that the server received them, that the
+    # client read a reply -- has to be proven elsewhere.
     epoch: str | None
     seq: int | None
     event: object = None
@@ -63,6 +108,10 @@ class Observation:
 
 @dataclass(eq=False)
 class _Context:
+    # PLAY: One conversation, one lock, one log. `active` counts leases so a
+    # retired context is not closed while a request still writes to it.
+    # `eq=False` matters: identity is what distinguishes two contexts, and a
+    # value comparison would confuse two epochs that happen to match.
     epoch: str
     partition: str
     last_used: float
@@ -95,6 +144,10 @@ def _single(headers, name, limit):
         return None, 'http_invalid_identity'
     value = values[0]
     # Commas can be a folded duplicate header. Reject instead of guessing.
+    # PLAY: A duplicate identity header is an ambiguity, not a preference.
+    # Two session ids, or one field containing a comma-joined pair, could
+    # route this request to a conversation the sender did not mean -- so
+    # the request is unattributable rather than "first one wins".
     if not value or len(value) > limit or any(ord(c) < 33 or ord(c) > 126 or c == ',' for c in value):
         return None, 'http_invalid_identity'
     return value, None
@@ -102,6 +155,10 @@ def _single(headers, name, limit):
 
 def _rpc_frame(payload):
     """Only complete MCP JSON-RPC objects can supply correlation evidence."""
+    # PLAY: Complete means it answers exactly one question. A frame with
+    # both a method and a result, or with neither a result nor an error, is
+    # not a message any MCP implementation should send, so it is treated as
+    # unparseable instead of being force-fitted into request or response.
     try:
         frame = json.loads(payload)
     except (ValueError, UnicodeError, RecursionError):
@@ -147,6 +204,10 @@ class HTTPObserver:
         self.session_limits = session_limits or SessionLimits()
         self.clock = clock
         self.on_observation = on_observation
+        # PLAY: A fresh random salt per observer process. Partition keys are
+        # HMACs of credentials, and without a salt they would be stable
+        # across runs and machines -- which would make the routing key a
+        # fingerprint of the token itself.
         self._salt = secrets.token_bytes(32)
         self._lock = threading.Lock()
         self._contexts: dict[str, _Context] = {}
@@ -159,6 +220,9 @@ class HTTPObserver:
     def _partition(self, headers):
         # Cookie and proxy credentials also change upstream credential context.
         # Hash incrementally: never concatenate an unbounded retained value.
+        # PLAY: Each field is length-prefixed before it is mixed in. Without
+        # that, ("ab", "c") and ("a", "bc") would hash identically and two
+        # different credential contexts would share a partition.
         digest = hmac.new(self._salt, digestmod=hashlib.sha256)
         for k, v in sorted((k.lower(), v) for k, v in headers
                            if k.lower() in ('authorization', 'cookie', 'proxy-authorization')):
@@ -231,6 +295,11 @@ class HTTPObserver:
         `http_capacity` instead: observed, unenforced, and nobody's existing
         authority is touched.
         """
+        # PLAY: This is a denial-of-service decision made in the safe
+        # direction. The cheap attack is to open many contexts with junk
+        # tokens; the expensive outcome would be evicting a real session
+        # and thereby un-enforcing it. So the newcomer loses, and loses
+        # visibly, via a diagnostic on its own observation.
         if len(self._contexts) < self.limits.max_sessions:
             return
         idle = [c for c in self._contexts.values()
@@ -292,6 +361,10 @@ class HTTPObserver:
                 # Upstream may select any of the ambiguous credentials. None
                 # of this token's prior partitions can retain certainty about
                 # traffic which may have affected it but could not be routed.
+                # PLAY: Retiring is the honest response to ambiguity. If a
+                # request could have been routed to any of several credential
+                # contexts, then every one of them might have been affected
+                # by traffic this proxy could not attribute.
                 victims = [c for key, c in self._bindings.items() if key[1] == token]
                 for victim in victims:
                     self._retire_locked(victim)
@@ -336,6 +409,9 @@ class HTTPObserver:
         delivered on the session it claims. Read-only: it never creates,
         retires or resets an epoch, so a gate can refuse an unverifiable
         resume instead of letting it reset the session's analysis."""
+        # PLAY: Read-only is the entire contract. A caller-supplied resume
+        # id must not be able to force a reset by being wrong -- otherwise
+        # "forget my session" would be a header away.
         headers = list(headers.items()) if hasattr(headers, 'items') else list(headers)
         limit = self.limits.max_identifier_chars
         token, token_error = _single(headers, 'mcp-session-id', limit)
@@ -446,6 +522,10 @@ class HTTPLease:
         a reader folds it exactly as the live gate did. A fold fault still
         writes the entry before propagating: evidence first, analysis second.
         """
+        # PLAY: `admit` is the gate handshake. The fold happens first, so the
+        # verdict is computed from analysis; the deferred correlation is only
+        # committed if the request is actually forwarded. A replay reads the
+        # `admitted: false` marker and folds it exactly as the live gate did.
         context = self.context
         if not context.log_opened:
             context.log_opened = True
@@ -471,6 +551,9 @@ class HTTPLease:
             # Evidence first. A reservation this fold may have left behind is
             # never applied: the builder drops it at its next fold, and the
             # loss the caller records next clears correlation anyway.
+            # PLAY: BaseException, not Exception, and the write happens
+            # before the re-raise. If analysis dies, the frame still reaches
+            # the log -- the capture is the artifact that outlives the bug.
             self._write_locked(context, entry, text)
             raise
         admitted = True
@@ -512,6 +595,10 @@ class HTTPLease:
     @staticmethod
     def _write_locked(context, entry, text) -> bool:
         """Failed logging never pretends to provide persisted linkage."""
+        # PLAY: False here is not an exception path, it is a fact that
+        # travels: the Observation carries persisted=False and the caller
+        # re-asks `admit`, because strict mode treats "could not record"
+        # differently from "recorded".
         if context.log is None:
             return False
         return context.log.write_entry(entry, text)
@@ -592,6 +679,10 @@ class HTTPLease:
                             if len(context.sse_ids) >= self.observer.limits.max_sse_ids:
                                 # Forgetting an ID could replay an old response
                                 # against a newly reused JSON-RPC request ID.
+                                # PLAY: So the registry refuses to grow rather
+                                # than evicting the oldest id. An evicted id is
+                                # indistinguishable from one never seen, which
+                                # would make an old response look new.
                                 losses.append(self._loss_locked('http_sse_history_full'))
                             else:
                                 context.sse_ids[event_id] = digest
@@ -606,6 +697,9 @@ class HTTPLease:
                         # callers depend on: record it uninterpreted. A listing
                         # it belonged to never completes, so the last complete
                         # declaration stays authority.
+                        # PLAY: This is the fail-safe direction for a shared
+                        # scope. Losing the declaration would weaken every
+                        # caller in it because one caller sent garbage.
                         facts['uninterpreted'] = True
                     else:
                         losses.append(self._loss_locked('http_frame_incomplete'))
@@ -685,6 +779,10 @@ class HTTPLease:
             # A 2026 reply only ever arrives on its own POST, so when the POST
             # ends its unanswered requests can never be answered. Purge them,
             # via a logged marker so a replay purges at the same point.
+            # PLAY: The marker is the whole reason this is logged rather than
+            # just cleaned up in memory. A replay that did not purge at this
+            # point would carry pending requests the live run dropped, and
+            # then disagree with it about later correlations.
             try:
                 with context.lock:
                     self._record_locked('s2c', b'', observation={

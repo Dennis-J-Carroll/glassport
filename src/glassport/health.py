@@ -11,6 +11,35 @@ command computes analysis-side facts — detector errors, missing metrics
 lines — at read time, because the tap must never assert them.
 
 Zero dependencies. Pure stdlib.
+
+PLAY-BY-PLAY
+------------
+"Healthy" here means one narrow thing: recent sessions were recorded
+completely and no detector crashed while reading them. It is not a
+statement about the servers that were observed.
+
+The walk, in order:
+
+1. `aggregate()` takes the newest N logs. It sorts names in reverse,
+   which works because every session file is named with a leading
+   ISO-8601 UTC timestamp — the name order IS the time order.
+2. For each log, `_metrics_of()` pulls the tap's own final metrics
+   line: frames seen, frames blocked, duration, bytes. A log without
+   one is counted as missing rather than treated as zero, because
+   "no metrics" (pre-metrics log or a tap that died) and "no traffic"
+   are different facts.
+3. `_detector_errors()` then re-runs the detectors over the same log
+   offline and counts crashes.
+
+That split is the doctrine in one command. The metrics line asserts
+only what the tap saw. Anything that requires judgment is computed at
+read time, so the tap never claims it.
+
+WHAT THIS FILE DOES NOT DO
+--------------------------
+It does not diagnose servers, score risk, delete anything, or fix a
+degraded session. It exits 0 whether the news is good or bad; the
+verdict is in the text, not the exit code.
 """
 from __future__ import annotations
 
@@ -27,6 +56,10 @@ def _metrics_of(path: Path) -> dict | None:
     try:
         with open(path, encoding="utf-8") as fh:
             for line in fh:
+                # PLAY: A substring test before json.loads. These logs
+                # hold every frame of a session and can be tens of
+                # megabytes; parsing each line to find one is the slow
+                # way to answer a question a byte scan already answers.
                 if '"glassport.metrics"' not in line:
                     continue
                 try:
@@ -34,6 +67,9 @@ def _metrics_of(path: Path) -> dict | None:
                 except json.JSONDecodeError:
                     continue
                 if entry.get("type") == "glassport.metrics":
+                    # PLAY: Last one wins. A tap that was restarted into
+                    # the same file appends a second trailer, and the
+                    # later line describes the later reality.
                     found = entry
     except OSError:
         return None
@@ -43,6 +79,9 @@ def _metrics_of(path: Path) -> dict | None:
 def _detector_errors(path: Path) -> int:
     """Offline: how many detectors crashed analyzing this session."""
     try:
+        # PLAY: Imported here, not at module scope, so `glassport health`
+        # starts instantly and the analysis stack loads only when there
+        # is a log to analyze.
         from glassport.adapters.mcp_session import from_mcp_session_file
         from glassport.detectors import annotate
         anns = annotate(from_mcp_session_file(path))
@@ -52,6 +91,10 @@ def _detector_errors(path: Path) -> int:
 
 
 def aggregate(log_dir: Path, last: int = 10) -> dict:
+    # PLAY: Newest-first by filename, then take N. The sort is only
+    # meaningful because session filenames begin with a UTC timestamp
+    # that sorts lexicographically; mtime would be the alternative and
+    # it is easier to fake and harder to read.
     paths = sorted(Path(log_dir).glob("*.jsonl"), reverse=True)[:last]
     agg = {"sessions": len(paths), "frames_seen": 0, "frames_blocked": 0,
            "session_duration_s": 0.0, "log_bytes": 0,
@@ -59,6 +102,10 @@ def aggregate(log_dir: Path, last: int = 10) -> dict:
            "tail_only_sessions": 0}
     for p in paths:
         m = _metrics_of(p)
+        # PLAY: Missing metrics is its own bucket. Counting it as a
+        # zero-frame session would quietly turn "the tap crashed before
+        # it could write" into "a quiet session", which is the one
+        # mistake a health command must not make.
         if m is None:
             agg["sessions_missing_metrics"] += 1
         else:
@@ -72,6 +119,9 @@ def aggregate(log_dir: Path, last: int = 10) -> dict:
 
 
 def main(argv: list[str]) -> int:
+    # PLAY: Imported inside main so the default log dir has exactly one
+    # definition, in the module that owns it. A duplicated constant is
+    # how these two files would drift apart.
     from glassport.tap import DEFAULT_LOG_DIR
 
     def _val(flag, default=None):

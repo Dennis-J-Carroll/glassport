@@ -9,6 +9,41 @@ behind an injectable `fetcher`, so the test suite runs fully offline.
 
 Scope (this increment): npm + PyPI, direct dependencies only. GitHub,
 transitive deps, and lockfiles are deliberately out.
+
+PLAY-BY-PLAY
+------------
+An audit that never leaves the machine can tell you a manifest is
+suspicious. It cannot tell you whether a package exists, is deprecated,
+or was published by one person. This module adds exactly that, and pays
+for it with the one thing the rest of glassport refuses to spend: a
+network call.
+
+The flow, in order:
+
+1. `discover_deps()` finds direct dependencies in package.json,
+   requirements.txt, and pyproject.toml. Names only, no resolution.
+2. `fetch_registry()` asks the registry, through a cache and a time
+   budget, and never raises.
+3. `evaluate()` applies a fixed rubric to what came back and returns
+   structured findings.
+4. `enrich()` runs the loop and folds per-package failures into one
+   aggregate note.
+
+Three defenses run through all of it, because a manifest is
+attacker-controlled input:
+
+* Dependency names are percent-encoded before entering a URL, and a
+  name used as a cache filename is filtered down to a safe alphabet.
+* Redirects are refused rather than followed, so a registry response
+  cannot walk the client to another host.
+* Every field a renderer prints passes through a `safe_*` function that
+  checks it is a string before comparing it to a closed set.
+
+WHAT THIS FILE DOES NOT DO
+--------------------------
+It does not affect the audit score, it does not run unless asked, and it
+never writes a finding into the offline channel. Unreachable registry is
+reported as "could not check", not as a risk.
 """
 
 from __future__ import annotations
@@ -73,6 +108,10 @@ UNKNOWN_SEVERITY = "note"        # a safe default level; never a raw unknown
 
 
 def safe_rule(value) -> str:
+    # PLAY: Order matters. isinstance(str) is tested first because an
+    # unhashable value (a list, a dict) would raise on the frozenset
+    # membership test, and a hostile object would run its own __str__ or
+    # __hash__ during the comparison. A non-string never gets that far.
     return value if isinstance(value, str) and value in VALID_RULES else UNKNOWN_RULE
 
 
@@ -249,6 +288,11 @@ _REGISTRY = {
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
     """Redirect handler that turns every 3xx into an HTTPError so the fetcher
     never follows a registry response to an internal/non-registry host."""
+    # PLAY: The interesting case is not a broken registry. It is a
+    # response that points somewhere else -- a link-local metadata
+    # address, a loopback port, an internal name. Refusing the 3xx
+    # outright means a compromised or hostile registry cannot redirect
+    # this client off the host it meant to talk to.
 
     def http_error_302(self, req, fp, code, msg, headers):
         raise urllib.error.HTTPError(req.full_url, code, msg, headers, fp)
@@ -267,6 +311,8 @@ _REGISTRY_OPENER = urllib.request.build_opener(
 def fetch_registry(ecosystem: str, name: str, *, timeout: float = 5.0) -> Fetched:
     # Percent-encode the dependency name before it enters the URL so a malicious
     # manifest cannot inject query strings, fragments, or path separators.
+    # PLAY: safe="" is the important half. The default keeps "/" unescaped,
+    # which is exactly the character that would let a name climb a path.
     safe_name = urllib.parse.quote(name, safe="")
     url = _REGISTRY.get(ecosystem, "").format(name=safe_name)
     if not url:
@@ -278,6 +324,9 @@ def fetch_registry(ecosystem: str, name: str, *, timeout: float = 5.0) -> Fetche
             data = resp.read()
         return Fetched(status="ok", payload=json.loads(data))
     except urllib.error.HTTPError as exc:
+        # PLAY: 404 is a fact worth reporting; everything else is a
+        # failure to find out. Keeping them apart is what lets the
+        # summary say "could not check" instead of accusing a package.
         return Fetched(status="not_found" if exc.code == 404 else "error",
                        payload={})
     except Exception:
@@ -289,6 +338,9 @@ def fetch_registry(ecosystem: str, name: str, *, timeout: float = 5.0) -> Fetche
 # Cache — <cache_dir>/<ecosystem>/<name>.json, never expires
 # ─────────────────────────────────────────────────────────────────
 def _cache_path(cache_dir, dep: Dep) -> Path:
+    # PLAY: The name becomes a filename, so anything outside this
+    # alphabet -- separators, dots-as-prefix tricks, control bytes -- is
+    # replaced. A manifest cannot choose where on disk we write.
     safe = re.sub(r"[^A-Za-z0-9._@-]", "_", dep.name)
     return Path(cache_dir) / dep.ecosystem / f"{safe}.json"
 
@@ -408,10 +460,16 @@ def _pf(dep: Dep, rule: str, severity: str, detail: str) -> ProvenanceFinding:
 
 
 def evaluate(dep: Dep, fetched: Fetched, *, now: datetime) -> list[ProvenanceFinding]:
+    # PLAY: 'not_found' is the highest-signal result here. A dependency
+    # nobody has published under that exact name is either a typo or a
+    # name someone is holding for someone else to install by mistake.
     if fetched.status == "not_found":
         return [_pf(dep, "prov-not-in-registry", "high",
                     f"declared dependency not found in the {dep.ecosystem} "
                     f"registry (possible typosquat or private-name confusion)")]
+    # PLAY: Deliberately silent on transport errors. Fifty unreachable
+    # lookups would otherwise become fifty findings that all say the same
+    # thing; enrich() reports the count once, as a limit on the audit.
     if fetched.status != "ok":
         return []  # 'error' handled by enrich as an aggregate note
 
@@ -450,9 +508,13 @@ def enrich(root, *, cache_dir=None, refresh: bool = False,
            fetcher: Optional[Callable[[str, str], Fetched]] = None,
            now: Optional[datetime] = None,
            budget_s: float = 30.0) -> list[ProvenanceFinding]:
+    # PLAY: `fetcher` and `now` are injectable so the whole test suite
+    # runs offline and deterministic. The default is the real client.
     fetcher = fetcher or fetch_registry
     now = now or datetime.now(timezone.utc)
     cache_dir = Path(cache_dir) if cache_dir else None
+    # PLAY: time.monotonic(), not wall clock: the budget must not stretch
+    # because the machine corrected its clock mid-run.
     deadline = time.monotonic() + budget_s
 
     out: list[ProvenanceFinding] = []
@@ -462,6 +524,10 @@ def enrich(root, *, cache_dir=None, refresh: bool = False,
         if cache_dir is not None and not refresh:
             fetched = _cache_get(cache_dir, dep)
         if fetched is None:
+            # PLAY: The budget is a hard stop, not a warning. Once it is
+            # spent, remaining dependencies are treated as uncheckable
+            # rather than queued, so a slow registry cannot turn an audit
+            # into a hang.
             if time.monotonic() > deadline:
                 fetched = Fetched("error", {})  # budget spent; do not call out
             else:
@@ -473,6 +539,10 @@ def enrich(root, *, cache_dir=None, refresh: bool = False,
             continue
         out.extend(evaluate(dep, fetched, now=now))
 
+    # PLAY: One aggregate sentence about the audit's own limitation,
+    # with an empty ecosystem and package. "N dependencies could not be
+    # checked" is a true statement about the run; inventing N findings
+    # about the dependencies would not be.
     if unavailable:
         out.append(ProvenanceFinding(
             rule="prov-unavailable", severity="note", ecosystem="",

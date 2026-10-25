@@ -16,6 +16,32 @@ upload cleanly:
     the CI counting two different scales.
 
     render_sarif(report) -> str           # SARIF JSON
+
+PLAY-BY-PLAY
+------------
+SARIF is the format GitHub's code-scanning tab ingests. Two things make
+the difference between a file that uploads and a finding that appears
+next to a line of code:
+
+1. Locations must be repo-relative. `_repo_uri()` produces paths like
+   `src/server.py`, never `$HOME/...` or a `file://` URL, because GitHub
+   can only annotate a diff it can match.
+2. Severity has to collapse onto one scale. `_sarif_level()` maps audit
+   strings and detector ints onto the same three SARIF levels, so a
+   document mixing both does not count two different scales.
+
+The two entry points differ in what they describe. `render_sarif()`
+exports a static audit of source files. `render_session_sarif()` exports
+findings from one session log and has to resolve wire sequence numbers
+back to line numbers -- `_seq_to_line()` reads the real file for that,
+which is why those callers pass a real path rather than a repo-relative
+one.
+
+WHAT THIS FILE DOES NOT DO
+--------------------------
+It does not read source, run detectors, or decide severity. It formats
+what it is given, and it does not sanitize prose -- callers hand it
+already-redacted text (`detectors.redact_display`).
 """
 from __future__ import annotations
 
@@ -57,6 +83,9 @@ _TAXONOMY: dict[str, dict[str, str]] = {
 }
 
 
+# PLAY: One function for both vocabularies. Audit findings say "high" and
+# detector annotations say 3; without this fold a single SARIF file would
+# be scored on two incompatible scales.
 def _sarif_level(severity: Union[str, int]) -> str:
     """Unified severity → SARIF level (error/warning/note). Total: a non-str/int
     (e.g. a hostile object) never has its __str__ invoked — it maps to the
@@ -123,6 +152,9 @@ def _rule_object(rule_id: str, severity: str) -> dict:
 _sanitize_display = redact_display
 
 
+# PLAY: POSIX separators regardless of platform. A Windows backslash path
+# would produce a URI GitHub cannot match against a diff, so the artifact
+# uploads cleanly and annotates nothing.
 def _repo_uri(path: str, base: str) -> str:
     """Finding.path is relative to the audited root; prefix it with `base`
     (the audited root, itself relative to the repo root) so GitHub code
@@ -141,6 +173,11 @@ def render_sarif(report: Report, base: str = "") -> str:
     `base` is the audited root relative to the repository root (e.g.
     "mcp-servers/srv"); pass the path you handed to `audit` so result
     locations resolve from the repo root in the GitHub Security tab."""
+    # PLAY: A SARIF document is two lists that must agree: `rules` declares
+    # every rule id once, `results` points at those declarations by id. The
+    # dict below is the memo that keeps a rule from being declared twice, and
+    # it is populated as results are built rather than from the catalog, so an
+    # advertised tool never lists rules that did not fire.
     rules: dict[str, dict] = {}
     results: list[dict] = []
 
@@ -265,9 +302,18 @@ _RUNTIME_RULE_TEXT = {
 }
 
 
+# PLAY: SARIF locations are by line, a session log records by sequence
+# number. This builds the map between them by reading the file once -- so
+# a finding can point at the exact line a reviewer can open.
 def _seq_to_line(session_path: str) -> dict:
     """Map each log entry's `seq` to its 1-based line number in the file.
     Empty/unreadable path -> {}. Lines without a seq are skipped."""
+    # PLAY: The bridge between two numbering schemes. A session log identifies
+    # events by `seq`; SARIF annotates by physical line. Any file this log is
+    # committed as may be re-wrapped, but line N of the file is where a reader
+    # lands when they click the finding, so that is what gets reported. An
+    # unreadable path yields an empty map and the finding simply carries no
+    # line, rather than a fabricated one.
     out: dict = {}
     if not session_path:
         return out
@@ -348,6 +394,10 @@ def render_session_sarif(trace, session_path: str = "", base: str = "") -> str:
     in the GitHub Security tab; absolute paths pass through unchanged),
     region.startLine is the annotation's event's line in that log. `seq` rides
     and finding metadata ride in partialFingerprints for stable identity."""
+    # PLAY: Runtime findings describe events, not source bytes, so the
+    # artifact is the log itself. That is a deliberate choice: a reviewer
+    # clicking a finding lands on the exact wire record that triggered it,
+    # in the same file the bundle was built from.
     from glassport.evidence import annotation_level
     seq_line = _seq_to_line(session_path)
     uri = _repo_uri(session_path, base)

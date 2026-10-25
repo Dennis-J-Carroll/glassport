@@ -21,6 +21,32 @@ stage it stopped at, and never reads as CLEAN. Exit codes:
     1  handshake complete, detector findings
     2  usage error, or no session log to analyze
     3  handshake incomplete (takes priority over 1)
+
+PLAY-BY-PLAY
+------------
+Read this as three moves: spawn, drive, analyze.
+
+1. `_spawn_tap()` starts the real tap in front of the server command, so a
+   probe session is byte-for-byte what a human `wrap` would have recorded.
+   That is the whole trick: there is no second code path for probing, so a
+   probe can never record something `wrap` would not.
+2. `_Client` speaks newline-delimited JSON-RPC down the tap's stdin and reads
+   responses off its stdout, with deadlines. It is deliberately dumb: server
+   notifications and server-initiated requests pass by untouched, because
+   the tap already logged them.
+3. `_drive()` walks the MCP handshake -- `initialize`, then
+   `notifications/initialized`, then `tools/list`, then any `--call`
+   requests. It reports *where* it stopped, never whether the stop was
+   suspicious; judgment belongs to the detectors.
+4. After shutdown the log for this tap's pid is located, loaded through
+   `adapters/mcp_session.py`, and run through `detectors.annotate()`. The
+   exit code is derived from the same findings the report shows.
+
+WHAT THIS FILE DOES NOT DO
+--------------------------
+It does not run tools the caller did not name, does not treat a slow server
+as a hostile one (a slow start is a timeout, marked incomplete), and does not
+write its own JSON-RPC: `_rpc()` builds every frame in one place.
 """
 from __future__ import annotations
 
@@ -86,6 +112,10 @@ def _rpc(rid: Optional[int], method: str, params: Optional[dict] = None) -> dict
 class _Client:
     """Line-oriented JSON-RPC client over the tap's stdio, with deadlines."""
 
+    # PLAY: Two daemon threads, one per pipe. The split matters because the
+    # server's stderr is where it complains and its stdout is where it speaks
+    # protocol; mixing them would corrupt the very bytes the tap is relaying.
+
     def __init__(self, proc: subprocess.Popen):
         self.proc = proc
         self.inbox: queue.Queue = queue.Queue()
@@ -102,6 +132,10 @@ class _Client:
             try:
                 self.inbox.put(json.loads(raw))
             except (json.JSONDecodeError, UnicodeDecodeError):
+                # PLAY: A line the probe cannot parse is dropped, not raised.
+                # Malformed output is exactly the kind of thing the analysis
+                # stage should see and report; crashing the client on it would
+                # turn a finding into a probe failure.
                 continue    # the tap logged it; the client just skips it
         self.inbox.put(None)
 
@@ -123,6 +157,11 @@ class _Client:
                 timeout: float) -> tuple[Optional[dict], Optional[str]]:
         """Send a request and wait for its response.
         Returns (response, None) or (None, "exited" | "timeout")."""
+        # PLAY: The whole point of a deadline here is that a server which
+        # accepts a request and never answers is a real result, so the wait
+        # is bounded by a clock rather than by the pipe. "exited" and
+        # "timeout" are kept apart because they mean different failures: a
+        # dead process versus a live one that went quiet.
         if self.eof or not self.send(_rpc(rid, method, params)):
             return None, "exited"
         deadline = time.monotonic() + timeout
@@ -137,6 +176,11 @@ class _Client:
             if msg is None:
                 self.eof = True
                 return None, "exited"
+            # PLAY: Anything that arrives without our id -- a log
+            # notification, a roots request the server sends *us* -- is
+            # skipped. The probe is a minimal client: it answers nothing and
+            # asks only what it asked. The tap recorded all of it anyway, so
+            # refusing to play along costs the report nothing.
             # server notifications and server->client requests are logged
             # by the tap; the probe only waits on its own response
             if isinstance(msg, dict) and msg.get("id") == rid and \
@@ -165,6 +209,10 @@ class _Client:
 def _signal_group(proc: subprocess.Popen, sig: int) -> None:
     """Signal the tap *and* the server it spawned (npx -> node chains
     otherwise outlive a killed tap)."""
+    # PLAY: Signalling the process group, not the process, is what stops an
+    # `npx` shim from leaving its node child running after the tap dies. The
+    # escalation order in `shutdown()` -- close stdin, wait, TERM, wait,
+    # KILL -- gives a well-behaved server the polite exits first.
     try:
         if os.name == "posix":
             os.killpg(proc.pid, sig)
@@ -198,9 +246,21 @@ def _drive(client: _Client, calls: list[tuple[str, dict]],
     def fail(stage: str, reason: str) -> dict[str, Any]:
         return {"completed": False, "failed_at": stage, "reason": reason}
 
+    # PLAY: This is the MCP handshake in its entirety, and it is short on
+    # purpose. `initialize` negotiates protocol version and capabilities and
+    # returns the server's self-description; the client then sends the
+    # `notifications/initialized` note (no id, no response -- it is a
+    # courtesy, but servers do wait for it); only then may it ask
+    # `tools/list`. Skipping any of these three is the most common way a
+    # hand-written probe gets a server to hang up on it.
+
     resp, err = client.request(1, "initialize", {
         "protocolVersion": PROTOCOL_VERSION,
         "capabilities": {},
+        # PLAY: clientInfo is not decoration. Servers that validate their
+        # input reject an initialize without it, and the probe would then
+        # report a handshake failure that says more about the probe than
+        # about the server.
         # strict servers reject an initialize without clientInfo
         "clientInfo": {"name": "glassport-probe", "version": _version()},
     }, startup_timeout)
@@ -216,6 +276,10 @@ def _drive(client: _Client, calls: list[tuple[str, dict]],
     if "error" in resp:
         return fail("tools_list", "error_response")
 
+    # PLAY: Note what is *not* checked: the shape of the result. A tool that
+    # answers "no such file" completed its exchange. Whether calling it at
+    # all was reasonable, or whether the arguments were poisoned, is decided
+    # later by the detectors reading the log.
     # A call answered with an error is a complete exchange — whether it
     # *should* have been called is the detectors' question, not ours.
     for rid, (name, args) in enumerate(calls, start=3):
@@ -232,6 +296,9 @@ def _version() -> str:
 
 
 def _find_log(log_dir: Path, tap_pid: int) -> Optional[Path]:
+    # PLAY: Finding the log is a race in a shared directory, so it is solved
+    # by identity rather than by time: the tap puts its own pid in the
+    # filename, and this process knows the pid it spawned.
     # The tap names its log `<stamp>_<server>_<tap pid>.jsonl`. Matching on
     # our own tap's pid never picks up a concurrent session in a shared log
     # dir (a live `wrap`, a parallel survey probe) — and unlike parsing
@@ -265,6 +332,9 @@ def probe(cmd: list[str], calls: Optional[list[tuple[str, dict]]] = None,
     finally:
         client.shutdown()
 
+    # PLAY: A missing binary looks like "initialize timed out or exited",
+    # which is technically true and practically useless. The tap's 127 gets
+    # relabelled as a spawn failure so the report blames the right stage.
     # the tap exits 127 when the server binary is missing: nothing ever ran
     if not handshake["completed"] and handshake["failed_at"] == "initialize" \
             and handshake["reason"] == "exited" and proc.returncode == 127:
@@ -283,6 +353,9 @@ def probe(cmd: list[str], calls: Optional[list[tuple[str, dict]]] = None,
 
     trace = from_mcp_session_file(log_path, server_name=Path(cmd[0]).name)
     trace.metadata["handshake"] = handshake
+    # PLAY: INFO is commentary, not a finding. Counting it would make the
+    # exit code disagree with the headline the report prints, and a tool that
+    # returns 1 while claiming CLEAN teaches people to ignore its exit code.
     # INFO annotations never drive the report's verdict; the exit code
     # must agree with the headline
     found = [a for a in detectors.annotate(trace)
@@ -297,6 +370,9 @@ def probe(cmd: list[str], calls: Optional[list[tuple[str, dict]]] = None,
     result.called_tools = [name for _, name in trace.called_tools()]
     result.findings = len(found)
     result.max_severity = max((a.severity for a in found), default=0)
+    # PLAY: Three outcomes, in priority order. An unfinished handshake beats
+    # "found something" because the findings are drawn from a partial trace:
+    # the honest headline is INCOMPLETE, not GUILTY.
     result.exit_code = 3 if not handshake["completed"] else (1 if found else 0)
     return result
 

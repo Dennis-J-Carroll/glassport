@@ -30,6 +30,33 @@ Same zero-dependency philosophy as the tap: stdlib json over the MCP
 stdio transport (newline-delimited JSON-RPC). Tool failures come back
 as MCP tool results with isError, not protocol errors, so the agent
 sees them as content it can reason about.
+
+PLAY-BY-PLAY
+------------
+This file is an MCP server about MCP sessions: it answers `initialize`,
+`tools/list`, and `tools/call` over stdio, and every tool it exposes reads
+something glassport already recorded.
+
+The reader's tour:
+
+1. `TOOLS` is the whole advertised surface. The descriptions are what an
+   agent reads before deciding to call, so they stay short and stay honest
+   about what each tool touches.
+2. `_handle()` is the protocol: three method names, a default result for
+   `ping` and anything else id-bearing.
+3. `_call_tool()` dispatches by name, importing the analyzer modules lazily
+   so that `glassport serve` starts fast and a broken optional path cannot
+   take the whole server down.
+4. `_resolve_session_path()` and `_resolve_audit_path()` are the security
+   line. Every path an agent supplies is resolved and confined; without
+   them the tools would be a file-read primitive for any client on the wire.
+
+WHAT THIS FILE DOES NOT DO
+--------------------------
+It does not capture traffic (that is `tap.py`), does not decide whether a
+session is hostile (that is `detectors.py`), and does not keep state between
+calls. Each request is answered from the log files as they are on disk at
+that moment.
 """
 from __future__ import annotations
 
@@ -45,6 +72,10 @@ from glassport.tap import DEFAULT_LOG_DIR
 
 PROTOCOL_VERSION = "2025-03-26"
 
+# PLAY: The tool list is the contract, so it is a literal at module scope
+# rather than something generated at call time. An agent sees exactly these
+# five tools or the file is wrong; there is no runtime surface to disagree
+# with what a reviewer read here.
 TOOLS = [
     {
         "name": "list_sessions",
@@ -120,6 +151,10 @@ def _resolve_session_path(raw, log_dir: Path) -> Path:
     raw path would let a hostile client pass `/etc/passwd` or `../../.env`
     and read arbitrary host files. Resolve the path and require it to live
     inside the configured log directory; reject anything that escapes."""
+    # PLAY: `.resolve()` first, then compare. Order matters: comparing before
+    # resolving would let `subdir/../../secret.jsonl` pass the prefix test and
+    # then open the file it names. Resolving collapses `..` and follows
+    # symlinks, so the check runs against what will actually be opened.
     if not raw:
         raise ValueError("session_path is required")
     p = Path(raw).resolve()
@@ -145,11 +180,18 @@ def _resolve_audit_path(raw, allowed_roots: list[Path]) -> Path:
     for root in allowed_roots:
         if p.is_relative_to(Path(root).resolve()):
             return p
+    # PLAY: Symlinks are resolved too, so a symlink inside an allowed root
+    # that points at /etc/passwd fails here rather than after the audit has
+    # already walked it.
     raise ValueError(f"audit path outside allowed roots: {raw}")
 
 
 def _call_tool(name: str, args: dict, log_dir: Path,
                audit_roots: list[Path]) -> dict:
+    # PLAY: Dispatch is a chain of name comparisons and every branch returns
+    # its own `content` block. The analyzer imports happen inside the branch:
+    # `glassport serve` should answer `tools/list` without paying for the
+    # detector machinery, and one broken analysis path must not stop the rest.
     if name == "list_sessions":
         limit = args.get("limit", 10)
         paths = sorted(log_dir.glob("*.jsonl"), reverse=True)[:limit]
@@ -161,6 +203,9 @@ def _call_tool(name: str, args: dict, log_dir: Path,
         path = _resolve_session_path(args.get("session_path"), log_dir)
         trace = from_mcp_session_file(path)
         anns = annotate(trace)
+        # PLAY: Findings carry event ids internally, but an agent reading the
+        # JSON needs the sequence number as it appears in the log. `seq_of`
+        # translates one to the other so a finding can be pointed at.
         seq_of = {e.id: e.metadata.get("seq") for e in trace.events}
         return _text({
             "session": path.name,
@@ -178,6 +223,9 @@ def _call_tool(name: str, args: dict, log_dir: Path,
     if name == "audit_server":
         from glassport import audit as audit_mod
         path = _resolve_audit_path(args.get("path"), audit_roots)
+        # PLAY: The auditor prints; this tool needs a string. Redirecting
+        # stdout around the call keeps `audit.py` free of a second output
+        # mode that would then need its own tests.
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
             audit_mod.main([str(path), "--json"])
@@ -226,12 +274,19 @@ def _handle(method: str, params: dict, log_dir: Path,
         try:
             return _call_tool(name, args, log_dir, audit_roots)
         except Exception as exc:
+            # PLAY: Every exception becomes tool content with isError, never a
+            # JSON-RPC error. A protocol error would end the exchange and
+            # leave the agent with nothing to reason about; an error result is
+            # something it can read, quote, and react to.
             # tool failure is content, not a protocol error — the agent
             # should see and reason about it like any other tool output
             return {"content": [{"type": "text",
                                  "text": f"{type(exc).__name__}: {exc}"}],
                     "isError": True}
-    return {}   # ping and anything else id-bearing: empty result
+    return {}   # PLAY: `ping` and other id-bearing methods get an empty
+                # result rather than an error: the request was well formed, we
+                # simply have nothing to add. Refusing would make an ordinary
+                # liveness check look like a malfunction.
 
 
 def serve(in_stream, out_stream, log_dir: Path | None = None,

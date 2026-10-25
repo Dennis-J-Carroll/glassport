@@ -18,6 +18,31 @@ reach.
 
 Severity scale (from detectors.py): 1 = worth a look, 2 = should not
 happen, 3 = hostile or hallucinated unless proven otherwise.
+
+PLAY-BY-PLAY
+------------
+The report is one HTML file with no external assets and no JavaScript,
+built to be opened on a phone from a file path. That constraint decides
+most of what follows.
+
+1. `report()` is the convenience pipeline: read the log through the
+   adapter, run `annotate()`, render, and write the page beside the log.
+2. `render_html()` is the pure part: a trace in, a string out, no I/O.
+   Keeping it pure is what lets the grill tests drive hostile traces
+   through the real renderer.
+3. `_esc()` is the only way a wire-derived string reaches the page.
+
+The threat here is concrete and local. A hostile server can name a tool
+`<img onerror=...>`, and this file is opened in a browser from file://
+where injected script runs with local-file reach. So every string that
+came off the wire is escaped, and the renderer adds no markup of its own
+that a value could break out of.
+
+WHAT THIS FILE DOES NOT DO
+--------------------------
+It does not run detectors, does not load anything from the network, and
+carries no JavaScript. A report is a static statement about a capture, not
+a live view -- that is what the console is for.
 """
 from __future__ import annotations
 
@@ -95,6 +120,9 @@ footer { color: var(--dim); border-top: 1px solid var(--line);
 """
 
 
+# PLAY: The single escape hatch. Everything wire-derived passes through
+# here before it is concatenated into the page; `quote=False` is not used
+# anywhere, because attribute contexts need quotes escaped too.
 def _esc(value) -> str:
     """Render an attacker-controlled value inert. Order matters: redact secrets
     on the raw bytes first (the detector scans internally), THEN clamp the length
@@ -151,6 +179,9 @@ def _event_label(e: Event) -> str:
     return e.kind.value
 
 
+# PLAY: Pure by design: trace in, HTML string out. No file access means a
+# test can hand it a fabricated hostile trace and inspect the exact bytes
+# that would be written to disk.
 def render_html(trace: InteractionTrace, source_name: str = "") -> str:
     """Trace + attached annotations -> one self-contained HTML page."""
     from glassport.evidence import annotation_level
@@ -160,6 +191,10 @@ def render_html(trace: InteractionTrace, source_name: str = "") -> str:
     for a in trace.annotations:
         anns_by_event.setdefault(a.event_id, []).append(a)
 
+    # PLAY: The headline is derived from the severities that are left after
+    # INFO is dropped, via the VERDICTS ladder. That is the only place a
+    # verdict is chosen in this file; everything else renders. It is why the
+    # exit code, the SARIF level, and the page header can never disagree.
     # INFO annotations (e.g. gate enforcement records) never drive the
     # verdict — a blocked call is judged by its own non-INFO annotations
     sev_counts = Counter(a.severity for a in trace.annotations
@@ -242,12 +277,21 @@ def render_html(trace: InteractionTrace, source_name: str = "") -> str:
             w(f'<span class="ref">↳ seq {_esc(parent_seq)}</span>')
         w("</div>")
 
+        # PLAY: Every part is dumped inside a collapsed <details>, so a page
+        # that opens on a 400-event session is still cheap to scroll. `_esc`
+        # is applied to the content, not to the tags, which is the whole
+        # escaping contract: markup is written by this code, values never are.
         for p in e.parts:
             w(f"<details><summary>{_esc(p.kind.value)}</summary>"
               f"<pre>{_esc(_pretty(p.content))}</pre></details>")
 
         for a in sorted(anns_by_event.get(e.id, ()),
                         key=lambda a: -a.severity):
+            # PLAY: `data-evidence-level` is not decoration. It records which
+            # rung of the evidence ladder this finding reached -- observed,
+            # analyzed, blocked, forwarded -- so anything downstream (a test,
+            # a grep, a reader with the HTML open) can tell what the wire
+            # actually proved without re-deriving it.
             marker = "•" if a.kind.value == "info" else "⚠"
             level = annotation_level(a, e)
             w(f'<div class="ann" data-sev="{_esc(a.severity)}" '
@@ -258,6 +302,10 @@ def render_html(trace: InteractionTrace, source_name: str = "") -> str:
               f"{_esc(a.kind.value)}<br>{_esc(a.explanation)}</div>")
         w("</div>")
 
+    # PLAY: The footer states the severity scale in words, because a page read
+    # six months later should not need the source to interpret a "2". The
+    # timestamp means two renders of the same trace are not byte-identical;
+    # tests compare structure and counts, never the whole page.
     stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     w(f"<footer>glassport · {len(trace.events)} events · "
       f"{len(trace.annotations)} annotations · generated {stamp}<br>"

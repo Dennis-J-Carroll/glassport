@@ -31,6 +31,42 @@ fact this module is willing to assume.
 Digests here cross-check artifacts. They are not signatures: an attacker able
 to rewrite both the journal and the wire log can make them agree, and nothing
 in this module claims otherwise.
+
+PLAY-BY-PLAY
+------------
+This answers one question: if the analysis ran again over the same bytes,
+with the same code and the same configuration, would it reach the same
+decisions? It is a reproducibility check, and it is built to refuse
+rather than to guess.
+
+The order of work:
+
+1. Read the journal and the wire file line by line, keeping the exact
+   bytes of each line.
+2. Check the preconditions before comparing anything: profile match,
+   reproducible pattern configuration, wire evidence present and in
+   order, and the hash chain intact.
+3. Only then fold the wire again and compare decisions one by one.
+
+The four outcomes are distinct on purpose, and the difference matters:
+
+    equivalent   preconditions held and every decision matched
+    divergent    preconditions held and at least one decision differed
+    incomplete   the recording itself was partial (fault, dropped record,
+                 missing wire evidence)
+    unsupported  the comparison cannot be made at all (wrong schema, wrong
+                 engine, unreconstructible configuration)
+
+"Incomplete" says nothing about agreement; "unsupported" says nothing
+about the traffic. Only "equivalent" and "divergent" make a claim, and
+both name which engine version produced each side.
+
+WHAT THIS FILE DOES NOT DO
+--------------------------
+It does not verify authenticity, does not sign, does not re-execute a
+recorded detector fault, and does not read the wire through the normal
+adapter -- that reader's tail cap would silently compare against a
+partial capture.
 """
 from __future__ import annotations
 
@@ -85,12 +121,17 @@ class ReplayResult:
                 "analyzer_engine": self.analyzer_engine}
 
 
+# PLAY: Each outcome has its own constructor so no caller can return a
+# partially populated result that reads as agreement.
 def _unsupported(reason, epoch=None, recorded_engine=None) -> ReplayResult:
     result = ReplayResult(STATUS_UNSUPPORTED, epoch, reasons=[reason])
     result.recorded_engine = recorded_engine if isinstance(recorded_engine, str) else None
     return result
 
 
+# PLAY: The exact raw line is kept beside the parsed object, because the
+# hash chain was computed over bytes. Re-serializing the parsed dict would
+# produce a different digest for perfectly valid records.
 def _read_records(path):
     """Parse JSONL and retain each exact line for integrity checks."""
     records, lines = [], []
@@ -133,6 +174,10 @@ def _session_limits(record) -> SessionLimits | None:
         return None
 
 
+# PLAY: Read the branches in order of what they refuse. A precondition
+# failure returns `unsupported` immediately and never folds anything, so
+# this function cannot accidentally produce a decision comparison for a
+# journal it does not actually understand.
 def verify_journal(journal_path, wire_path, *, patterns=None) -> ReplayResult:
     """Replay one epoch's journal against its wire log under the same profile."""
     journal, err, journal_lines = _read_records(journal_path)

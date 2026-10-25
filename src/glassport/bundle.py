@@ -1,4 +1,35 @@
-"""Portable, versioned capture bundle. Manifest records facts; verify derives claims."""
+"""Portable, versioned capture bundle. Manifest records facts; verify derives claims.
+
+PLAY-BY-PLAY
+------------
+A bundle is what you hand someone else: wire logs, decision journals,
+SARIF, limits, and optional signatures, in one directory with a manifest
+that describes it. The design rule in the docstring above is the whole
+architecture -- the manifest records facts, and `verify` derives claims
+from them.
+
+The build path:
+
+1. `build_bundle()` reads the inputs and writes each artifact, recording
+   its digest in the manifest. `canonical_bytes()` is what makes those
+   digests stable: RFC 8785 JSON, so two encoders agree on the bytes.
+2. `_wire_facts()` and `compute_limits()` record what the capture does and
+   does not prove. A bundle that claims more than its wire supports is the
+   failure mode this section exists to prevent.
+3. `_public_tier()` produces a redacted copy for sharing, with
+   `_redact_value()` applied; the private tier stays put.
+
+The verify path is separate on purpose: `verify_bundle()` re-reads the
+files, recomputes the digests, and reports what is and is not proven --
+signature status, chain integrity, limits. It trusts the manifest only as
+far as it can check it.
+
+WHAT THIS FILE DOES NOT DO
+--------------------------
+It does not evaluate policy, does not repair a broken bundle, and does not
+claim authenticity from a digest. Digests prove the files agree with the
+manifest; only a signature proves who wrote them.
+"""
 from __future__ import annotations
 
 import argparse
@@ -21,6 +52,10 @@ from glassport.limits import compute_limits
 SCHEMA = "glassport.bundle/1"
 
 
+# PLAY: RFC 8785. Two writers that both follow it produce byte-identical
+# output for the same value, which is the precondition for every digest in
+# this file. Without a canonical form, a digest would depend on key order
+# and whitespace rather than content.
 def canonical_bytes(value) -> bytes:
     """RFC 8785 JSON canonicalization for JSON-safe Python values.
 
@@ -75,6 +110,10 @@ def _digest(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+# PLAY: Both the parsed records and the original bytes are kept. The bytes
+# are what gets hashed into the manifest, so verification can re-hash exactly
+# what was received instead of a re-serialization that might differ by
+# whitespace and make an intact bundle look tampered with.
 def _read_jsonl(path: Path) -> tuple[list[dict], list[bytes]]:
     records, lines = [], []
     for raw in path.read_bytes().splitlines(keepends=True):
@@ -88,6 +127,11 @@ def _read_jsonl(path: Path) -> tuple[list[dict], list[bytes]]:
     return records, lines
 
 
+# PLAY: The capture's own bookends, read once and returned as named values.
+# Note the epoch check: an HTTP session that resumed across a reconnect can
+# carry observations from two epochs, and splicing those into one timeline
+# would invent an ordering the wire never had. That is an error, not a
+# limitation.
 def _wire_facts(records: list[dict], lines: list[bytes]):
     header = next((r for r in records if r.get("type") == "glassport.header"), None)
     trailer_positions = [i for i, r in enumerate(records)
@@ -105,6 +149,9 @@ def _wire_facts(records: list[dict], lines: list[bytes]):
     return header, trailer, entries, seqs, pretrailer, epoch
 
 
+# PLAY: Manifest paths are data, so they can point anywhere. Every read
+# and write goes through here to keep a member inside the bundle root --
+# a manifest that names ../../etc/passwd must not become a file access.
 def _safe_member(root: Path, relative: str) -> Path:
     path = Path(relative)
     if path.is_absolute() or ".." in path.parts:
@@ -119,6 +166,10 @@ def _artifact(path: str, data: bytes) -> dict:
     return {"path": path, "sha256": _digest(data)}
 
 
+# PLAY: Two captures can legitimately share a stable name (same server, same
+# second). The filename has to stay unique without being random, or the same
+# inputs would produce a different bundle every run. Suffixing with a digest
+# of the context gives a deterministic tiebreak.
 def _unique_stable(existing: dict, stable: str, context: str) -> str:
     if stable not in existing:
         return stable
@@ -147,6 +198,11 @@ def _load_private_key(path: Path):
     return key
 
 
+# PLAY: Four answers, and the difference between them is the point:
+# "absent", "present, no trusted key given", "present, not verified
+# (cryptography not installed)", and "valid"/"invalid". A bundle with a
+# signature and no key to check it against is not verified, and saying so is
+# more useful than refusing or, worse, printing "signed".
 def _signature_status(root: Path, manifest: dict, trusted_key: Path | None) -> str:
     sig_path = root / "manifest.sig"
     if not sig_path.exists():
@@ -176,6 +232,9 @@ def _signature_status(root: Path, manifest: dict, trusted_key: Path | None) -> s
         return "invalid"
 
 
+# PLAY: Applied to the public tier only. The private tier keeps the real
+# values; the shareable copy is scrubbed field by field so a bundle can be
+# sent to someone without also sending the credentials it captured.
 def _redact_value(value):
     """Public tier: redact every free-text leaf, including SARIF and profile."""
     if isinstance(value, str):
@@ -188,6 +247,10 @@ def _redact_value(value):
     return value
 
 
+# PLAY: `mode=0o700` on the directory and `0o600` on the file, plus the
+# explicit chmod afterwards because open() honors umask. These files hold
+# captured traffic, which routinely contains tokens; on a shared host the
+# window between create and chmod is the only exposure, and 0o600 closes it.
 def _write_private(path: Path, data: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     with path.open("xb") as output:
@@ -607,6 +670,9 @@ def _verify_bundle_impl(root: Path, trusted_key: Path | None = None) -> dict:
     }
 
 
+# PLAY: The public verify entry point. It recomputes rather than trusting:
+# every digest is checked against the bytes on disk, and the result
+# separates "the files are intact" from "the files are authentic".
 def verify_bundle(root: Path, trusted_key: Path | None = None) -> dict:
     """Always return both verdicts, integrity, and available limits."""
     try:

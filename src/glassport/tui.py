@@ -21,6 +21,31 @@ render layer and main loop, so the logic is unit-testable and the
 module still imports on platforms without curses.
 
 Zero dependencies. Pure stdlib.
+
+PLAY-BY-PLAY
+------------
+The TUI has one structural rule, stated in the docstring above and worth
+repeating: everything that decides is pure and curses-free. The testable
+half comes first in this file, and curses appears only at the bottom.
+
+1. `build_view_model()` turns a trace into rows: a header, a timeline,
+   and findings. It is a pure function of the trace, so "what would the
+   screen say" is a unit test rather than a manual check.
+2. `UIState`, `Tabs`, and `reduce()` are the interaction layer. `reduce`
+   maps a key to the next state; it draws nothing and touches no screen.
+3. `format_overlay`, `format_tab_strip`, `build_help_lines` produce text,
+   not curses calls.
+4. The render layer and main loop call those, and only those.
+
+Re-ingest is deliberately stateless: when the file grows, the whole log is
+re-lifted and re-annotated. Recomputing everything looks wasteful and buys
+the property that matters here -- the file is the single source of truth,
+so a live view and a replay cannot drift apart.
+
+WHAT THIS FILE DOES NOT DO
+--------------------------
+It does not detect, decide, or write. Editing files, blocking calls, and
+recording decisions are elsewhere; the TUI reads and draws.
 """
 from __future__ import annotations
 
@@ -102,6 +127,9 @@ def _event_label(event) -> str:
     return event.kind.value
 
 
+# PLAY: The pure core. Given the same trace it always produces the same
+# rows, which is what makes every layout and sorting question testable
+# without a terminal.
 def build_view_model(trace: InteractionTrace, live: bool) -> ViewModel:
     server = next((a for a in trace.actors if a.name == "mcp_server"), None)
 
@@ -242,6 +270,9 @@ class Tabs:
     active: int = 0
 
 
+# PLAY: Every tab operation is also pure: in, out, no mutation. That is
+# what keeps tab state from becoming a second, undocumented source of truth
+# about which session is being viewed.
 def open_tab(tabs: Tabs, path: Path) -> Tabs:
     """Activate the tab for `path`, appending it if not already open."""
     for i, t in enumerate(tabs.tabs):
@@ -276,6 +307,9 @@ def close_tab(tabs: Tabs) -> Tabs:
     return tabs
 
 
+# PLAY: A reducer, not a handler. It returns the next state and performs
+# no side effect, so the whole keyboard dialect can be exercised in tests
+# without a screen -- and the web console can reuse the same semantics.
 def reduce(state: UIState, action: str, vm: ViewModel) -> UIState:
     """Apply one semantic action to state, in place (curses-free and
     deterministic; returns the same object for chaining)."""

@@ -36,6 +36,44 @@ in metadata as orphaned — that orphaning is itself a signal worth seeing.
 This adapter intentionally does NOT detect hallucinations. It produces the
 faithful trace; detectors (fabricated_tool_calls, context_violations, …)
 run on top. Keep the ingest dumb and the analysis separate.
+
+PLAY-BY-PLAY
+------------
+This is the seam between bytes and meaning. Above it, a session log is a
+list of JSON lines. Below it, everything is an InteractionTrace with
+actors, events, and correlation. Nothing above this file knows about
+JSON-RPC, and nothing below it knows about JSONL.
+
+The classes, in order:
+
+1. `_iter_entries()` reads lines and yields the dicts that look like
+   entries, skipping anything malformed without stopping.
+2. `_PendingRequest` and `_CorrelationPlan` are the bookkeeping of a
+   request in flight: the plan is computed first, then applied, so a
+   verdict can be taken between the two (that is how the HTTP gate
+   refuses a call without ever correlating it).
+3. `MCPTraceBuilder` is the fold. `feed()` ingests one entry and returns
+   the event it produced, if any; `snapshot()` returns the trace built so
+   far.
+4. `from_mcp_session()` / `from_mcp_session_file()` are the public entry
+   points used by the CLI, the report, and the streaming adapter.
+
+Three details that repay attention:
+
+* Correlation is by JSON-RPC id, and an id that never matched anything is
+  still emitted -- parented to None and flagged `orphaned`. The orphan is
+  evidence, not noise.
+* `retain_events=False` keeps the fold's state without accumulating the
+  event list, which is what lets a long-lived HTTP session stay bounded.
+* The file reader has a tail cap. A capture larger than the cap is read
+  from the end and marked `tail_only`, so a consumer can say the head was
+  never analyzed rather than pretending the session started mid-way.
+
+WHAT THIS FILE DOES NOT DO
+--------------------------
+It does not judge, score, or detect. It also does not invent facts the
+wire did not carry: no initialize frame means no capability claim, and a
+missing tools/list means the surface is unknown.
 """
 from __future__ import annotations
 
@@ -54,6 +92,10 @@ from glassport.interaction_trace import (
 from glassport.session import SessionLimits, SessionState, bounded_copy
 
 
+# PLAY: A generator that yields only usable entries. A malformed line in
+# the middle of a capture must not end the read -- the rest of the session
+# is still evidence, and a reader that stopped at the first bad byte would
+# be trivially silenced.
 def _iter_entries(source: Iterable[str]) -> Iterable[dict]:
     """Yield parsed log entries; bare non-JSON lines become synthetic entries."""
     for line in source:
@@ -85,6 +127,10 @@ class _PendingRequest:
 
 
 @dataclass(frozen=True)
+# PLAY: A plan, not a mutation. Correlating a reply changes state, and in
+# gate mode the answer to "does this request get forwarded?" has to be
+# taken before that change happens. Computing the plan and applying it
+# separately is what makes that ordering possible.
 class _CorrelationPlan:
     """What admitting one client request would do to the correlation maps.
 
@@ -321,6 +367,10 @@ class MCPTraceBuilder:
             self._blocked.popitem(last=False)
         self._blocked[plan.key] = _PendingRequest(plan.event_id, plan.method, plan.tool_name)
 
+    # PLAY: The two halves of the deferred decision. commit means the
+    # request was really forwarded, so its pending correlation becomes
+    # real; discard means it never reached the server, so the fold must
+    # not believe a reply could arrive for it.
     def commit_correlation(self) -> bool:
         """Admit the client request folded under ``defer_correlation=True``:
         its pending correlation is inserted now. True when there was one."""
@@ -355,6 +405,9 @@ class MCPTraceBuilder:
         self._quarantined["c2s"] = {k for k in self._quarantined["c2s"]
                                     if not (len(k) == 3 and k[0] == exchange)}
 
+    # PLAY: JSON-RPC ids are strings or integers. Anything else (bool,
+    # null, container, float) cannot address a request, and treating one as
+    # an id is how an unrelated reply gets attached to the wrong call.
     def _valid_id(self, rid):
         return ((type(rid) is int and rid.bit_length() <= 128)
                 or (type(rid) is str and len(rid) <= self.state.limits.max_name_chars))
@@ -450,6 +503,9 @@ class MCPTraceBuilder:
             self.events.clear()
         return event
 
+    # PLAY: The one entry point the live paths use. `defer_correlation` is
+    # the gate handshake: fold the entry for analysis now, but hold the
+    # request's correlation until someone says the request was forwarded.
     def feed(self, entry: dict, *, defer_correlation: bool = False) -> Optional[Event]:
         """Compatibility spelling for ingest_frame()."""
         return self.ingest_frame(entry, defer_correlation=defer_correlation)
@@ -757,6 +813,10 @@ TAIL_CAP_BYTES = 50_000_000
 _USE_DEFAULT = -1
 
 
+# PLAY: The public file reader. Note the tail cap and the `tail_only`
+# marker it sets: a capture too large to replay in full is read from the
+# end, and the trace says so. Silent truncation would make every count in
+# a report a partial count pretending to be a total.
 def from_mcp_session_file(path: str | Path,
                           tail_cap_bytes: int | None = _USE_DEFAULT,
                           **kw) -> InteractionTrace:

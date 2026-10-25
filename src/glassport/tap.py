@@ -47,6 +47,40 @@ from_mcp_session() adapter consumes exactly these records, and the
 summarize command routes through that same adapter — one code path
 from wire to report.
 
+PLAY-BY-PLAY
+------------
+This file is the entry point (the `glassport` console script calls `cli`)
+and the only place where bytes actually move between a client and a
+server. Read it in this order.
+
+1. Helpers that make parsing safe. MCP stdio is newline-delimited JSON,
+   and every peer is free to send something a different JSON parser
+   would read differently. `_lenient_int`, `_unique_object`,
+   `_nesting_exceeds`, and `_dumps_strict_json` exist so the gate never
+   judges a message other than the one the peer will receive.
+2. `SessionLog` — the append-only JSONL writer. One envelope per wire
+   line, one lock, and no exception ever escapes.
+3. `Gate` — the optional enforcement layer: declaration tracking, the
+   checks, and the synthesized errors a blocked request earns.
+4. `pump` / `run_tap` — the relay itself: two threads copying pipe to
+   pipe, logging on the way past, waiting on the child process.
+5. `summarize` and the `_cmd_*` functions — the post-hoc side, which
+   reads a log and produces a report, SARIF, or advice.
+6. `main` — argument parsing and dispatch for every verb.
+
+The one rule that shapes everything else: the relay is sacred. A bug in
+logging, detection, or the gate may never alter, delay, or kill the live
+session. That is why so many functions here catch broadly and return
+None, and why the block paths are the only places allowed to write
+bytes the server never produced.
+
+WHAT THIS FILE DOES NOT DO
+--------------------------
+It does not interpret MCP semantics for the relay (the pump is dumb on
+purpose), it does not keep a session in memory as a model, and it does
+not push anything anywhere. Analysis lives in detectors, state in
+session, rendering in report.
+
 Author: Dennis J. Carroll · 2026 (skeleton drafted with Claude)
 """
 from __future__ import annotations
@@ -90,6 +124,11 @@ def _now_iso() -> str:
 
 def _source_commit() -> str | None:
     """Installed VCS provenance or explicit build metadata; never infer HEAD."""
+    # PLAY: Two sources only: an explicit environment variable, or the
+    # install metadata pip writes. Running `git rev-parse` here would be
+    # convenient and wrong -- the checkout on disk is not necessarily the
+    # code that is installed, and a log naming the wrong commit makes
+    # every provenance claim downstream suspect.
     candidate = os.environ.get("GLASSPORT_COMMIT")
     if candidate is None:
         try:
@@ -99,6 +138,9 @@ def _source_commit() -> str | None:
                 "commit_id")
         except (importlib.metadata.PackageNotFoundError, ValueError, AttributeError):
             return None
+    # PLAY: Anything that is not a plausible hex commit id becomes None.
+    # A log header that echoes an arbitrary string into a "commit" field
+    # would be quoting an unverified claim.
     if isinstance(candidate, str) and re.fullmatch(r"[0-9a-fA-F]{7,64}", candidate):
         return candidate.lower()
     return None
@@ -107,6 +149,9 @@ def _source_commit() -> str | None:
 def build_session_header(*, transport: str, mode: str, strict: bool = False,
                          remote_url: str | None = None) -> dict:
     """Tap-owned provenance, with no credential-bearing URL or header value."""
+    # PLAY: The import is local because the tap is launched as a fresh
+    # process for every session; anything imported at module scope is
+    # paid for on the wrapped server's startup path.
     from glassport import __version__
     from glassport.decision_journal import (DETECTOR_ENGINE_VERSION,
                                             JOURNAL_SCHEMA, POLICY_VERSION)
@@ -120,6 +165,11 @@ def build_session_header(*, transport: str, mode: str, strict: bool = False,
               "detector_engine": DETECTOR_ENGINE_VERSION,
               "journal_schema": JOURNAL_SCHEMA, "started_at": _now_iso()}
     if remote_url is not None:
+        # PLAY: The remote endpoint is recorded as an identity, not as
+        # text. Userinfo, query, and fragment are dropped outright, and
+        # the path is kept only as a digest -- an MCP endpoint URL can
+        # carry a bearer token in any of those parts, and this header is
+        # written to disk on every session.
         parsed = urlsplit(remote_url)
         header["remote"] = {
             "scheme": parsed.scheme, "host": parsed.hostname,
@@ -152,6 +202,12 @@ def _unique_object(pairs: list) -> dict:
     duplicate wins (V8 and CPython keep the last, some keep the first, serde
     derives reject), so a frame with one is ambiguous and the gate would be
     judging a different message than the peer receives."""
+    # PLAY: If a frame says {"id": 1, "id": 2}, the peer that parses it
+    # and the gate that judges it could disagree about which id wins. That
+    # is a parser differential: the gate would be judging a different
+    # message than the one actually delivered. Refusing the frame is the
+    # only answer that is not a guess. dict() keeps the last value, which
+    # is why a length comparison detects the collision.
     obj = dict(pairs)
     if len(obj) != len(pairs):
         raise ValueError("duplicate object key")
@@ -161,6 +217,8 @@ def _unique_object(pairs: list) -> dict:
 def _loads(data: bytes) -> Any:
     """json.loads for gate decisions: tolerant of oversized integers, strict
     about duplicate keys (both are parser differentials)."""
+    # PLAY: Both hooks are wired here and nowhere else, so every gate
+    # decision in this file parses through one function with one policy.
     return json.loads(data, parse_int=_lenient_int, object_pairs_hook=_unique_object)
 
 
@@ -168,6 +226,9 @@ def _nesting_exceeds(value: Any, limit: int) -> bool:
     """True when dict/list nesting in `value` goes deeper than `limit`
     (a bare container is depth 1). Iterative, so it cannot itself hit the
     recursion limit it guards against."""
+    # PLAY: An explicit stack, not recursion. The input is peer-sized, so
+    # a recursive depth check would itself crash on the frame it was
+    # called in to refuse -- and a crash inside a check is a fail-open.
     stack = [(value, 1)]
     while stack:
         node, depth = stack.pop()
@@ -190,9 +251,20 @@ def _dumps_strict_json(obj: Any) -> str:
     re-emitted as 1e999, which parses back to the same infinity. NaN (which
     json.loads also accepts) becomes null. Mutates non-finite floats in
     `obj`; the walk is iterative, so peer-sized nesting cannot overflow it."""
+    # PLAY: Fast path first. Almost every frame is finite floats only, so
+    # the expensive rewrite below only runs when the dump actually
+    # contains a token Python spells but JSON does not.
     text = json.dumps(obj, ensure_ascii=True)
     if "Infinity" not in text and "NaN" not in text:
         return text
+    # PLAY: The middle step of a three-step trick. Python writes inf as
+    # `Infinity`, which strict parsers reject, and json.dumps has no way
+    # to emit `1e999` directly. So each non-finite float is temporarily
+    # replaced by a random NUL-prefixed sentinel, the object is dumped,
+    # and the sentinels are swapped for JSON literals that parse back to
+    # the same value. The token is random because a guessable sentinel
+    # would let a peer include it in a string and have the swap rewrite
+    # attacker-chosen text.
     token = "\x00glassport-" + secrets.token_hex(8)   # unguessable by the peer
     literals = {token + "p": "1e999", token + "m": "-1e999", token + "n": "null"}
     stack = [obj]
@@ -214,6 +286,10 @@ def _minimal_read_response(rid: Any, contents: list) -> bytes:
     """A resources/read response carrying only the string fields a client
     renders from each content item. Used when the server's full frame is
     too deep to re-encode; shallow by construction."""
+    # PLAY: The alternative to this would be forwarding a frame the gate
+    # could not re-serialize, or dropping the response entirely. Rebuilding
+    # a minimal, provably shallow answer keeps the session alive and makes
+    # no claim about the parts that were left out.
     kept = [{k: v for k, v in item.items()
              if k in ("uri", "mimeType", "text", "blob") and isinstance(v, str)}
             for item in contents if isinstance(item, dict)]
@@ -225,6 +301,10 @@ def _note_skip(info: dict | None, tool: str | None, reason: str) -> dict:
     """Record a fail-open check fault on the forward marker. The first
     fault keeps the `reason` field; later ones append to `also_skipped`,
     so the log shows every check that could not run."""
+    # PLAY: The first fault keeps the stable `reason` key because readers
+    # key on it; later faults are still recorded, because a frame that
+    # skipped three checks is a weaker observation than one that skipped
+    # one, and that difference should not be lost.
     if info is None:
         return {"action": "gate_skipped", "tool": tool, "reason": reason}
     info.setdefault("also_skipped", []).append(reason)
@@ -234,11 +314,19 @@ def _note_skip(info: dict | None, tool: str | None, reason: str) -> dict:
 # ─────────────────────────────────────────────────────────────────
 # Session logger — append-only JSONL, thread-safe, failure-isolated.
 # ─────────────────────────────────────────────────────────────────
+# PLAY: "Failure-isolated" is the whole design. The pumps call into this
+# section on every frame; if any of it raised, the exception would travel
+# back into the relay loop and end the session. So every public method
+# here swallows its own errors and returns None instead.
 def _serialize_entry(entry: dict) -> str:
     """One JSONL line for an envelope. A frame that parsed but is too deep to
     re-encode is kept as wire text in the SAME dict (so what a live fold saw
     and what is on disk never differ); a lone surrogate json.loads accepted
     but UTF-8 cannot carry is escaped, never dropped."""
+    # PLAY: Two fallbacks, in this order: depth, then encodability. Neither
+    # one drops the entry. A log that silently omits the frames it could
+    # not encode is worse than one that says "raw text follows", because
+    # the omission is invisible.
     try:
         text = json.dumps(entry, ensure_ascii=False)
     except RecursionError:
@@ -263,6 +351,11 @@ def build_session_entry(direction: str, line: bytes, gate: dict | None = None,
     its serialization. Pure: builds the dict every reader (`MCPTraceBuilder`,
     `from_mcp_session_file`, replay) consumes, without touching a file, so a
     live fold can be fed the exact object that is then written."""
+    # PLAY: Pure means "no file access", and that is what lets the live
+    # gate fold the very same object the log will contain -- one fold, not
+    # one for the wire and a second for the file.
+    # errors="replace" keeps an invalid byte sequence from raising here;
+    # the frame is still a byte string and still relayed unchanged.
     text = line.decode("utf-8", errors="replace").rstrip("\r\n")
     frame, raw = None, None
     try:
@@ -284,6 +377,9 @@ def build_session_entry(direction: str, line: bytes, gate: dict | None = None,
     if observation is not None:
         entry["http_observation"] = observation
     if wire_bytes is not None:
+        # PLAY: Only HTTP frames carry this. Text that was decoded and
+        # re-encoded is not the same bytes that crossed the wire, and a
+        # capture that claims to hold the raw frame should hold it.
         import base64
         entry["wire_b64"] = base64.b64encode(wire_bytes).decode("ascii")
     try:
@@ -303,6 +399,10 @@ def build_session_entry(direction: str, line: bytes, gate: dict | None = None,
 
 
 class SessionLog:
+    # PLAY: Contract for every method below: it never raises. Callers are
+    # relay pumps and a gate holding a lock, where an exception would mean
+    # a dropped frame or a hung session. A failed write increments
+    # write_failures and reports itself once, then returns.
     def __init__(self, path: Path, header: dict | None = None):
         # Create the session dir private (0o700) and the log file private
         # (0o600) explicitly, independent of the caller's umask. Glassport
@@ -345,11 +445,19 @@ class SessionLog:
 
     def _write(self, text: str) -> bytes:
         """Count failed append calls once; caller holds the session lock."""
+        # PLAY: The counters here are the capture's own confession. A
+        # short or invalid write raises, which record() turns into None,
+        # and write_failures carries the count into the trailer so
+        # `glassport limits` can report that the log is incomplete.
         try:
             encoded = text.encode("utf-8")
             written = self._fh.write(encoded)
             if type(written) is not int or written < 0 or written > len(encoded):
                 raise OSError("invalid session log write count")
+            # PLAY: The digest takes only the bytes the write reported,
+            # and it is updated BEFORE the short-write check raises. So
+            # log_sha256 always describes what actually reached the file,
+            # even when the write was truncated.
             self._digest.update(encoded[:written])
             if written != len(encoded):
                 raise OSError("short session log write")
@@ -417,6 +525,11 @@ class SessionLog:
 
     def _claim_sequence(self, sequence: int | None) -> int:
         """Caller holds the lock. Validates and advances the log's sequence."""
+        # PLAY: `sequence` is for callers that already own an order -- the
+        # HTTP path assigns numbers per stream, so two concurrent streams
+        # cannot interleave their frames into a nonsense order. Strictly
+        # increasing is enforced because a repeat would make the seq-gap
+        # analysis ambiguous.
         if sequence is not None:
             if type(sequence) is not int or sequence <= self._seq:
                 raise ValueError('session sequence must increase')
@@ -430,6 +543,10 @@ class SessionLog:
         a successful write call. `text` is its serialization when the caller
         still holds the one build_session_entry returned and has not changed
         the entry since; otherwise it is serialized here. Never raises."""
+        # PLAY: The returned digest is a receipt for one successful append
+        # call. It is not durability (the OS may not have flushed) and not
+        # delivery -- the far side may never read the pipe. Callers that
+        # need either of those have to prove it elsewhere.
         try:
             with self._lock:
                 self._claim_sequence(entry.get("seq"))
@@ -449,6 +566,10 @@ class SessionLog:
         raises) reused by the decision journal, which owns its OWN files.
         Decision evidence and wire evidence are never written to one file.
         """
+        # PLAY: Same private-file discipline, different schema: this is
+        # how the decision journal writes, and it deliberately cannot
+        # write into the session file. Wire evidence and decision
+        # evidence sharing one file would make each one deniable.
         try:
             line = json.dumps(entry, ensure_ascii=False) + "\n"
             with self._lock:
@@ -471,6 +592,10 @@ class SessionLog:
                 entry.setdefault("log_bytes", self._fh.tell())
                 entry["log_sha256"] = self._digest.hexdigest()
                 entry["entries_written"] = self._entries_written
+                # PLAY: seq_range comes from this log's own counter, so
+                # the trailer's claim can be compared against the seqs
+                # that survived. That comparison is how a truncated tail
+                # becomes visible in `glassport limits`.
                 entry["seq_range"] = [1, self._seq] if self._seq else None
                 self._write(json.dumps(entry, ensure_ascii=False) + "\n")
         except Exception:
@@ -491,6 +616,12 @@ def open_session_log(path: Path, *, transport: str = "stdio",
     runs without recording. The relay is sacred: neither an unwritable dir
     nor a permission we could not secure may kill the session — we disable
     logging loudly instead."""
+    # PLAY: Two independent failure modes, and the second is the subtle
+    # one. The first is the filesystem refusing: no log, session continues.
+    # The second is a file that exists and is writable but readable by
+    # group or world -- in that case we could record, and we refuse to,
+    # because a readable log of a full MCP session is a credential leak
+    # with a timestamp.
     try:
         header = (build_session_header(transport=transport, mode=mode,
                                        strict=strict, remote_url=remote_url)
@@ -515,6 +646,10 @@ def open_session_log(path: Path, *, transport: str = "stdio",
 # Gate — M5. Active enforcement on the c2s path. Opt-in, last, on
 # purpose: it ships only because the passive detectors came first.
 # ─────────────────────────────────────────────────────────────────
+# PLAY: Everything in this section is the one place glassport may write
+# bytes a peer never produced. Read the class docstring first: the rule is
+# that a block must be provable from the wire, and anything less fails
+# open with a marker in the log saying so.
 class Gate:
     """
     Blocks c2s tools/call frames that name a tool outside the server's
@@ -542,6 +677,12 @@ class Gate:
     side actually saw, and they legitimately differ.
     """
 
+    # PLAY: State, in the order it matters. The fold (`_builder` plus
+    # `_fold_seq`) is the declaration as the server saw it; `_lock` and
+    # `_state_changed` let a tools/call wait for an in-flight listing
+    # instead of blocking on a guess; `_pending_reads` correlates a
+    # resources/read reply with the uri that was asked for, so taint
+    # analysis knows what came back from where.
     def __init__(self, hold_timeout: float = 2.0,
                  control_path: "Path | None" = None,
                  idempotency_ttl: float = 5.0,
@@ -586,6 +727,11 @@ class Gate:
                       suggestion: str | None = None, **extra_data) -> dict | None:
         """The JSON-RPC error object behind _block, or None when `rid` is
         unaddressable (see _block)."""
+        # PLAY: Which ids can be answered. A notification has no id. A bool
+        # is an int subclass, so True would otherwise be echoed back as
+        # request id 1 and answer some other request. Containers are out
+        # because re-encoding a deeply nested id could overflow and turn
+        # the block into a fail-open forward.
         if rid is None or isinstance(rid, bool) or not isinstance(rid, (str, int, float)):
             return None
         if isinstance(rid, float) and not math.isfinite(rid):
@@ -620,6 +766,11 @@ class Gate:
         original bytes with a gate_skipped marker (fail open, visibly).
         Strict and enforcing: block, answering the request id if one can be
         read. Never raises."""
+        # PLAY: This is the difference between the two fault policies, in
+        # one function. Default: the check broke, so relay the frame and
+        # log that enforcement was impossible. Strict: the check broke, so
+        # refuse -- and note the asymmetry below, where unreadable override
+        # state keeps enforcement ON rather than silently disabling it.
         forward = ("forward", None,
                    {"action": "gate_skipped", "reason": "gate_check_error"})
         if not self.strict:
@@ -651,6 +802,10 @@ class Gate:
         together as one batch response; notifications, client replies,
         unaddressable ids, and nested arrays get nothing, and a batch with no
         addressable request gets no response at all."""
+        # PLAY: All-or-nothing. Forwarding the innocent elements would
+        # mean rewriting a batch into several frames, which is a change
+        # the relay is not allowed to make. So the whole batch is refused
+        # and each request that can be answered is told why.
         if not self._enforcement_on():
             return ("forward", None,
                     {"action": "gate_disabled", "tool": None,
@@ -695,6 +850,10 @@ class Gate:
 
     def _idempotency_hit(self, name: str, arguments: Any) -> bool:
         """Detect repeated canonical calls in a monotonic TTL window."""
+        # PLAY: Canonical hashing is the whole trick. sort_keys makes key
+        # order irrelevant and default=str keeps an exotic value from
+        # raising, so two calls that mean the same thing collide on the
+        # same key. Swapping two arguments must not read as a new call.
         now = time.monotonic()
         key = hashlib.sha256(json.dumps(
             {"name": name, "arguments": arguments},
@@ -704,6 +863,10 @@ class Gate:
                      if now - ts > self.idempotency_ttl]
             for k in stale:
                 del self._recent_calls[k]
+            # PLAY: The window runs from the FIRST sighting, not the
+            # last, so a slow drip of identical calls still trips. And the
+            # comparison is `>`, so max_repeats=3 allows three and flags
+            # the fourth.
             count, first_seen = self._recent_calls.get(key, (0, now))
             count += 1
             self._recent_calls[key] = (count, first_seen)
@@ -713,6 +876,11 @@ class Gate:
         """Consult the override file. Fail-closed: enforcement stays ON
         unless the file is a well-formed {"enforce": false} owned by
         this uid with no group/world write bits."""
+        # PLAY: Four independent gates, and every one of them has to pass
+        # before enforcement may switch off: this uid owns the file, no
+        # group or world write bit is set, it parses, and it is a dict.
+        # Each failure returns True -- enforcement on. A control channel
+        # that fails open is not a control channel.
         p = self.control_path
         if p is None:
             return True
@@ -733,6 +901,9 @@ class Gate:
             return True
         # Only a literal JSON false disables enforcement; null, 0, "", [] and
         # {} are falsy but are not the documented {"enforce": false}.
+        # PLAY: `is not False` rather than a truthiness test, for exactly
+        # that reason: a truncated file that parsed as null, or a 0, must
+        # not be able to turn the gate off by accident.
         return data.get("enforce", True) is not False
 
     def _fold(self, direction: str, line: bytes) -> None:
@@ -750,12 +921,22 @@ class Gate:
             return
         if not isinstance(frame, dict):
             return
+        # PLAY: One lock covers the whole fold, and notify_all() runs
+        # inside it. A tools/call held in _await_declaration is waiting on
+        # this condition, so the wake-up and the state change have to be
+        # the same critical section or the waiter could miss it.
         with self._state_changed:
             try:
                 self._fold_seq += 1
                 self._builder.ingest_frame({"seq": self._fold_seq, "ts": _now_iso(),
                                             "dir": direction, "frame": frame})
             except Exception:
+                # PLAY: A fold fault is charged to the direction that
+                # caused it. An unreadable server line might have been a
+                # withdrawal, so the declaration becomes unknown. An
+                # unreadable client line only abandons a pending listing --
+                # otherwise a caller could switch enforcement off by
+                # sending something the tap cannot parse.
                 state = self._builder.state
                 if direction == "s2c":
                     state._invalidate_declaration()
@@ -778,6 +959,9 @@ class Gate:
     def _declaration(self) -> tuple[frozenset[str], dict[str, dict]] | None:
         """Names and tool definitions from one consistent state, or None
         when no declaration is current. Caller holds _lock."""
+        # PLAY: Both halves are required: something was declared, and it
+        # is still current under ttlMs. An expired declaration is unknown,
+        # not empty -- which is why this returns None and not set().
         state = self._builder.state
         if state.surface is None or not state.current_at(_now_iso()):
             return None
@@ -789,6 +973,10 @@ class Gate:
         deadline = None
         with self._state_changed:
             snapshot = self._declaration()
+            # PLAY: Only a correlated listing that is actually in flight
+            # makes this wait. No listing pending means no reason to hold
+            # the call, and the loop re-reads the declaration after every
+            # wake rather than trusting the one it saw first.
             while snapshot is None and self._builder.state.listing_in_flight:
                 if deadline is None:
                     deadline = time.monotonic() + self._hold_timeout
@@ -803,6 +991,9 @@ class Gate:
         """Pop the uri of the resources/read this reply answers, for the log
         marker only. A boolean id never pops: True == 1 in Python, so a
         {"id": true} primer used to consume pending read 1 (A9)."""
+        # PLAY: The recorded bug is worth keeping in mind whenever an id is
+        # inspected: dict lookups treat True and 1 as the same key, so a
+        # boolean must be rejected before it can address a request.
         if rid is None or isinstance(rid, bool):
             return None
         try:
@@ -816,6 +1007,10 @@ class Gate:
         """A server line the gate cannot read may be a resources/read reply
         whose text a client parser (V8) would still accept, and its id is
         unreadable. While enforcing it is dropped, not released."""
+        # PLAY: This is the s2c fail-closed verdict, and it is asymmetric
+        # with the c2s side on purpose. A c2s frame we cannot read is
+        # forwarded with a marker; an s2c frame we cannot read might be the
+        # response carrying text that poisoned a client, so it is dropped.
         if not self._enforcement_on():
             return ("forward", None, {"action": "gate_disabled", "reason": reason})
         return ("drop", None, {"action": "quarantine_dropped", "reason": reason})
@@ -828,6 +1023,8 @@ class Gate:
         still receives it. Readable results are never dropped by this check;
         unreadable lines are (see _uninspectable_s2c). Blank lines pass.
         """
+        # PLAY: Blank lines are legal keep-alives in a newline-delimited
+        # stream and carry nothing to judge, so they pass untouched.
         if not line.strip():
             return ("forward", None, None)
         try:
@@ -842,6 +1039,9 @@ class Gate:
             return self._uninspectable_s2c("batch_unsupported")
         if not isinstance(frame, dict):
             return self._uninspectable_s2c("uninspectable_frame")
+        # PLAY: A frame carrying a method is a server-initiated request or
+        # notification, not a reply to anything, so there is no result to
+        # quarantine. It goes straight through.
         if "method" in frame:
             return ("forward", None, None)
         uri = None
@@ -860,6 +1060,11 @@ class Gate:
             # normalize response ids (TS Number(id), Python int(str)), so "1",
             # 1.0 or true all reach request 1, and correlating on the pending
             # id let a mismatched id carry unneutralized text (A8).
+            # PLAY: That bug is the best argument for content-shape
+            # detection over id correlation. If the client will deliver
+            # this text to the model, the gate must neutralize it -- no
+            # matter which request the id claims to answer. The pending
+            # id is used only to label the log entry.
             if uri is None:
                 uri = next((item.get("uri") for item in contents
                             if isinstance(item, dict)
@@ -873,10 +1078,18 @@ class Gate:
                     continue
                 # detection reads only the first MAX_SCAN_BYTES; a longer text
                 # is neutralized whole rather than trusted past the cap (A4)
+                # PLAY: The length test comes first on purpose. A scanner
+                # that stops at a cap turns "put your payload after byte N"
+                # into a bypass, so an over-long text is treated as tainted
+                # without being read at all.
                 if len(text) > MAX_SCAN_BYTES or find_taint({"text": text}) is not None:
                     sanitized = neutralize_text(text)
                     # Unicode neutralization preserves ASCII delimiters.
                     # Reuse the detection pattern to remove those explicitly.
+                    # PLAY: neutralize_text normalizes the invisible
+                    # characters; this loop handles the plain-ASCII ones
+                    # ("SYSTEM:", "### Instruction") that survive that
+                    # pass because they are ordinary text.
                     for kind, pattern in _TAINT_PATTERNS:
                         if kind == "role_switch_delimiter":
                             sanitized = pattern.sub("[role delimiter removed]", sanitized)
@@ -894,6 +1107,10 @@ class Gate:
                 # neutralized contents instead of releasing the original. A
                 # container id could itself be too deep to encode (and TS
                 # clients read Number([[1]]) as 1), so such a reply is dropped.
+                # PLAY: Note the two possible endings and what each claims.
+                # "rewrite" with reduced=True says: here is the same reply,
+                # minus everything but the fields a client renders. "drop"
+                # says: we could not even address an answer to this id.
                 if isinstance(rid, bool) or not isinstance(rid, (str, int, float)):
                     return ("drop", None,
                             {"action": "quarantine_dropped", "uri": uri,
@@ -905,6 +1122,10 @@ class Gate:
             if self.strict and self._enforcement_on():
                 # strict: never release a read reply the quarantine could
                 # not finish; answer its id with an error, or drop it
+                # PLAY: Default mode forwards with a quarantine_scan_error
+                # marker because a working session outranks an unproven
+                # suspicion. Strict mode inverts that: if we could not
+                # finish the scan, the text does not reach the model.
                 withheld = self._block(
                     rid, "quarantine_scan_error", None,
                     "glassport gate: resource content withheld — strict mode: "
@@ -940,6 +1161,11 @@ class Gate:
         sends `response` (bytes, or None for id-less calls) back to the
         client, and logs `info` on the blocked entry.
         """
+        # PLAY: Read the checks below as a chain of escalating cost: parse,
+        # shape, cheapest possible name test, then attestation, then depth,
+        # size, idempotency, taint, schema, and PII. Any check can fault,
+        # and a fault is recorded rather than raised, because the caller is
+        # a relay thread.
         if not line.strip():
             return ("forward", None, None)   # blank lines carry no message
         try:
@@ -953,6 +1179,10 @@ class Gate:
         if not isinstance(frame, dict):
             return self._uninspectable_c2s("uninspectable_frame")
         method = frame.get("method")
+        # PLAY: A resources/read request is remembered by id so the reply
+        # can be labelled with the uri it answered. That is marker
+        # metadata, not authorization -- check_s2c scans contents
+        # regardless of whether this bookkeeping succeeded.
         if method == "resources/read":
             try:
                 rid = frame.get("id")
@@ -971,6 +1201,10 @@ class Gate:
         # shape carries no declared tool: it falls through to the
         # undeclared-surface block instead of raising (an unhashable name
         # used to crash the relay) or reaching a positional-params server.
+        # PLAY: Dropping to {} rather than trusting the shape is what
+        # makes the comparison below safe. The frame still goes on to be
+        # blocked as undeclared, so a malformed call never becomes a free
+        # pass -- it just cannot borrow a name to hide behind.
         params = frame.get("params")
         if not isinstance(params, dict):
             params = {}
@@ -979,6 +1213,10 @@ class Gate:
             name = None
         # Names and schemas come from one snapshot: a declaration replaced
         # mid-decision must not pair the new names with the old schema.
+        # PLAY: This call may block for up to hold_timeout while a listing
+        # is in flight. Blocking the c2s pump is deliberate: stdio
+        # backpressure is the flow control a real client already expects,
+        # and guessing at an in-flight declaration would be a coin flip.
         snapshot = self._await_declaration()
         surface_missing = snapshot is None
         declared, declared_defs = snapshot if snapshot is not None else (frozenset(), {})
@@ -986,6 +1224,10 @@ class Gate:
             # With no declared surface only the undeclared-tool and schema
             # checks are impossible: fail open for those, visibly, but still
             # run attestation, depth, idempotency, taint, and PII.
+            # PLAY: This branch is "allow, or run the checks that do not
+            # need a declaration". An unknown surface must not disable the
+            # boundary checks; it disables exactly two of them, and says so
+            # in the marker.
             forward_info = ({"action": "gate_skipped",
                              "reason": "no_surface_timeout", "tool": name}
                             if surface_missing else None)
@@ -1045,6 +1287,10 @@ class Gate:
             # _meta and any sibling reach the server too (A2). The params
             # object adds one level around arguments, which keep their
             # MAX_ARGUMENT_DEPTH allowance.
+            # PLAY: That is why the depth test below uses
+            # MAX_ARGUMENT_DEPTH + 1: the documented allowance is for the
+            # arguments, and params wraps them in one more dict. Testing
+            # params at the bare limit would reject a legal call.
             extras = {k: v for k, v in params.items()
                       if k not in ("name", "arguments")}
             if _nesting_exceeds(params, MAX_ARGUMENT_DEPTH + 1):
@@ -1071,6 +1317,9 @@ class Gate:
                 forward_info = _note_skip(forward_info, name, "pii_scan_error")
             # The scanners inspect at most MAX_SCAN_BYTES per blob/string;
             # anything past that cap would pass unread, so it is refused (A3/A4).
+            # PLAY: Refused, not truncated. Truncating would forward data
+            # the gate never read while reporting that it checked. The
+            # suggestion in the error tells the caller how to comply.
             if blob is not None and len(blob) > MAX_SCAN_BYTES:
                 if not self._enforcement_on():
                     return ("forward", None,
@@ -1089,6 +1338,10 @@ class Gate:
                          "reason": "params_too_large"})
             # A check that faults is skipped visibly, but the remaining
             # checks still run: one scanner error must not waive the rest.
+            # PLAY: _note_skip accumulates these on forward_info, so a
+            # single frame can carry several skip reasons. Under --strict
+            # that accumulator is what _strict_block later turns into a
+            # block; without strict it rides out on the forwarded entry.
             try:
                 repeat = self._idempotency_hit(name, arguments)
             except Exception:
@@ -1190,6 +1443,8 @@ class Gate:
                          "reason": "pii_exfiltration"})
             if self.strict and forward_info is not None and self._enforcement_on():
                 return self._strict_block(frame, name, forward_info)
+            # PLAY: The ordinary ending. `forward_info` is None for a clean
+            # frame, or a marker explaining every check that could not run.
             return ("forward", None, forward_info)
 
         if not self._enforcement_on():
@@ -1215,6 +1470,10 @@ class Gate:
 # ─────────────────────────────────────────────────────────────────
 # Pump — moves lines from one fd to another, tapping each line.
 # ─────────────────────────────────────────────────────────────────
+# PLAY: This is the relay loop, and it is intentionally dumb: read a
+# line, optionally ask the gate, write the line, log the line. It parses
+# nothing itself and holds no protocol state. Everything that could be
+# slow, clever, or fallible lives behind the two optional arguments.
 def pump(src, dst, log: SessionLog | None, direction: str,
          gate: Gate | None = None, client_write=None,
          dst_lock: threading.Lock | None = None) -> None:
@@ -1232,6 +1491,10 @@ def pump(src, dst, log: SessionLog | None, direction: str,
     dst_lock serializes client-bound writes so an
     injected error can't interleave with a real server response.
     """
+    # PLAY: `iter(src.readline, b"")` is the sentinel form: readline
+    # returns b"" at EOF, which ends the loop. One pump per direction, each
+    # in its own thread, so a slow write on one side cannot stall reads on
+    # the other.
     try:
         for line in iter(src.readline, b""):
             gate_info = None   # marker for forwarded-but-noteworthy frames
@@ -1250,6 +1513,12 @@ def pump(src, dst, log: SessionLog | None, direction: str,
                             "forward", None,
                             {"action": "gate_skipped", "reason": "gate_check_error"})
                 if action == "block" and info is not None:
+                    # PLAY: A block logs twice and relays once. The
+                    # request is recorded as blocked (the server never saw
+                    # it), and the error the client receives is recorded
+                    # separately as injected, because the server never
+                    # said it. Two entries, because two peers genuinely
+                    # saw different bytes.
                     if log is not None:
                         log.record(direction, line, gate=info)
                     if response is not None and client_write is not None:
@@ -1261,6 +1530,10 @@ def pump(src, dst, log: SessionLog | None, direction: str,
                     continue
                 gate_info = info   # e.g. gate_skipped fail-open
                 # Before the write: the reply must find its request folded.
+                # PLAY: Fold-then-forward, never the other way round. A
+                # fast server can answer a resources/read before this
+                # thread reaches the top of the loop again, and the reply
+                # would then arrive with no request to attribute it to.
                 gate.observe_c2s(line)
             elif gate is not None and direction == "s2c":
                 try:
@@ -1283,10 +1556,20 @@ def pump(src, dst, log: SessionLog | None, direction: str,
                         if strict_now
                         else ("forward", None, {"action": "quarantine_scan_error"}))
                 if s2c_action == "drop":
+                    # PLAY: Dropped means the client never receives this
+                    # frame. It is still written to the log, marked as
+                    # quarantine_dropped, so the capture shows what was
+                    # withheld instead of looking like the server said
+                    # nothing.
                     if log is not None:
                         log.record(direction, line, gate=s2c_info)
                     continue
                 if s2c_action == "rewrite" and s2c_new_line is not None:
+                    # PLAY: Both versions are kept: the server's original
+                    # text with the quarantine marker, then the replaced
+                    # line through the common log call below. The relay's
+                    # byte-faithful promise is preserved as evidence even
+                    # though the client sees the sanitized copy.
                     if log is not None:
                         log.record(direction, line, gate=s2c_info)
                     line = s2c_new_line
@@ -1294,6 +1577,10 @@ def pump(src, dst, log: SessionLog | None, direction: str,
                     gate_info = {**(s2c_info or {}), "action": "quarantine_replacement"}
                 elif s2c_info is not None:
                     gate_info = s2c_info
+            # PLAY: The lock covers write and flush together. Half a line
+            # followed by an injected error would corrupt the framing of a
+            # newline-delimited protocol, and the client would read two
+            # mangled frames.
             if dst_lock is not None:
                 with dst_lock:
                     dst.write(line)
@@ -1305,6 +1592,9 @@ def pump(src, dst, log: SessionLog | None, direction: str,
                 log.record(direction, line, gate=gate_info)
     except (BrokenPipeError, ValueError, OSError):
         pass  # one side hung up; let the session wind down
+    # PLAY: Closing dst on the way out is what tells the other end the
+    # conversation is over -- for c2s that is the child's stdin, which is
+    # how the server learns to exit.
     finally:
         try:
             dst.close()
@@ -1314,6 +1604,9 @@ def pump(src, dst, log: SessionLog | None, direction: str,
 
 def pump_stderr(src, dst) -> None:
     """Pass the child's stderr through untouched (no framing assumed)."""
+    # PLAY: Chunked, not line-based, and never parsed. A server can write
+    # progress bars, partial lines, or binary to stderr; none of it is
+    # protocol, all of it is the human's, so it is copied and forgotten.
     try:
         for chunk in iter(lambda: src.read(4096), b""):
             dst.write(chunk)
@@ -1329,6 +1622,10 @@ def run_tap(server_cmd: list[str], log_dir: Path,
             gate: Gate | None = None,
             gate_controllable: bool = False) -> int:
     session_start = time.time()
+    # PLAY: The filename carries the time and the command, because that is
+    # what a human sorting a log directory needs. The command is filtered
+    # to alphanumerics so a path cannot introduce separators, and the pid
+    # keeps two sessions started in the same second apart.
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     safe_name = "".join(c if c.isalnum() else "_" for c in server_cmd[0])[:32]
     log_path = log_dir / f"{stamp}_{safe_name}_{os.getpid()}.jsonl"
@@ -1337,12 +1634,17 @@ def run_tap(server_cmd: list[str], log_dir: Path,
     # The relay is sacred: a logging failure must never alter, delay, or kill
     # a live session. If the log dir is unwritable, disable logging and relay
     # anyway — pump() already tolerates a None log.
+    # PLAY: Popped, not read. The variable exists so `probe` can tell the
+    # tap what kind of session this is; the wrapped server is a separate
+    # process that has no business inheriting glassport's own switch.
     probe_capture = os.environ.pop("GLASSPORT_INTERNAL_PROBE", None) == "1"
     mode = "gate" if gate is not None else "probe" if probe_capture else "wrap"
     log = open_session_log(log_path, transport="stdio", mode=mode,
                            strict=bool(gate is not None and gate.strict))
 
     # Announce on stderr only — stdout belongs to the protocol.
+    # PLAY: Not a style choice. One stray byte on stdout lands in the
+    # client's parser as a malformed frame and ends the session.
     print(f"[glassport] tapping: {shlex.join(server_cmd)}", file=sys.stderr)
     print(f"[glassport] session log: {log_path}", file=sys.stderr)
     if gate is not None:
@@ -1359,6 +1661,10 @@ def run_tap(server_cmd: list[str], log_dir: Path,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
+            # PLAY: Unbuffered. A buffered pipe would hold a complete frame
+            # until the buffer filled, which is a stall the client would
+            # experience as a hung server -- exactly the delay the relay
+            # promises never to add.
             bufsize=0,  # unbuffered — frames must not sit in a buffer
         )
     except FileNotFoundError:
@@ -1400,6 +1706,10 @@ def run_tap(server_cmd: list[str], log_dir: Path,
         signal.signal(s, _forward)
 
     rc = child.wait()
+    # PLAY: The child has exited, but the pumps are daemon threads that may
+    # still be copying the final lines out of the pipes. A tenth of a
+    # second is a best-effort drain, not a guarantee; a frame lost here is
+    # still reported by the trailer's own counters.
     time.sleep(0.1)  # let pumps drain their last lines
     if log is not None:
         log.write_metrics(
@@ -1412,6 +1722,12 @@ def run_tap(server_cmd: list[str], log_dir: Path,
     print(f"[glassport] session ended (exit {rc}){suffix}; "
           f"log: {log_note}", file=sys.stderr)
 
+    # PLAY: The short version of the long comment below: this function is
+    # the process's last act, the daemon c2s thread is still parked in a
+    # stdin read, and normal interpreter teardown can abort with SIGABRT
+    # *after* a perfectly good session. So the process exits immediately
+    # and skips finalization. If you are editing here, read the whole
+    # comment first -- it records what was verified.
     # The c2s pump is a daemon thread blocked on a buffered sys.stdin read. If we
     # `return` and let the interpreter finalize, that finalization can trip
     # `_enter_buffered_busy` on the stdin BufferedReader the daemon still holds
@@ -1446,14 +1762,24 @@ def summarize(log_path: Path, as_json: bool = False, as_sarif: bool = False) -> 
     agent can shell out to `glassport summarize --json` and parse the
     result instead of scraping the human rendering.
     """
+    # PLAY: Every import in this function is local for the same reason the
+    # tap keeps its own imports light: `summarize` is a post-hoc verb, so
+    # the adapter and detector stack load only when someone asks for a
+    # summary, not when the tap starts.
     from glassport.adapters.mcp_session import from_mcp_session_file
     from glassport.detectors import context_violations
     from glassport.interaction_trace import PartKind
 
+    # PLAY: One hop from JSONL to the model. Everything printed below is
+    # derived from the trace object, never re-parsed from the raw lines,
+    # so this command and the Python API cannot drift apart.
     trace = from_mcp_session_file(log_path)
 
     # doctrine: assert only what the wire proves — a summary of a
     # tail-only ingest must say the head was never analyzed
+    # PLAY: The warning goes to stderr and the completeness field goes in
+    # the output, because a partial count presented as a total is exactly
+    # the kind of quiet overclaim the doctrine forbids.
     partial = bool(trace.metadata.get("tail_only"))
     if partial:
         print("WARN: log ingested tail-only — file exceeded the tail cap; "
@@ -1469,6 +1795,9 @@ def summarize(log_path: Path, as_json: bool = False, as_sarif: bool = False) -> 
         print(render_session_sarif(trace, str(log_path)))
         return 0
 
+    # PLAY: Events are keyed back to wire sequence numbers so every line
+    # of output can be traced to a line of the log. An agent reading the
+    # summary can then go look at the frame itself.
     seq_of = {e.id: e.metadata.get("seq", -1) for e in trace.events}
     # one event per parsed frame; raw wire lines carry the unparsed flag
     frames = sum(1 for e in trace.events if not e.metadata.get("unparsed"))
@@ -1483,6 +1812,10 @@ def summarize(log_path: Path, as_json: bool = False, as_sarif: bool = False) -> 
     # tools/call *result* carrying isError=true (the tool ran, the
     # operation failed). Conflating them inflates the protocol-error count
     # with ordinary denied-access / validation results.
+    # PLAY: This distinction is the difference between "the server does
+    # not implement that method" and "the tool refused your input". One is
+    # a server defect, the other is normal operation, and a summary that
+    # merges them is misleading in both directions.
     errors: list[tuple[int, str]] = []          # protocol errors (seq, message)
     tool_errors: list[tuple[int, str]] = []     # isError results (seq, message)
     for e in trace.events:
@@ -1505,6 +1838,9 @@ def summarize(log_path: Path, as_json: bool = False, as_sarif: bool = False) -> 
             "completeness": "partial_tail_only" if partial else "complete",
             "frames_parsed": frames,
             "declared_tools": sorted(declared),
+            # PLAY: The boolean exists because an empty list alone cannot
+            # tell a consumer whether the server declared nothing or never
+            # declared anything.
             "declaration_known": trace.declared_surface() is not None,
             "called_tools": [n for _, n in called],
             "unused_declared": unused,
@@ -1525,6 +1861,7 @@ def summarize(log_path: Path, as_json: bool = False, as_sarif: bool = False) -> 
     if partial:
         print("completeness:     PARTIAL (tail-only — head not analyzed)")
     print(f"frames parsed:    {frames}")
+    # PLAY: Same distinction, in words, for the human reading the output.
     surface_label = ("— (unknown: no usable tools/list seen)"
                      if trace.declared_surface() is None else "— (explicitly empty)")
     print(f"declared tools:   {sorted(declared) or surface_label}")
@@ -1561,6 +1898,9 @@ def _cmd_detect(log_path: Path, as_sarif: bool = False) -> int:
     from glassport.detectors import annotate
 
     trace = from_mcp_session_file(log_path)
+    # PLAY: annotate() mutates the trace's annotation list and returns it,
+    # so both names point at the same findings. The SARIF branch relies on
+    # that: it renders the same trace it just annotated.
     annotations = annotate(trace)
     if as_sarif:
         from glassport.sarif import render_session_sarif
@@ -1572,6 +1912,8 @@ def _cmd_detect(log_path: Path, as_sarif: bool = False) -> int:
         print(f"detect: {log_path.name} — no findings")
         return 0
     print(f"detect: {log_path.name} — {len(annotations)} finding(s)\n")
+    # PLAY: Worst first, then wire order. Severity descending is what a
+    # human wants; sequence ascending keeps repeated runs comparable.
     for a in sorted(annotations,
                     key=lambda x: (-x.severity, x.metadata.get("seq") or 0)):
         sev_label = {1: "INFO", 2: "WARN", 3: "HIGH"}.get(
@@ -1612,6 +1954,9 @@ def _cmd_advise(audit: str | None, session: str | None,
     if not write:
         # never let a cp1252 console kill the render — degrade the
         # emoji, keep the findings (Windows default stdout is strict)
+        # PLAY: The fallback re-encodes with "replace" so the report always
+        # prints. Losing a glyph is acceptable; losing the findings because
+        # a console cannot encode a character is not.
         block = wrap_block(content)
         try:
             print(block)
@@ -1623,6 +1968,9 @@ def _cmd_advise(audit: str | None, session: str | None,
     target = Path(write)
     # explicit utf-8 both ways: the block contains non-ASCII and the
     # platform default encoding (cp1252 on Windows) must never matter.
+    # PLAY: Note the read-then-write with the file closed in between. The
+    # splice is idempotent, so the file is rewritten whole -- and it has
+    # to be closed before re-opening or Windows keeps the lock.
     # Context managers ensure handles are released before the idempotent
     # rewrite path re-opens the file (avoiding CI file-lock races).
     existing = ""
@@ -1652,6 +2000,11 @@ def _cmd_observe(args: list[str]) -> int:
     from glassport.decision_journal import DecisionJournal
     from glassport.http_sessions import HTTPObserver, HTTPRegistryLimits
 
+    # PLAY: A hand-rolled parser, and a strict one. `wrap` accepts an
+    # unknown flag by passing it to the child command; `observe` must not,
+    # because an option it ignores could silently mean "observe something
+    # else". Duplicates fail too: --url given twice has no defensible
+    # winner.
     values: dict[str, str] = {}
     flags = {"--url", "--log-dir", "--journal-dir", "--bind", "--port",
              "--max-sessions"}
@@ -1691,6 +2044,9 @@ def _cmd_observe(args: list[str]) -> int:
     except ValueError as exc:
         print(f"glassport: invalid observe configuration: {exc}", file=sys.stderr)
         return 2
+    # PLAY: Only after validation do we build state. An early return with
+    # an observer already holding sockets and a journal already append-
+    # opening a file would leave both behind for nothing.
     observer = HTTPObserver(log_dir, limits=limits)
     journal = DecisionJournal(journal_dir, observer)
     run_http_tap(values["--url"], log_dir, values.get("--bind", "127.0.0.1"),
@@ -1720,6 +2076,9 @@ def _run_http_gate(remote_url: str, log_dir: Path, port: int = 0, *,
     _validate_remote(remote_url)
     # Gate mode refuses any body its observer cannot fold whole, so the
     # observer's frame limit is the enforcement inspection limit.
+    # PLAY: That is why the frame limit is GATE_MAX_BODY here and the
+    # default elsewhere: if a body is too large to fold, the gate cannot
+    # judge it, and an unjudged body must not be forwarded by the gate.
     observer = HTTPObserver(log_dir, limits=HTTPRegistryLimits(max_frame_bytes=GATE_MAX_BODY),
                             scope_headers=scope_headers, public_surface=public_surface)
     journal = DecisionJournal(log_dir / "decisions", observer, mode=MODE_GATE,
@@ -1828,6 +2187,9 @@ _VERB_HEAD = re.compile(r"^  ([a-z-]+)(?: \([a-z]+\))?:", re.M)
 def _verb_usage(verb: str) -> str:
     """That verb's block of USAGE (header line through its last
     continuation line), or the whole USAGE if the verb has no block."""
+    # PLAY: Help is sliced out of the same USAGE string the program prints,
+    # so `glassport help watch` cannot describe a flag that `glassport
+    # watch` no longer accepts. One source, no second copy to forget.
     heads = list(_VERB_HEAD.finditer(USAGE))
     for i, m in enumerate(heads):
         if m.group(1) == verb:
@@ -1841,6 +2203,10 @@ def _escape_unencodable_output() -> None:
     that a UTF-8 stdout cannot encode. Print them backslash-escaped, which
     inside JSON output is still a valid escape, rather than crash mid-report.
     A stream without reconfigure() (e.g. a test's StringIO) is left as is."""
+    # PLAY: A lone surrogate is legal in a JSON string and illegal in UTF-8,
+    # so a captured frame can be perfectly valid JSON that cannot be
+    # printed. backslashreplace turns the unprintable character into text
+    # that still parses as the same JSON escape.
     for stream in (sys.stdout, sys.stderr):
         try:
             stream.reconfigure(errors="backslashreplace")
@@ -1850,6 +2216,9 @@ def _escape_unencodable_output() -> None:
 
 def _parse_gate_flags(argv: list[str]) -> tuple[list[str], bool, bool]:
     """Strip leading `gate` flags in any order: (rest, controllable, strict)."""
+    # PLAY: Leading only. Once the parser sees something that is not a gate
+    # flag, the remainder belongs to the server command line and must reach
+    # it untouched -- the child may legitimately want a flag of its own.
     controllable = strict = False
     while argv and argv[0] in ("--controllable", "--strict"):
         if argv[0] == "--controllable":
@@ -1874,12 +2243,18 @@ def main(argv: list[str]) -> int:
     # `<verb> --help` answers for every verb here, uniformly, before any
     # verb-specific parsing can mistake the flag for a path, a URL, or (for
     # wrap/gate) a server command to launch
+    # PLAY: This check runs before any verb-specific parsing, and that
+    # ordering is load-bearing: for wrap and gate, `--help` would otherwise
+    # be read as a server command to launch.
     if argv[0] in VERBS and argv[1:2] and argv[1] in ("-h", "--help"):
         print(_verb_usage(argv[0]))
         return 0
 
     # "wrap" stays the passive default forever; "gate" is the opt-in
     # enforcing sibling it was reserved for (M5)
+    # PLAY: `gate` doubles as the flag "the user asked for enforcement".
+    # Over stdio it is the real Gate object; over HTTP it is a sentinel and
+    # enforcement comes from the journal's mode instead.
     gate: Gate | None = None
     gate_controllable = False
     if argv[0] == "wrap":
@@ -1926,6 +2301,10 @@ def main(argv: list[str]) -> int:
         return _cmd_advise(_val("--audit"), _val("--session"),
                            _val("--write"), min_sev)
 
+    # PLAY: Every dispatch below imports its module inside the branch.
+    # That is the whole reason `glassport wrap -- npx some-server` starts
+    # fast: tapping needs the logger and the gate, not the TUI, the HTML
+    # renderer, or the static auditor.
     if argv[0] == "serve":
         # glassport as a queryable MCP audit server. Lazy import.
         from glassport import server as server_mod
@@ -2005,6 +2384,10 @@ def main(argv: list[str]) -> int:
         public_surface = False
         port = 0
         port_given = False
+        # PLAY: Strict parsing again, for a security reason: an unknown or
+        # mistyped option here would otherwise be ignored, and the gate
+        # would run with a weaker posture than the operator asked for.
+        # Refusing is the only way to know what was actually requested.
         while argv:
             option = argv[0]
             if option not in ("--endpoint-era", "--scope-header",
@@ -2065,6 +2448,8 @@ def main(argv: list[str]) -> int:
             # --controllable toggles the stdio Gate through an override file;
             # the HTTP gate has no such control surface. Refuse rather than
             # accept the flag and quietly enforce unconditionally anyway.
+            # PLAY: Silently accepting it would be the worst option: the
+            # operator would believe they had a kill switch they do not.
             print("glassport: --controllable applies to the stdio gate only",
                   file=sys.stderr)
             return 2
@@ -2101,12 +2486,22 @@ def main(argv: list[str]) -> int:
         return 2
     # Refuse before run_tap opens a session log: a typo or a flag we don't
     # know is a usage error, not a server to tap.
+    # PLAY: Order matters twice here. The option check comes before the
+    # existence check, because "--log-dir" should produce a usage error
+    # rather than "command not found"; and both come before run_tap, so a
+    # typo never leaves an empty session log behind.
     if argv[0].startswith("-"):
         print(f"glassport: unknown option {argv[0]!r} (see `glassport --help`)",
               file=sys.stderr)
         return 2
     if shutil.which(argv[0]) is None:
+        # PLAY: 127 is the shell's convention for "command not found", so
+        # a config that greps the exit code behaves the same as it would
+        # without the tap in the middle.
         msg = f"glassport: command not found: {argv[0]}"
+        # PLAY: The did-you-mean suggestion is why VERBS exists as a tuple
+        # in one place. `glassport summrize file.jsonl` now costs a typo
+        # instead of a confusing attempt to execute it as a program.
         close = difflib.get_close_matches(argv[0], VERBS, n=1)
         if close:
             msg += f" (did you mean `glassport {close[0]}`?)"
@@ -2118,6 +2513,8 @@ def main(argv: list[str]) -> int:
 
 def cli() -> None:
     """Console-script entry point (``glassport`` command)."""
+    # PLAY: The one line pyproject.toml points at. Everything else in this
+    # file is reachable from here, so `glassport --help` is the map.
     sys.exit(main(sys.argv[1:]))
 
 

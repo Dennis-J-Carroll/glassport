@@ -25,6 +25,40 @@ Host/Origin is not the loopback proxy is refused before connecting. Passive
 wrap and observation mode keep byte-for-byte identical behavior, because with
 `journal=None` (or a journal in observe mode) the enforcement branch is never
 reachable.
+
+PLAY-BY-PLAY
+------------
+This is the HTTP half of the proxy. The stdio tap sits in a pipe; this one
+listens on a loopback port, receives a request, decides whether it is
+allowed to reach the server, and streams the answer back. Same JSONL
+schema, same "relay is sacred" rule, very different plumbing.
+
+Read it in this order:
+
+1. Header and URL handling: `_validate_remote`, `_host_header`,
+   `_hop_headers`, `_req_headers`. A proxy that forwards whatever it was
+   given is a request-smuggling tool, so this layer is deliberately narrow.
+2. `_Sk1xxResponse` and `_discard_headers` — an upstream may emit any
+   number of informational responses before the real one; the proxy
+   swallows all of them and refuses a protocol upgrade.
+3. SSE: `_log_sse_event` frames one `data:` payload per event, and
+   `_stream_sse` forwards bytes as they arrive regardless of framing.
+4. Gate helpers: `_blockable_id`, `_blocked_tool`, `_gate_verdict`,
+   `_gate_body_problem`, `_modern_problem` decide whether a request can be
+   judged at all before any verdict is reached.
+5. `_make_handler` builds the request handler: routing, the gate branch,
+   the streaming branches, and the upstream connection.
+6. `run_http_tap` binds the socket.
+
+The ordering that matters everywhere: forward first, log second, analyze
+third. A slow or broken analysis may lose findings, and it may never lose
+a frame.
+
+WHAT THIS FILE DOES NOT DO
+--------------------------
+It does not interpret MCP method semantics for the relay, does not decide
+policy (the journal does), and does not write its own log format -- it
+reuses `SessionLog` and `build_session_entry` from the stdio tap.
 """
 
 from __future__ import annotations
@@ -65,6 +99,10 @@ def _hop_headers(pairs) -> set[str]:
         if k.lower() == "connection":
             for tok in v.split(","):
                 name = tok.strip().lower()
+                # PLAY: Only a well-formed token may join the drop set. A
+                # malformed entry is skipped, never honored -- otherwise a
+                # client could nominate a header the proxy needs and have it
+                # stripped by writing garbage in Connection.
                 if name and _HOP_TOKEN_RE.match(name):
                     drop.add(name)
     return drop
@@ -93,6 +131,9 @@ def _validate_remote(url: str):
     if r.username is not None or r.password is not None:
         # `is not None` (not truthiness): a stray empty userinfo like "http://@h/x"
         # yields username="" — falsy but still an embedded-credential shape we reject.
+        # PLAY: The general lesson, worth applying to any config parser: an
+        # empty value is still a present field, and `if r.username` would wave
+        # this through into a Host header derived from the userinfo.
         raise ValueError("remote URL must not embed credentials (user:pass@)")
     if r.fragment:
         raise ValueError("remote URL must not contain a fragment")
@@ -108,6 +149,9 @@ def _validate_remote(url: str):
 def _host_header(remote) -> str:
     """Host header from hostname (+ explicit non-default port), never raw
     netloc — netloc can carry userinfo the proxy must not forward upstream."""
+    # PLAY: Rebuilt from parts, not copied. `netloc` is "user:pass@host:port",
+    # so using it here would put the operator's credentials in every upstream
+    # request line. Only hostname and port survive.
     host = remote.hostname or ""
     if ":" in host:                      # IPv6 literal
         host = f"[{host}]"
@@ -123,6 +167,10 @@ def _discard_headers(fp) -> None:
     nonpublic stdlib header-reader so behavior is stable across the 3.10–3.13
     matrix. Bounded so a hostile upstream cannot stream infinite fake 1xx
     headers to pin the thread."""
+    # PLAY: Bounded in both directions -- line length and line count -- so an
+    # upstream that streams endless 1xx headers cannot pin this thread. The
+    # local reimplementation exists because the stdlib reader is a private
+    # name that has moved between CPython versions.
     for _ in range(_MAX_1XX_HEADER_LINES):
         line = fp.readline(_MAX_1XX_LINE + 1)
         if len(line) > _MAX_1XX_LINE:
@@ -159,6 +207,10 @@ class _Sk1xxResponse(http.client.HTTPResponse):
         while True:
             status_tuple = super()._read_status()
             code = status_tuple[1]
+            # PLAY: 101 is refused, not swallowed. After an upgrade the
+            # connection is no longer speaking HTTP, so continuing to parse
+            # it as a status line would misinterpret whatever protocol the
+            # upstream switched to. Raising sends this down the 502 path.
             if code == 101:
                 raise http.client.HTTPException(
                     "glassport: upstream protocol upgrade (101) is unsupported")
@@ -203,6 +255,11 @@ def _upstream_target(remote) -> str:
     return target
 
 
+# PLAY: Every one of these caps exists because the other side is not
+# trusted. An SSE event is buffered until its blank line arrives, so the
+# buffer needs a ceiling; a body is streamed in chunks so I/O never
+# materializes the whole thing; and gate mode refuses an oversized body
+# rather than forwarding bytes it could not analyze.
 _MAX_SSE_BUF = 256 * 1024  # cap per-event buffering to avoid unbounded growth
 _MAX_LOGGED_BODY = 1_000_000  # cap what a single request/response frame logs
 _RELAY_CHUNK = 65536          # stream bodies in bounded chunks, never all at once
@@ -271,12 +328,18 @@ def _log_sse_event(event: bytes, log: SessionLog, *, partial: bool = False) -> N
         # no data payload: log the raw event text so comments/metadata survive
         log.record("s2c", event)
         return
+    # PLAY: Multiple data: lines are joined with newlines, which is what the
+    # SSE spec says they mean. Splitting them into separate frames would
+    # turn one JSON-RPC message into several malformed ones.
     payload = b"\n".join(data_lines)
     if partial:
         # Preserve the full raw text for an unterminated/overflow event.
         log.record("s2c", event)
     elif has_meta:
         # Preserve metadata separately so the data payload stays parseable.
+        # PLAY: If event:/id:/retry: were left in the body, the payload
+        # would no longer be JSON and the frame would be logged as raw text
+        # -- losing exactly the structure the analysis needs.
         log.record("s2c", payload, metadata=_extract_sse_meta(event))
     else:
         log.record("s2c", payload)
@@ -286,6 +349,10 @@ def _stream_sse(resp, wfile, log: SessionLog) -> None:
     """Forward an SSE response byte-for-byte to the client as it arrives, and
     (separately) cut complete events to log each `data:` payload as one s2c
     frame. Forwarding never waits on framing — the relay is sacred."""
+    # PLAY: Note the two independent duties in one loop: write the chunk out
+    # immediately, then try to frame what has accumulated. Framing is
+    # best-effort bookkeeping; the write is the session. If the buffer grows
+    # past its cap, the framing is abandoned loudly and the stream continues.
     buf = b""
     first_chunk = True     # only the very first chunk of the stream can carry a BOM
     dropped_oversize = False  # emitted the runaway-drop note for the current overflow
@@ -337,6 +404,10 @@ def _stream_sse(resp, wfile, log: SessionLog) -> None:
         # terminator cannot grow the buffer, and cannot make the tap write its
         # runaway stream to the log either — one note per overflow, then drop.
         if len(buf) > _MAX_SSE_BUF:
+            # PLAY: One note, then silence, then an empty buffer. The note is
+            # itself a recorded frame, so a reader sees that an event was
+            # dropped instead of quietly receiving a shorter session. The
+            # client still got every byte -- only the log is lossy here.
             if not dropped_oversize:
                 log.record("s2c", b'{"glassport":"sse_frame_dropped_oversize"}')
                 dropped_oversize = True
@@ -345,6 +416,10 @@ def _stream_sse(resp, wfile, log: SessionLog) -> None:
 
 def _observe_call(lease, method, *args, **kwargs):
     """Optional analysis must never acquire control over passive delivery."""
+    # PLAY: Every observer interaction goes through this wrapper. If analysis
+    # raises, the exception dies here and the request keeps moving; the loss
+    # is recorded as http_analysis_failed instead. An analysis bug must cost
+    # findings, never availability.
     try:
         return getattr(lease, method)(*args, **kwargs)
     except Exception:
@@ -359,9 +434,13 @@ def _journal_call(journal, method, *args, **kwargs):
     """Decision recording never changes a transport verdict after the fact.
 
     A journal write failure is swallowed; the relay acts on its already-computed
-    decision. Passive/default traffic remains fail-open, while a strict
-    evidence-gap refusal still blocks before upstream connection.
+decision. Passive/default traffic remains fail-open, while a strict
+evidence-gap refusal still blocks before upstream connection.
     """
+    # PLAY: The order is the safety property. The verdict is computed first,
+    # then recorded; a recording failure therefore cannot retroactively turn
+    # a block into a forward. That is the difference between "audit failed"
+    # and "enforcement failed".
     try:
         return getattr(journal, method)(*args, **kwargs)
     except Exception:
@@ -374,6 +453,9 @@ def _lease_epoch(lease):
     return epoch if isinstance(epoch, str) and epoch else None
 
 
+# PLAY: A module-level unique object, not None. None is a legal JSON value
+# in places this code inspects, so the sentinel must be something no frame
+# can ever contain.
 _NO_ID = object()   # sentinel: this frame cannot be answered locally
 
 
@@ -396,6 +478,11 @@ def _blockable_id(observation, request_frame=None):
     established. (``type(...) is int`` also excludes bool, which JSON has no
     concept of but Python's json module would never produce here anyway.)
     """
+    # PLAY: This decides whether blocking is even possible, and its answer
+    # gates the verdict below. Refusing a request we cannot answer would be a
+    # silent drop: the client would wait for a reply nobody sends. Forwarding
+    # is worse for security and better for truthfulness, and the would-block
+    # is still recorded.
     event = getattr(observation, "event", None)
     metadata = getattr(event, "metadata", None)
     rid = metadata.get("jsonrpc_id") if isinstance(metadata, dict) else None
@@ -430,6 +517,10 @@ def _gate_verdict(journal, observation, request_frame=None) -> bool:
     which is what keeps "recording is fail-open" from quietly becoming
     "enforcement is fail-open".
     """
+    # PLAY: A pure read on purpose. The decision is taken before the record
+    # that describes it exists, so the record can never be the reason a call
+    # was allowed. Errors resolve to False: an unanswerable question is not
+    # a block.
     if journal is None:
         return False
     try:
@@ -442,6 +533,11 @@ def _gate_verdict(journal, observation, request_frame=None) -> bool:
 
 def _observe_json_response(resp, wfile, lease, cap, *, expected=None, interpret=True):
     """Bounded lookahead: fold a complete JSON body before completing delivery."""
+    # PLAY: A whole JSON body has to be in hand before it can be folded, so
+    # this reads up to the cap first and only then writes it out. The cap is
+    # what stops a large body from making the proxy buffer without limit.
+    # Note the ordering below: the analysis failure path still flushes what
+    # was read, because those bytes are the client's response.
     head = bytearray()
     complete = False
     read_error = None
@@ -460,6 +556,8 @@ def _observe_json_response(resp, wfile, lease, cap, *, expected=None, interpret=
                       incomplete=not complete or not interpret)
     # Even a failed upstream read may have provided bytes before failure.
     # Flush that prefix before surfacing the read error and closing transport.
+    # PLAY: This is the relay-is-sacred rule at its sharpest. The read is
+    # about to raise, but the bytes already received are still delivered.
     wfile.write(head)
     total = len(head)
     if read_error is not None:
@@ -480,6 +578,10 @@ def _observe_sse(resp, wfile, lease, cap):
     Every normal event has exact raw bytes in wire_b64. Oversize events retain
     a bounded prefix, then discard interpretation through their terminator.
     """
+    # PLAY: The accepted cost of live analysis, stated plainly: the chunk
+    # that completes an event is held just long enough to fold it, so the
+    # finding exists before the client acts on the response. Every other
+    # chunk streams straight through.
     buf = b""
     overflow = False
     first = True
@@ -546,6 +648,11 @@ def _gate_body_problem(body: bytes):
     batches, duplicate keys (first-wins vs last-wins parsers disagree), a
     BOM, invalid UTF-8, trailing data, or a non-object.
     """
+    # PLAY: Gate mode re-reads the body itself instead of trusting an earlier
+    # parse. `_loads` is the strict reader: it refuses duplicate keys and
+    # keeps oversized integers as strings, so the object judged here is the
+    # object a conforming upstream parses -- a parser differential would
+    # mean judging a different request than the one that gets executed.
     try:
         frame = _loads(body.decode("utf-8"))
     except (UnicodeDecodeError, ValueError, RecursionError):
@@ -557,6 +664,11 @@ def _gate_body_problem(body: bytes):
     # would let one request switch enforcement off for every later call.
     # Reuse its predicate so the two can never drift apart.
     from glassport.http_sessions import _rpc_frame
+    # PLAY: The observer and admission share this predicate on purpose. A
+    # body the observer would reject marks the whole epoch lost, which would
+    # let one request switch enforcement off for every later call -- so the
+    # two layers must agree on what a message is, and they must agree by
+    # calling the same function.
     if _rpc_frame(body) is None:
         return 400, "request body is not a valid JSON-RPC 2.0 message", "invalid_mcp_request"
     if frame.get("method") == "tools/call":
@@ -577,6 +689,9 @@ def _decode_mirrored(value: str):
     """A mirrored header value as the body would carry it, or None if it is
     malformed. The base64 sentinel is exactly `=?base64?...?=` (lowercase);
     anything else is a literal header-safe value."""
+    # PLAY: The reverse of what the client did to fit a body field into a
+    # header. Returning None for anything malformed matters: the caller
+    # compares the result to the body value, and None never equals it.
     if value.startswith("=?base64?") and value.endswith("?=") and len(value) >= 11:
         import base64
         import binascii
@@ -599,6 +714,10 @@ def _modern_problem(frame: dict, headers, era: str):
     HeaderMismatch), and any version the gate cannot check, or that the
     operator's declared era excludes, is refused (-32022).
     """
+    # PLAY: Two copies of the truth now exist -- the body and the mirrored
+    # headers -- and the whole function is the argument that they must match.
+    # A version the gate cannot check is refused rather than forwarded,
+    # because an agent-chosen header must never route around enforcement.
     versions = headers.get_all("MCP-Protocol-Version") or []
     if len(versions) > 1:
         return -32020, "duplicate MCP-Protocol-Version header", None
@@ -641,6 +760,9 @@ def _make_handler(remote, log: SessionLog, observer=None, journal=None,
                   endpoint_era: str = "auto"):
     # Refusing what cannot be inspected is enforcement; observation stays
     # byte-transparent, so only a journal in gate mode arms these checks.
+    # PLAY: That single line is the doctrine gate for this whole handler.
+    # Passive and observe mode have `gate_mode` False and therefore take the
+    # streaming, byte-transparent paths below, unchanged.
     gate_mode = journal is not None and getattr(journal, "mode", None) == "gate"
     # The cap must equal what the observer analyses: a body the observer
     # would fold as incomplete can never be proved, so it would forward.
@@ -724,6 +846,10 @@ def _make_handler(remote, log: SessionLog, observer=None, journal=None,
             response is trying to keep honest; the wire log and the decision
             journal carry that evidence instead.
             """
+            # PLAY: A 200 carrying a JSON-RPC error, not an HTTP 4xx. The
+            # message reached a client that is speaking MCP; refusing it
+            # at the HTTP layer would look like a transport failure and
+            # invite a retry, which is the opposite of the intent.
             marker = "http_gate_strict_blocked" if strict_reason else "http_gate_blocked"
             message = (("glassport gate: tools/call blocked — strict mode: "
                         "required evidence unavailable") if strict_reason else
@@ -759,6 +885,10 @@ def _make_handler(remote, log: SessionLog, observer=None, journal=None,
             bound, port = self.server.server_address[:2]
             if not (bound.startswith("127.") or bound in ("::1", "localhost")):
                 return True   # explicitly exposed: the operator owns access
+            # PLAY: DNS rebinding, in one sentence: a web page the user
+            # visits can point a name it controls at 127.0.0.1 and then
+            # drive this proxy from JavaScript. Requiring Host (and, when
+            # present, Origin) to name the proxy itself is what stops that.
             allowed = {f"{h}:{port}" for h in _LOOPBACK_HOSTS}
             hosts = self.headers.get_all("Host") or []
             if len(hosts) != 1 or hosts[0].strip().lower() not in allowed:
@@ -774,6 +904,11 @@ def _make_handler(remote, log: SessionLog, observer=None, journal=None,
             (Transfer-Encoding, duplicate/invalid Content-Length) rather than
             guess a length the upstream would read differently — the request
             smuggling vector. Bounds what is logged; streams the rest upstream."""
+            # PLAY: Request smuggling lives in framing disagreement. If this
+            # proxy reads a length one way and the upstream reads it another,
+            # the bytes between the two readings become a second request that
+            # nobody analyzed -- and in gate mode that is an unjudged frame.
+            # Ambiguous framing is refused rather than resolved.
             if self.headers.get("Transfer-Encoding") is not None:
                 self._reject(400, "transfer-encoding not supported")
                 return None, False
@@ -785,6 +920,10 @@ def _make_handler(remote, log: SessionLog, observer=None, journal=None,
                 self._reject(400, "invalid content-length")
                 return None, False
             length = int(cls[0]) if cls else 0
+            # PLAY: This is where gate mode stops being a streaming proxy.
+            # It reads the whole body, refuses anything it cannot analyze
+            # (encoded, oversized, unparseable), and only then lets the
+            # request near an upstream connection.
             if gate_mode and self.command == "POST":
                 encoding = (self.headers.get("Content-Encoding") or "").strip().lower()
                 if encoding not in ("", "identity"):
@@ -845,6 +984,11 @@ def _make_handler(remote, log: SessionLog, observer=None, journal=None,
             return _stream(), True
 
         def _relay(self, method: str) -> None:
+            # PLAY: The order of these three refusals is deliberate, and all
+            # of them happen before the request is observed. A caller who
+            # sends ambiguous credentials or an unverifiable resume point
+            # could otherwise make the observer retire the session's epoch --
+            # which would switch enforcement off for every later call.
             self._refusal_code = "framing_rejected"
             self._observation_lease = None
             self._c2s_observation = None
@@ -858,6 +1002,10 @@ def _make_handler(remote, log: SessionLog, observer=None, journal=None,
                 # unverifiable resume by retiring or resetting the session's
                 # epoch, which would switch enforcement off for the whole
                 # session; refuse such a request before it is observed.
+                # PLAY: Duplicate credential headers are not "pick one".
+                # The upstream might pick a different one than this proxy
+                # did, which would put the request in a session nobody is
+                # analyzing.
                 names = [k.lower() for k in self.headers.keys()]
                 identity = _CREDENTIAL_HEADERS + tuple(getattr(observer, "scope_headers", ()))
                 if any(names.count(n) > 1 for n in identity):

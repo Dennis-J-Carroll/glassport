@@ -13,6 +13,54 @@ Design constraints, all deliberate:
     innerHTML only ever receives escaped or constant markup.
   * Same ViewModel as the curses TUI, same keyboard dialect (j/k, /,
     f, d, a, tab) extended for the web (1-9 tabs, x grid, e export).
+
+PLAY-BY-PLAY
+------------
+This module is a single string: the entire frontend, inlined. That is a
+packaging decision (nothing to configure, nothing to 404) and a security
+decision (no CDN, no font, no analytics -- a security tool whose UI phones
+home is its own finding).
+
+When reading the HTML below, the rule to keep in mind is this: everything
+the server sends is hostile. Session logs carry attacker-chosen tool names,
+hosts, and snippets, and they are rendered here. So dynamic content reaches
+the DOM through `esc()` or `textContent`, and `innerHTML` only ever sees
+constant markup. Any addition that interpolates a server value into a
+template string reopens the injection this file exists to close.
+
+The page speaks the same ViewModel and the same keys as the curses TUI, so
+the two surfaces stay interchangeable for anyone who has used either.
+
+HOW TO READ THE PAGE
+--------------------
+The string below is one document, in the order a browser reads it, so read it
+in that order:
+
+1. `<style>` -- the CRT look. Pure CSS, no image assets, no fonts to fetch.
+2. `<body>` -- a static skeleton. Every panel is an empty element with an id;
+   the script fills them.
+3. The script's helpers (`$`, `esc`, `el`). `el()` is the important one: it
+   builds a node and assigns `textContent`, which cannot execute. `esc()` is
+   only for the few places that must produce markup as a string.
+4. `S`, the single state object: socket, attached session tabs, the last
+   ViewModel per session, and which panel or overlay is open.
+5. `connect()` and the attach/detach frames. One socket carries every
+   session; the browser sends `{attach:name}` and receives whole ViewModels.
+6. The renderers -- `renderTimeline`, `renderFindings`, `renderBars`,
+   `renderTabs`, `renderGrid`, `renderFoot`, then `render()`. Each rebuilds its
+   panel from the current ViewModel rather than patching the DOM in place.
+   Slower per frame, and impossible to desync from the server's last push.
+7. The panels and overlays (`gauge`, the JSON and SARIF views, the export and
+   help dialogs) and the keydown handler that drives them.
+
+The keyboard dialect is shared with the TUI: `j`/`k` move, `/` searches, `f`
+filters, `d` and `a` open the drift and audit panels, `tab` cycles sessions;
+`1`-`9`, `x` and `e` are browser-only extras.
+
+WHAT THIS FILE DOES NOT DO
+--------------------------
+It holds no state, fetches nothing, and makes no decisions. The server
+computes; this file draws.
 """
 
 CONSOLE_HTML = r"""<!DOCTYPE html>

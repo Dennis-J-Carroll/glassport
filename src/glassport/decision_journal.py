@@ -33,6 +33,39 @@ Bounds (all configurable through :class:`JournalLimits`, all documented in
 ``docs/http-decision-journal.md``): tracked epochs, records per epoch, listed
 findings per record and listed faults per record are each capped. Nothing here
 grows without a limit.
+
+PLAY-BY-PLAY
+------------
+A wire log says what crossed the connection. This module says what the
+analysis concluded and what the transport did about it -- and it keeps
+those two in separate files so neither can quietly vouch for the other.
+
+The lifecycle of one decision:
+
+1. `record_intent()` runs BEFORE the request is forwarded. It computes the
+   candidate action with the blocking rule armed, whatever mode this
+   journal is in, and writes a record that says what WOULD have happened.
+2. The transport forwards, or refuses, and later reports back through
+   `record_delivery()` with a fixed outcome code.
+3. `evaluate()` is the one method that reads the mode, and therefore the one
+   method that can answer "block this". It is called before anything is
+   recorded, so a failed write can never turn a proved block into a
+   forward.
+
+Every record carries the previous record's digest, so the file is a hash
+chain: editing a record in the middle breaks the chain, and a `truncated`
+marker means the cap was hit and replay must not claim equivalence.
+
+Two vocabularies are closed on purpose: actions and outcome codes are fixed
+constants, and every attacker-influenced string is collapsed to a sentinel
+by `_safe_token`, `_safe_kind`, or `_safe_severity` before it can reach a
+record. Look at what is missing from these records: no tool names, no
+arguments, no paths, no hosts, no explanation text.
+
+WHAT THIS FILE DOES NOT DO
+--------------------------
+It has no transport authority in either mode. It answers `evaluate()` and
+records what it was told; the relay decides what to do with that answer.
 """
 from __future__ import annotations
 
@@ -133,6 +166,10 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+# PLAY: The three `_safe_*` helpers are why no attacker text reaches
+# disk. Each collapses anything outside its closed vocabulary to a fixed
+# sentinel, testing isinstance(str) first so a hostile object never gets a
+# method invoked on it. `_safe_token` additionally restricts the shape.
 def _safe_token(value, *, default=_NONCONFORMING) -> str:
     """Reduce a value to a short lowercase token from a fixed charset.
 
@@ -224,6 +261,10 @@ class PatternProfile:
     unsupported: tuple
 
 
+# PLAY: A configuration profile as a versioned descriptor, not a copy of
+# the patterns. Two runs that used the same scanner configuration produce
+# the same profile digest, which is what makes a replay comparison
+# meaningful without storing any pattern text.
 def pattern_profile(patterns) -> PatternProfile:
     """Describe a frozen pattern set: digest, reproducibility, and a summary.
 
@@ -269,6 +310,9 @@ def semantic_findings(annotations, event_id=None) -> list[dict]:
     return out
 
 
+# PLAY: A canonical digest of deduplicated semantic findings. Replay can
+# compare two runs by digest instead of by record-by-record diff, and the
+# digest ignores ordering so a reordered pass still matches.
 def findings_digest(findings) -> str:
     """Order-independent digest of the semantic findings of one event.
 
@@ -305,6 +349,10 @@ class Intent:
     It is computed before any record is written, so a
     journal write failure can never turn a proved block into a forward.
     """
+    # PLAY: The handle a delivery record links back through. Note it carries
+    # the enforcement verdict rather than the candidate one: `action` is
+    # what analysis thought, `enforce` is what the transport is allowed to
+    # do about it.
     epoch: str
     n: int
     event_seq: int | None
@@ -319,6 +367,10 @@ class _EpochJournal:
         self.epoch, self.log, self.path = epoch, log, path
         self.records = 0
         self.truncated = False
+        # PLAY: The chain head starts at a known genesis value and is then
+        # read back from the file. An epoch can be evicted from the LRU and
+        # later resume, so the chain has to continue from the bytes that are
+        # actually on disk rather than from a fresh start.
         self.prev_sha256 = GENESIS_SHA256
         # An epoch may be evicted from the open-file LRU and later resume.
         # Continue its chain and bound from the existing exact file bytes.
@@ -404,6 +456,9 @@ class DecisionJournal:
                 entry.truncated = True
                 # One marker past the cap, then silence: replay reads it and
                 # refuses to claim equivalence over a prefix.
+                # PLAY: Exactly one marker, then nothing. Repeating it would
+                # flood the file it is meant to bound, and a reader only
+                # needs to know the prefix was cut.
                 self._emit(entry, {"kind": "truncated", "epoch": entry.epoch,
                                    "n": next(self._counter), "ts": _now_iso(),
                                    "limit": self.limits.max_records})
@@ -415,6 +470,11 @@ class DecisionJournal:
         if entry.log is None:
             return False
         try:
+            # PLAY: Link the record to its predecessor, then adopt the
+            # digest the writer returned as the new head. The chain is built
+            # from what was actually appended, not from what we intended to
+            # append -- a short write would leave the head pointing at bytes
+            # that are not there.
             record["prev_sha256"] = entry.prev_sha256
             digest = entry.log.write_json(record)
             if not digest:
@@ -508,6 +568,10 @@ class DecisionJournal:
                 return _safe_token(subcategory)
         return None
 
+    # PLAY: The single place mode is read. Everything before this point
+    # computed the same candidate action in both modes; from here on, a
+    # candidate only becomes an enforcement verdict if the mode allows it
+    # AND the analysis behind it was complete enough to prove the claim.
     def evaluate(self, observation=None, *, request_frame=None) -> bool:
         """Should the transport actually refuse to forward this frame?
 
@@ -545,6 +609,9 @@ class DecisionJournal:
 
     # -- public recording --------------------------------------------------
 
+    # PLAY: Called before forwarding. `enforce` is passed in already decided
+    # -- or omitted, in which case this method asks `evaluate()` -- so the
+    # record describes a verdict that existed before any bytes moved.
     def record_intent(self, epoch, observation=None, *, enforce=None) -> Intent | None:
         """Record the candidate action for one observed frame, before delivery.
 

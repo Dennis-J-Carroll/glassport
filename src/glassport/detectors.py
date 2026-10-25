@@ -17,6 +17,44 @@ or hallucinated unless proven otherwise.
     from detectors import annotate
     trace = from_mcp_session_file(path)
     annotate(trace)            # trace.annotations now populated
+
+PLAY-BY-PLAY
+------------
+The adapter produced a faithful trace. Everything in this file is
+opinion about it, and opinion never writes back into the evidence: a
+detector returns Annotation objects and mutates no event.
+
+The file is five layers, and they only make sense in order:
+
+1. Shape checks. `_matches_type` and `_schema_problems` compare a call's
+   arguments to the schema the server declared. JSON Schema is huge;
+   this is a deliberate subset, because the schema itself came from the
+   other side of the wire.
+2. Taint. `find_taint` looks for role-switching delimiters and
+   zero-width obfuscation in argument text -- the shapes that turn data
+   into instructions. `neutralize_text` is its repair half.
+3. Credentials and PII. Patterns plus per-category validators: a Luhn
+   check for card numbers, a checksum for IBANs, base58 for wallet
+   addresses, and so on. A regex alone would flag every 16-digit number.
+4. Deception. `_normalize_with_map`, `_is_deceptive`, and the confusable
+   tables spot text that pretends to be other text. The map is what lets
+   a redaction point back into the ORIGINAL string.
+5. Rendering. `redact_secrets`, `redact_secrets_strict`, and
+   `redact_display` turn a hostile string into something safe to put in
+   an artifact, in a fixed order that is documented at `redact_display`.
+
+Two entry points, one implementation. `annotate()` runs the batch passes;
+with the default registry it delegates to the same streaming engine the
+live tap uses, so a replayed session and a watched one cannot disagree.
+
+Severity is the reader's triage: 1 is worth a look, 2 should not happen,
+3 is hostile or hallucinated unless proven otherwise.
+
+WHAT THIS FILE DOES NOT DO
+--------------------------
+It does not block, forward, or decide. It does not execute server-supplied
+patterns, and it never asserts a capability claim when no initialize
+frame was captured. Absence of evidence is reported as absence.
 """
 from __future__ import annotations
 
@@ -70,6 +108,9 @@ def _ann(event: Event, kind: AnnotationKind, subcategory: str,
         id=_new_id("ann"), event_id=event.id, kind=kind, category=category,
         subcategory=subcategory, severity=severity, explanation=explanation,
         annotator=ANNOTATOR,
+        # PLAY: One constructor for every finding, so all of them carry the
+        # same fields and, crucially, the wire sequence number. That seq is
+        # what lets a report point a finding at a line of the log.
         metadata={"seq": event.metadata.get("seq"), **md},
     )
 
@@ -123,6 +164,10 @@ def find_taint(args: Any) -> Optional[tuple[str, str, str]]:
         if len(s) > MAX_SCAN_BYTES:
             s = s[:MAX_SCAN_BYTES]
         for name, pattern in _TAINT_PATTERNS:
+            # PLAY: The one asymmetric case. Normalization is what reveals
+            # disguised delimiters, but it also deletes zero-width
+            # characters -- so the pattern that hunts zero-width characters
+            # must read the raw string. Everything else reads normalized.
             haystack = (s if name == "zero_width_obfuscation"
                         else _normalize_for_scan(s))
             m = pattern.search(haystack)
@@ -137,6 +182,10 @@ def _schema_problems(args, schema, _depth: int = 0) -> Iterator[str]:
     false, enum, and nested objects capped at depth 2. Deliberately excludes
     pattern/format/$ref: never execute a server-supplied regular expression.
     """
+    # PLAY: Three bounds, all of them defensible: a depth cap, no regex
+    # execution, and no $ref resolution (which would mean fetching). A
+    # validator that follows the other side's instructions is an attack
+    # surface wearing a schema's clothes.
     if _depth > 2:
         return
     if not isinstance(schema, dict) or schema.get("type", "object") != "object":
@@ -184,6 +233,9 @@ def _tool_call_parts(event: Event):
 
 def _list_result_names(event: Event) -> Optional[set[str]]:
     """Tool names in a tools/list response event, or None if not one."""
+    # PLAY: The Optional is the point. An empty set means the server
+    # declared zero tools; None means this event was not a usable listing.
+    # Callers that treat None as empty would convict innocent calls.
     tools = tool_declaration(event)
     return {t["name"] for t in tools} if tools is not None else None
 
@@ -390,6 +442,10 @@ def _aba_check(s: str) -> bool:
     return sum(int(d) * w for d, w in zip(s, weights)) % 10 == 0
 
 
+# PLAY: Cheap character tests that run before any validator. A pattern
+# match is necessary and never sufficient: these prefilters let the
+# expensive checksum functions skip text that could not possibly pass them,
+# which is what keeps a full-log scan linear in practice.
 _HEX_CHARS = frozenset(string.hexdigits)              # 0-9 a-f A-F
 _ALNUM_CHARS = frozenset(string.ascii_letters + string.digits)
 _B64_EXTRA = frozenset("+/=")
@@ -803,6 +859,11 @@ _CONFUSABLES = str.maketrans({
 _MARK_CATEGORIES = frozenset({"Mn", "Mc", "Me"})
 
 
+# PLAY: This returns the normalized text AND a map from each normalized
+# index back to the index it came from in the original. That map is the
+# whole reason a redaction can replace the right bytes: NFKC folding and
+# confusable translation change lengths, so a match position in the
+# normalized string does not address the original.
 def _normalize_with_map(text: str) -> tuple[str, list[int]]:
     """Normalize like _normalize_for_scan, but char-by-char, recording for
     each emitted normalized char the index in the ORIGINAL string it came
@@ -997,9 +1058,16 @@ def _spanned_original_redactions(text: str) -> list[tuple[int, int, str, str]]:
 
 # Fixed literal — contains nothing attacker-influenced. Do NOT interpolate the
 # exception, the input, or a length here; that would re-open a side channel.
+# PLAY: The fail-closed placeholder. When the strict path cannot prove a
+# field is clean, it prints this instead. A visible gap in a report is a
+# cost; a live key in a shared artifact is a breach.
 _WITHHELD = "[glassport: redaction unavailable — content withheld]"
 
 
+# PLAY: Two redactors with two contracts. `redact_secrets` is best effort
+# and returns its input unchanged if the scan fails -- fine for logs a human
+# reads locally. `redact_secrets_strict` withholds on any doubt, and is the
+# only version allowed to feed an artifact that leaves the machine.
 def redact_secrets(text: str) -> str:
     """Best-effort scrubber for internal/analytical paths. Replaces every
     recognized credential/PII with a non-reversible tag; returns the input
@@ -1040,6 +1108,10 @@ def redact_secrets_strict(text: str) -> str:
     return out
 
 
+# PLAY: The ordered pipeline every shareable renderer uses. Order is
+# load-bearing: redact (catches obfuscated credentials) -> neutralize
+# (reveals deceptive Unicode) -> clamp (bounds the field). Running the last
+# two without the first is how a credential reaches a SARIF file.
 def redact_display(text) -> str:
     """Scrub an attacker-influenced value for any shareable renderer (SARIF,
     JSON audit, text audit, HTML), in the load-bearing order
@@ -1081,6 +1153,9 @@ def redact_display(text) -> str:
 _CUSTOM_PATTERNS: list[PIIPattern] = []
 
 
+# PLAY: The registry is process-global and mutable by design, because the
+# stdio tap reads patterns live. Anything that must be reproducible across
+# a session takes a snapshot() instead -- see the HTTP epoch code.
 def register_pii_pattern(pat: PIIPattern) -> None:
     """Add a custom PII pattern to every subsequent scan.
 
@@ -1106,6 +1181,9 @@ def _active_patterns() -> list[PIIPattern]:
     return PII_PATTERNS + _CUSTOM_PATTERNS
 
 
+# PLAY: Freezing the pattern set is what makes a recorded decision
+# replayable: if the registry could change mid-session, the same bytes
+# would produce different findings at different times.
 def snapshot_pii_patterns() -> tuple[PIIPattern, ...]:
     """Freeze the currently active pattern set into an immutable tuple.
 
@@ -1129,6 +1207,10 @@ _env_loaded = False
 _ENV_PATTERNS_VAR = "GLASSPORT_PII_PATTERNS"
 
 
+# PLAY: The opposite policy from the explicit loader, on purpose. An
+# explicit load may raise so the caller learns about a bad file; this
+# implicit autoload must never raise out of a scan, because that would
+# blind the built-in detectors over a typo in a config file.
 def _ensure_env_patterns_loaded() -> None:
     """Load GLASSPORT_PII_PATTERNS once, FAIL-SAFE.
 
@@ -1430,6 +1512,9 @@ def _detector_error(detector_name: str, exc: BaseException) -> Annotation:
     )
 
 
+# PLAY: The batch entry point. With the default registry it delegates to
+# the incremental engine, so batch and streaming share one implementation
+# rather than two that must be kept in agreement.
 def annotate(trace: InteractionTrace) -> list[Annotation]:
     """Run every detector and attach the results to the trace.
 

@@ -1,4 +1,40 @@
-"""Bounded, replayable session facts. No annotations or forwarding decisions."""
+"""Bounded, replayable session facts. No annotations or forwarding decisions.
+
+PLAY-BY-PLAY
+------------
+`SessionState` is what the session believes right now, and it is the only
+thing that does: detectors read it, the gate reads it, replay rebuilds
+it. It holds no event history, so the answer to "what is true" never
+depends on how long the process has been running.
+
+The single fact everything else depends on is the declared tool surface:
+the set of tools the server said it offers. It is three-valued, and this
+file is where that is enforced.
+
+    None       unknown -- no usable declaration has been observed
+    set()      known to be empty -- the server declared nothing
+    frozenset  the declared names
+
+Collapsing None into set() would turn "nobody told us" into "the server
+offers nothing", which is how an innocent call becomes a fabricated one.
+Nothing in this file compares None as a set.
+
+The fold, per event:
+
+1. `asdict()`-style limits and `bounded_copy()` keep state inside fixed
+   budgets, so a hostile session cannot make the fold grow without bound.
+2. `observe()` applies exactly one event, in wire order. Declaration
+   freshness is measured on the wire clock (`_wire_seconds`), so a live
+   pass and a replay reach the same verdict.
+3. A listing that spans pages is held as pending pages; the current
+   surface stays authority until the chain completes.
+
+WHAT THIS FILE DOES NOT DO
+--------------------------
+It emits no annotations and makes no forwarding decision. It never
+retains event history, never reads a file, and never raises on
+attacker-shaped input -- an unreadable fact becomes a limit reason.
+"""
 from __future__ import annotations
 
 from copy import deepcopy
@@ -18,12 +54,20 @@ class SessionLimits:
     max_name_chars: int = 1024
 
     def __post_init__(self):
+        # PLAY: `type(v) is not int` rejects bools as well as strings --
+        # True is an int subclass, and a limit of True would read as 1
+        # while looking like a deliberate setting. v < 1 rejects zero,
+        # which would otherwise mean "bound everything at nothing".
         if any(type(v) is not int or v < 1 for v in asdict(self).values()):
             raise ValueError("session limits must be positive integers")
 
 
 def bounded_copy(value: Any, limit: int):
     """Copy JSON-compatible state only when its serialized size fits the budget."""
+    # PLAY: iterencode streams the JSON in chunks, so the size is measured
+    # while encoding instead of materializing a copy first. Crossing the
+    # limit returns None -- never a truncated dict -- because a partial
+    # copy of a declaration would be a wrong answer, not a smaller one.
     size = 0
     try:
         for chunk in json.JSONEncoder(ensure_ascii=True).iterencode(value):
@@ -51,6 +95,9 @@ def _wire_seconds(timestamp) -> float | None:
     Declaration freshness is measured on the wire clock, never the local one,
     so a live pass and a replay of the same log reach the same answer.
     """
+    # PLAY: A naive timestamp returns None, which callers treat as stale.
+    # Without a zone there is no way to compare it to anything, and
+    # guessing the local zone is how replay stops matching the live run.
     if not isinstance(timestamp, str):
         return None
     try:
@@ -100,6 +147,10 @@ class SessionState:
         state = cls(SessionLimits(**trace.metadata.get("session_limits", {})))
         # Generic traces may declare a static actor surface. MCP metadata is
         # a final snapshot: only replayed events establish prior knowledge.
+        # PLAY: This is the temporal rule again, now applied at construction.
+        # A tap trace's actor metadata describes the END of the session; a
+        # generic trace's actor card is a declaration of intent. Only the
+        # latter may seed the starting surface.
         initial = trace._initial_surface()
         if initial is not None:
             if len(initial) <= state.limits.max_tools and all(
@@ -122,6 +173,10 @@ class SessionState:
         return state
 
     def _dict(self, value) -> dict | None:
+        # PLAY: Every dict that enters state passes through here, so the
+        # size budget is enforced in one place. A value that does not fit
+        # becomes None plus a named limit -- the caller says "unknown"
+        # rather than "here is the part that fit".
         if not isinstance(value, dict):
             return None
         result = bounded_copy(value, self.limits.max_state_bytes)
@@ -141,6 +196,9 @@ class SessionState:
         return result
 
     def _unknown_surface(self):
+        # PLAY: Four things are cleared together, and the pairing matters.
+        # A surface of None with stale tool_defs still in place would let a
+        # schema check run against tools the server no longer declares.
         self.surface = None
         self.tool_defs = {}
         self.surface_event_id = self.surface_seq = None
@@ -153,6 +211,10 @@ class SessionState:
         an enforcer may ask between events, and the next observed event is
         what retires the surface.
         """
+        # PLAY: No ttlMs means no expiry. An unreadable clock means stale,
+        # because a promise we cannot evaluate cannot be relied on -- that
+        # is the fail-closed direction, and it is the only one that does
+        # not invent a fact.
         if self.surface_expires_at is None:
             return True
         now = _wire_seconds(timestamp)
@@ -176,6 +238,10 @@ class SessionState:
         replaces it. Otherwise any caller could switch enforcement off by
         relisting and never finishing.
         """
+        # PLAY: Note what is NOT cleared here: surface, tool_defs, and the
+        # expiry. That is the point. A caller who starts a listing and
+        # never finishes it has changed nothing about what the server
+        # currently offers.
         self._pages = self._next_cursor = self.declaration_generation = None
         self._page_pending = False
         self._pages_expire_at = None
@@ -188,9 +254,16 @@ class SessionState:
 
     def observe(self, event: Event) -> None:
         """Fold one normalized event in wire order, without modifying evidence."""
+        # PLAY: Two flags are reset at the top of every event. They report
+        # what THIS event changed, so a consumer that looks after every
+        # observation never sees a stale true from an earlier frame.
         self.surface_updated = False
         self.surface_delta = []
         md = event.metadata
+        # PLAY: A lost observation epoch (HTTP reinitialize) is not "the
+        # server undeclared itself"; it is "we stopped being able to
+        # tell". Rebuilding the state from scratch is the only honest
+        # answer, and the reason it is a reset rather than a merge.
         if md.get("http_observation_loss") is True:
             self.__init__(self.limits)
             return
@@ -209,6 +282,9 @@ class SessionState:
                 and md.get("method") == _LIST_CHANGED):
             # Only the server can retract its declaration. Any reply still in
             # flight carries the old generation and is then ignored.
+            # PLAY: Server-side, so the verdict is the strong one: unknown.
+            # Contrast _cancel_pending_declaration above, which a client
+            # can trigger and which therefore must not erase anything.
             self._invalidate_declaration()
         if event.kind == EventKind.MESSAGE and not md.get("server_initiated"):
             method = md.get("method")
@@ -225,6 +301,10 @@ class SessionState:
                 cursor = params.get("cursor") if isinstance(params, dict) else None
                 generation = md.get("declaration_generation")
                 if cursor is None:
+                    # PLAY: A cursorless tools/list starts a fresh chain. The
+                    # pending state from any earlier listing is abandoned
+                    # first, so two overlapping listings cannot interleave
+                    # their pages into one surface.
                     self._cancel_pending_declaration()
                     self.declaration_generation = generation
                     self._page_pending = generation is not None
@@ -262,6 +342,10 @@ class SessionState:
         if isinstance(result, dict) and "ttlMs" in result:
             ttl, sent = result["ttlMs"], _wire_seconds(event.timestamp)
             if type(ttl) is not int or ttl < 0 or sent is None:
+                # PLAY: A ttlMs that is negative, a float, a bool, or
+                # attached to a timestamp we cannot read is not a shorter
+                # promise -- it is no promise, so the declaration cannot
+                # be trusted at all.
                 self._invalidate_declaration()   # an unreadable promise proves nothing
                 return
             expires = sent + ttl / 1000
@@ -273,6 +357,11 @@ class SessionState:
             not isinstance(next_cursor, str) or not next_cursor
             or len(next_cursor) > self.limits.max_name_chars or next_cursor == request_cursor
         )):
+            # PLAY: Every condition rejects a cursor that could loop. Equal
+            # to the request cursor means the page would be fetched twice;
+            # not a bounded string means we cannot even store it safely. An
+            # invalid cursor leaves the surface unknown rather than guessing
+            # that the page we have is the whole list.
             self._invalidate_declaration()
             return
         if next_cursor is not None:
@@ -283,10 +372,18 @@ class SessionState:
         self._pages = self._next_cursor = None
         self.tool_defs = {t["name"]: t for t in tools}
         self.surface = frozenset(self.tool_defs)
+        # PLAY: This is the only place the surface is established, and it
+        # is reached only by a complete, correlated, size-checked chain.
+        # Anything short of that ends in invalidation, never in a partial
+        # surface that would look authoritative.
         self.surface_expires_at, self._pages_expire_at = self._pages_expire_at, None
         self.surface_event_id = event.id
         self.surface_seq = md.get("seq")
         if self.first_surface is None:
             self.first_surface = self.surface
         else:
+            # PLAY: The delta is measured against the FIRST surface, not
+            # the previous one, so a server that removes a tool and adds
+            # it back is reported as a change from where the session
+            # started -- which is what a reader comparing reports wants.
             self.surface_delta = sorted(self.first_surface ^ self.surface)

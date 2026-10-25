@@ -26,6 +26,38 @@ Security posture (deliberate, tested):
     console observes, the terminal (tui --gate-control) acts.
 
 Zero dependencies. Pure stdlib.
+
+PLAY-BY-PLAY
+------------
+This file is a server, a WebSocket endpoint, and a small amount of glue,
+and it is worth reading in that order.
+
+1. The HTTP handler answers three things: the page itself (one constant from
+   `console_html`), JSON endpoints that read the log dir, and the `/ws`
+   upgrade. Everything else is a 404.
+2. The WebSocket is implemented by hand -- handshake, then frame
+   encode/decode -- because the alternative is a dependency and this project
+   has none. `_ws_accept()` computes the SHA-1 accept token; `_ws_send()` and
+   the frame reader move bytes; the Origin check sits between them.
+3. `ViewModel` is the payload shape shared with the curses TUI. One shape
+   means the two surfaces cannot drift apart in what they show.
+4. A background thread tails the session log and pushes new bytes through
+   `adapters/streaming.py`, so a browser tab sees updates without polling.
+
+Two invariants to hold onto while reading:
+
+* The Origin check on the WebSocket handshake is load bearing. Browsers do
+  not apply the same-origin policy to WebSockets, so without it any page you
+  visit could open `ws://127.0.0.1:<port>/ws` and read your session stream.
+* There is no endpoint that changes policy. A state-changing endpoint on
+  localhost is reachable by CSRF from any website; the console observes, the
+  terminal acts.
+
+WHAT THIS FILE DOES NOT DO
+--------------------------
+It does not enforce, toggle gates, or write to the log directory, and it
+serves nothing from the filesystem except the session names it resolves
+inside the log dir.
 """
 from __future__ import annotations
 
@@ -54,6 +86,9 @@ MAX_FINDINGS = 100               # plan 3.3 findings bound
 # WebSocket primitives (RFC 6455) — pure, tested against RFC vectors
 # ─────────────────────────────────────────────────────────────────
 
+# PLAY: RFC 6455 by hand, in ~20 lines, because the runtime is
+# zero-dependency. The accept value is SHA-1 of the client key plus a fixed
+# GUID -- not a security decision, just the handshake's arithmetic.
 def ws_accept(key: str) -> str:
     """Sec-WebSocket-Accept for a Sec-WebSocket-Key."""
     digest = hashlib.sha1((key + WS_GUID).encode("ascii")).digest()
@@ -77,6 +112,10 @@ def ws_encode_control(opcode: int, payload: bytes = b"") -> bytes:
     return bytes([0x80 | opcode, len(payload)]) + payload
 
 
+# PLAY: The decoder is a state machine over partial frames, because TCP
+# does not deliver messages. It also refuses anything it cannot parse
+# unambiguously rather than skipping ahead -- a websocket parser that
+# guesses is how frame-smuggling bugs happen.
 class WSDecoder:
     """Incremental client→server frame decoder. feed(bytes) returns the
     complete frames as (opcode, unmasked_payload). Client frames are
@@ -129,6 +168,11 @@ class WSDecoder:
 # Guards
 # ─────────────────────────────────────────────────────────────────
 
+# PLAY: The single most important check in this file. WebSockets are NOT
+# covered by the browser same-origin policy, so without this any page the
+# user visits could connect to ws://127.0.0.1:<port>/ws and read their
+# session stream. An absent Origin means a local script, which could read
+# the log files directly anyway.
 def origin_ok(origin: str | None, host_header: str) -> bool:
     """Accept absent Origin (non-browser callers) or an Origin whose
     authority equals the Host header — i.e. pages this server itself
@@ -140,6 +184,10 @@ def origin_ok(origin: str | None, host_header: str) -> bool:
     return bool(netloc) and netloc == host_header
 
 
+# PLAY: Path traversal defence in the boring way: accept only a bare
+# filename with no separators, and require that it exists in the log dir.
+# The result is either a real session file or None -- never a 404 that also
+# reveals what else is on disk.
 def safe_session(name: str, log_dir: Path) -> Path | None:
     """Confine a client-supplied session name to the log dir: a bare
     *.jsonl filename that exists. None for anything else."""
@@ -191,6 +239,9 @@ def tool_heatmap(trace) -> list[dict]:
                   key=lambda s: (-s["max_severity"], -s["calls"]))
 
 
+# PLAY: One payload shape, shared with the curses TUI and pushed over the
+# websocket. The frontend renders it and computes nothing, so the two
+# views cannot disagree about what the numbers mean.
 def vm_payload(session: StreamingSession, live: bool,
                max_rows: int = MAX_ROWS,
                max_findings: int = MAX_FINDINGS) -> dict:
@@ -249,6 +300,10 @@ class _Handler(BaseHTTPRequestHandler):
         name = (qs.get("session") or [""])[0]
         return safe_session(name, self.server.log_dir)
 
+    # PLAY: One loader, used by every route that needs a trace. `annotate()`
+    # mutates the trace by attaching findings, so callers get a trace whose
+    # annotations already exist -- there is no second place to remember to
+    # analyze, and therefore no route that can render a session unjudged.
     def _trace_for(self, path: Path):
         from glassport import detectors
         from glassport.adapters.mcp_session import from_mcp_session_file
@@ -441,6 +496,10 @@ class _Handler(BaseHTTPRequestHandler):
                 return
 
     @staticmethod
+        # PLAY: "Live" is a freshness test on the file's mtime, not a guess about
+    # whether a tap is still running. A tap that is writing looks live; one
+    # that died quietly stops looking live within the window, so there are no
+    # pid files to go stale.
     def _is_live(path: Path) -> bool:
         try:
             return (time.time() - path.stat().st_mtime) \
@@ -456,6 +515,11 @@ class ConsoleServer(ThreadingHTTPServer):
                  port: int = 8080, audit_dir: Path | None = None) -> None:
         self.log_dir = Path(log_dir)
         self.audit_dir = audit_dir
+        # PLAY: Three fields for one boolean's worth of work: the cached
+        # report, a flag saying the attempt happened, and a lock. The flag is
+        # set *before* the audit runs so two simultaneous first requests cannot
+        # both walk the tree -- and a failed audit is cached as "no report"
+        # rather than retried on every page load.
         self._audit_report = None
         self._audit_ran = False
         self._audit_lock = threading.Lock()
