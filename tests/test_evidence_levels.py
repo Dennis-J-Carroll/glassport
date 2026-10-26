@@ -16,6 +16,22 @@ from glassport.interaction_trace import AnnotationKind, Event
 
 
 class TestEvidenceVocabulary(unittest.TestCase):
+    def test_gate_action_classifier_covers_source(self):
+        source_root = Path(__file__).resolve().parents[1] / "src" / "glassport"
+        emitted = set()
+        for path in source_root.rglob("*.py"):
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Dict):
+                    continue
+                for key, value in zip(node.keys, node.values):
+                    if (isinstance(key, ast.Constant) and key.value == "action"
+                            and isinstance(value, ast.Constant)
+                            and isinstance(value.value, str)):
+                        emitted.add(value.value)
+        self.assertTrue(emitted)
+        self.assertEqual(emitted - evidence.GATE_ACTIONS, set())
+
     def test_stdio_gate_reason_classifier_covers_source(self):
         tree = ast.parse(inspect.getsource(tap.Gate))
         emitted = set()
