@@ -7,7 +7,7 @@ import json
 from pathlib import Path
 import re
 
-from glassport import bundle
+from glassport import __version__, bundle
 
 
 _HEX = re.compile(r"(?<![0-9a-f])[0-9a-f]{24,64}(?![0-9a-f])")
@@ -17,7 +17,8 @@ _TIME = re.compile(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?(?:Z|\+00:00)")
 def normalized_manifest(manifest: dict) -> dict:
     """Remove capture entropy, retaining decisions, counts, and structure.
 
-    Replaces UTC timestamps, random epoch identifiers, and derived digests.
+    Replaces UTC timestamps, random epoch identifiers, derived digests, and
+    the glassport release version.
     Digest bytes depend on timestamped wire and journal records, so they cannot
     survive timestamp normalization. Repeated values keep the same token.
     """
@@ -39,6 +40,9 @@ def normalized_manifest(manifest: dict) -> dict:
     digests: dict[str, str] = {}
 
     def string(value: str) -> str:
+        if value == __version__:
+            # A release bump must not invalidate every published fingerprint.
+            return "0.0.0"
         for original, replacement in epochs.items():
             value = value.replace(original, replacement)
         value = _TIME.sub("2000-01-01T00:00:00+00:00", value)
