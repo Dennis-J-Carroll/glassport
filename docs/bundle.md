@@ -100,6 +100,9 @@ The public manifest records `public_gate_tool_hashed`. Audit JSON is withheld.
 For HTTP captures, public headers hash the upstream host as `host_sha256`,
 retain the existing path digest and fixed scheme, and remove the port. The
 manifest records `public_remote_host_hashed`.
+These digests are unsalted: they keep peer-chosen or encoded bytes out of
+the public tier, but anyone can confirm a guessed tool or host name by
+hashing it. A public bundle is not anonymized.
 SARIF messages, source locations, rule text,
 and properties are removed; stable IDs remain. The manifest records
 `public_raw_bytes_removed`, `public_peer_text_removed`, and, when applicable,
