@@ -341,6 +341,8 @@ durability guarantee.
 | `premature_call` | **2** | `tools/call` before `notifications/initialized` |
 | `surface_change` | **2** | `tools/list` result changed mid-session |
 | `surface_mutation` | **2** | same named tool changed its canonical definition in a completed relist; `fields_changed` identifies fields and `schema_change` classifies inputSchema changes |
+| `tool_description_poisoning` | **2** | a new or changed tool description or inputSchema string matched a tool-poisoning rule; finding only |
+| `tool_description_hidden_unicode` | **2** | a new or changed tool description or inputSchema string contained invisible or bidi controls; finding only |
 | `call_before_declaration` | **1** | `tools/call` after `notifications/initialized` with no `tools/list` requested yet |
 | `declaration_unavailable` | **1** | `tools/call` that cannot be checked against an available complete declaration — `tools/list` requested but not yet answered, or the listing incomplete or invalidated |
 | `orphaned_response` | **1** | response whose JSON-RPC `id` matched no request |

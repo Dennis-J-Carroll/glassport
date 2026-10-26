@@ -11,10 +11,13 @@ from glassport.finding_ids import assign_stable_ids
 from glassport.interaction_trace import Annotation, Event, EventKind, InteractionTrace, _new_id
 from glassport.session import SessionState
 from glassport.watch import _classify_schema_change
+from glassport.poison_patterns import POISON_PATTERNS, HIDDEN_UNICODE, _strip_invisible
 
 
 _MUTATION_FIELDS = ("description", "inputSchema", "annotations", "title",
                     "outputSchema")
+_DESCRIPTION_SCAN_BYTES = 64 * 1024
+_DESCRIPTION_FINDINGS_MAX = 32
 
 
 def _definition_digest(definition: dict) -> str | None:
@@ -39,6 +42,39 @@ def _changed_definition_fields(old: dict, new: dict) -> list[str]:
            if key not in _MUTATION_FIELDS):
         changed.add("other")
     return sorted(changed)
+
+
+def _description_poisoning(event: Event, name: str, definition: dict) -> list[Annotation]:
+    """Scan new declaration text only, with one total byte budget per tool."""
+    out: list[Annotation] = []
+    budget = _DESCRIPTION_SCAN_BYTES
+    try:
+        for root in ("description", "inputSchema"):
+            for path, value in detectors._flatten_strings(definition.get(root), root):
+                size = len(value.encode("utf-8", "surrogatepass"))
+                if size > budget:
+                    return out
+                budget -= size
+                stripped, _ = _strip_invisible(value)
+                if any(pattern.search(stripped) for pattern in POISON_PATTERNS):
+                    out.append(detectors._ann(
+                        event, detectors.AnnotationKind.ANOMALY,
+                        "tool_description_poisoning",
+                        f"tool-poisoning rule in {root} string field",
+                        severity=2, tool=name, field_path=path,
+                        rule="tool-poisoning"))
+                if HIDDEN_UNICODE.search(value):
+                    out.append(detectors._ann(
+                        event, detectors.AnnotationKind.ANOMALY,
+                        "tool_description_hidden_unicode",
+                        f"unicode-hidden rule in {root} string field",
+                        severity=2, tool=name, field_path=path,
+                        rule="unicode-hidden"))
+                if len(out) >= _DESCRIPTION_FINDINGS_MAX:
+                    return out
+    except Exception:
+        return []  # No detector_error can veto a fabricated-call block.
+    return out
 
 
 class StreamingDetector:
@@ -100,6 +136,9 @@ class ContextDetector(StreamingDetector):
                     event, detectors.AnnotationKind.DIVERGENCE, "surface_mutation",
                     "tools/list changed a declared tool definition (" +
                     ", ".join(fields) + ")", severity=2, **metadata))
+            for name in sorted(current):
+                if self._digests.get(name) != current[name]:
+                    out.extend(_description_poisoning(event, name, state.tool_defs[name]))
         except Exception:
             return []  # Hostile definitions must not produce detector_error.
         self._tool_defs, self._digests = state.tool_defs, current

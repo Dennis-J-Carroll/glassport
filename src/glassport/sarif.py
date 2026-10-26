@@ -53,6 +53,8 @@ _TAXONOMY: dict[str, dict[str, str]] = {
     "pii_exfiltration": {"asi": "ASI06", "maestro_layer": "data_operations"},
     "unexpected_egress_host": {"asi": "ASI06", "maestro_layer": "data_operations"},
     "surface_mutation": {"asi": "ASI04", "maestro_layer": "ecosystem"},
+    "tool_description_poisoning": {"asi": "ASI01", "maestro_layer": "agent_frameworks"},
+    "tool_description_hidden_unicode": {"asi": "ASI01", "maestro_layer": "agent_frameworks"},
     "role_switch_delimiter": {"asi": "ASI01", "maestro_layer": "agent_frameworks"},
     "zero_width_obfuscation": {"asi": "ASI01", "maestro_layer": "agent_frameworks"},
 }
@@ -253,6 +255,8 @@ _RUNTIME_RULE_TEXT = {
     "capability_violation": "Server used a capability the client never granted",
     "schema_violation": "Call arguments violate the declared inputSchema",
     "surface_mutation": "A declared tool changed definition within one session",
+    "tool_description_poisoning": "Tool declaration contains a model-directed instruction",
+    "tool_description_hidden_unicode": "Tool declaration contains invisible or bidi characters",
     "unexpected_egress_host": "Tool call reached an undeclared host",
     "premature_call": "tools/call issued before notifications/initialized",
     "call_before_declaration": "tools/call before any tools/list was seen",
