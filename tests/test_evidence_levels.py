@@ -34,10 +34,7 @@ class TestEvidenceVocabulary(unittest.TestCase):
         classified = {
             **{r: evidence.BLOCKED_ADMISSION for r in evidence._ADMISSION_REASONS},
             **{r: evidence.BLOCKED_EVIDENCE_GAP for r in evidence._GAP_REASONS},
-            **{r: evidence.BLOCKED_POLICY for r in (
-                "attestation_failed", "params_too_deep", "params_too_large",
-                "retry_loop_exceeded", "taint_detected", "schema_violation",
-                "pii_exfiltration", "gate_blocked")},
+            **{r: evidence.BLOCKED_POLICY for r in evidence._POLICY_REASONS},
         }
         self.assertEqual(emitted - set(classified), set())
         for reason in emitted:

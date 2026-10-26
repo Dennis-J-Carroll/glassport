@@ -30,6 +30,17 @@ _GAP_REASONS = frozenset({
     "schema_scan_error", "pii_scan_error", "quarantine_scan_error",
     "surface_observe_error", "idempotency_check_error", "taint_scan_error",
 })
+_POLICY_REASONS = frozenset({
+    "attestation_failed", "params_too_deep", "params_too_large",
+    "retry_loop_exceeded", "taint_detected", "schema_violation",
+    "pii_exfiltration", "gate_blocked",
+})
+GATE_REASONS = _ADMISSION_REASONS | _GAP_REASONS | _POLICY_REASONS
+GATE_ACTIONS = frozenset({
+    "blocked", "quarantine_dropped", "quarantine_withheld", "quarantined",
+    "injected", "quarantine_replacement", "gate_skipped", "gate_disabled",
+    "quarantine_scan_error",
+})
 
 
 def gate_level(gate: dict) -> str:
