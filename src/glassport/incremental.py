@@ -3,11 +3,42 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import asdict
+import hashlib
+import json
 
 from glassport import detectors
 from glassport.finding_ids import assign_stable_ids
 from glassport.interaction_trace import Annotation, Event, EventKind, InteractionTrace, _new_id
 from glassport.session import SessionState
+from glassport.watch import _classify_schema_change
+
+
+_MUTATION_FIELDS = ("description", "inputSchema", "annotations", "title",
+                    "outputSchema")
+
+
+def _definition_digest(definition: dict) -> str | None:
+    """Hash a complete tool definition, including hostile Unicode safely."""
+    try:
+        # Local import avoids bundle -> decision_replay -> incremental at import time.
+        from glassport.bundle import canonical_bytes
+        data = canonical_bytes(definition)
+    except Exception:
+        try:
+            data = json.dumps(definition, sort_keys=True, ensure_ascii=True,
+                              separators=(",", ":")).encode("ascii")
+        except Exception:
+            return None
+    return hashlib.sha256(data).hexdigest()
+
+
+def _changed_definition_fields(old: dict, new: dict) -> list[str]:
+    changed = {field for field in _MUTATION_FIELDS
+               if old.get(field) != new.get(field)}
+    if any(old.get(key) != new.get(key) for key in old.keys() | new.keys()
+           if key not in _MUTATION_FIELDS):
+        changed.add("other")
+    return sorted(changed)
 
 
 class StreamingDetector:
@@ -44,8 +75,38 @@ class FabricatedCallsDetector(StreamingDetector):
 class ContextDetector(StreamingDetector):
     name = "context_violations"
 
+    def __init__(self):
+        self._tool_defs: dict[str, dict] | None = None
+        self._digests: dict[str, str] = {}
+
+    def _surface_mutations(self, event: Event, state: SessionState) -> list[Annotation]:
+        if state.surface is None or state.tool_defs is self._tool_defs:
+            return []
+        try:
+            current = {name: digest for name, definition in state.tool_defs.items()
+                       if (digest := _definition_digest(definition)) is not None}
+            previous = self._tool_defs or {}
+            out = []
+            for name in sorted(self._digests.keys() & current.keys()):
+                if self._digests[name] == current[name]:
+                    continue
+                fields = _changed_definition_fields(previous[name], state.tool_defs[name])
+                metadata = {"tool": name, "fields_changed": fields}
+                if "inputSchema" in fields:
+                    metadata["schema_change"] = _classify_schema_change(
+                        previous[name].get("inputSchema"),
+                        state.tool_defs[name].get("inputSchema"))
+                out.append(detectors._ann(
+                    event, detectors.AnnotationKind.DIVERGENCE, "surface_mutation",
+                    "tools/list changed a declared tool definition (" +
+                    ", ".join(fields) + ")", severity=2, **metadata))
+        except Exception:
+            return []  # Hostile definitions must not produce detector_error.
+        self._tool_defs, self._digests = state.tool_defs, current
+        return out
+
     def on_event(self, event: Event, state: SessionState) -> list[Annotation]:
-        out = []
+        out = self._surface_mutations(event, state)
         md = event.metadata
         if md.get("http_uninterpreted"):
             out.append(detectors._ann(

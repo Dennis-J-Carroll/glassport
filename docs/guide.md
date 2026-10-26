@@ -340,6 +340,7 @@ durability guarantee.
 | `unknown_server_request` | **2** | server-initiated request outside the MCP specification |
 | `premature_call` | **2** | `tools/call` before `notifications/initialized` |
 | `surface_change` | **2** | `tools/list` result changed mid-session |
+| `surface_mutation` | **2** | same named tool changed its canonical definition in a completed relist; `fields_changed` identifies fields and `schema_change` classifies inputSchema changes |
 | `call_before_declaration` | **1** | `tools/call` after `notifications/initialized` with no `tools/list` requested yet |
 | `declaration_unavailable` | **1** | `tools/call` that cannot be checked against an available complete declaration — `tools/list` requested but not yet answered, or the listing incomplete or invalidated |
 | `orphaned_response` | **1** | response whose JSON-RPC `id` matched no request |

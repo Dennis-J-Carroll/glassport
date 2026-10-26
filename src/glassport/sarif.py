@@ -52,6 +52,7 @@ _TAXONOMY: dict[str, dict[str, str]] = {
     "unbounded-schema": {"asi": "ASI02", "maestro_layer": "tool_integration"},
     "pii_exfiltration": {"asi": "ASI06", "maestro_layer": "data_operations"},
     "unexpected_egress_host": {"asi": "ASI06", "maestro_layer": "data_operations"},
+    "surface_mutation": {"asi": "ASI04", "maestro_layer": "ecosystem"},
     "role_switch_delimiter": {"asi": "ASI01", "maestro_layer": "agent_frameworks"},
     "zero_width_obfuscation": {"asi": "ASI01", "maestro_layer": "agent_frameworks"},
 }
@@ -251,6 +252,7 @@ _RUNTIME_RULE_TEXT = {
     "fabricated_tool_call": "Tool call outside the declared surface",
     "capability_violation": "Server used a capability the client never granted",
     "schema_violation": "Call arguments violate the declared inputSchema",
+    "surface_mutation": "A declared tool changed definition within one session",
     "unexpected_egress_host": "Tool call reached an undeclared host",
     "premature_call": "tools/call issued before notifications/initialized",
     "call_before_declaration": "tools/call before any tools/list was seen",

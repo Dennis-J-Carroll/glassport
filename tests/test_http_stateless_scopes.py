@@ -59,7 +59,9 @@ class StatelessUpstream(BaseHTTPRequestHandler):
             names = type(self).lists.get(who, type(self).lists.get('*', []))
             extra = [('Mcp-Session-Id', 'minted')] if type(self).session_header else []
             return self.reply(200, {'jsonrpc': '2.0', 'id': rid, 'result': {
-                'tools': [{'name': n, 'inputSchema': {'type': 'object'}} for n in names]}}, extra)
+                'tools': [n if isinstance(n, dict) else
+                          {'name': n, 'inputSchema': {'type': 'object'}}
+                          for n in names]}}, extra)
         if method == 'subscriptions/listen':
             self.send_response(200)
             self.send_header('Content-Type', 'text/event-stream')
