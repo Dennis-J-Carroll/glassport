@@ -30,6 +30,8 @@ SECTIONS = [
 ]
 SUBJECT_RE = re.compile(r"^(?P<type>[a-z]+)(\([^)]*\))?!?:\s*(?P<desc>.+)$")
 SKIP_RE = re.compile(r"^Merge (pull request|branch)")
+# Only release tags start a section; backup or scratch tags must not.
+RELEASE_TAG_RE = re.compile(r"^v\d+\.\d+\.\d+$")
 
 
 def _git(*args: str) -> str:
@@ -41,6 +43,8 @@ def tags_in_order() -> list[tuple[str, str]]:
     """[(tag, yyyy-mm-dd)] oldest first, semver-sorted."""
     out = []
     for tag in _git("tag", "--sort=v:refname").split():
+        if not RELEASE_TAG_RE.match(tag):
+            continue
         date = _git("log", "-1", "--format=%ad", "--date=short",
                     tag).strip()
         out.append((tag, date))
@@ -107,6 +111,12 @@ def render() -> str:
 
 
 def main(argv: list[str]) -> int:
+    if ("--write" in argv and
+            _git("rev-parse", "--is-shallow-repository").strip() == "true"):
+        # A shallow clone hides older commits, so every older section would shrink.
+        print("refusing to write CHANGELOG.md from a shallow clone; "
+              "run `git fetch --unshallow` first", file=sys.stderr)
+        return 1
     text = render()
     if "--write" in argv:
         (REPO / "CHANGELOG.md").write_text(text, encoding="utf-8")
