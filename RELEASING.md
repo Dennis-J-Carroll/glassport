@@ -37,6 +37,9 @@ builds, checks the tag matches `pyproject.toml`, and publishes to PyPI via
 
 - [ ] Push the tag (THIS is the irreversible publish step):
   - `git tag vX.Y.Z && git push origin vX.Y.Z`
+  - The workflow creates the GitHub release with generated notes and attaches
+    `dist/`. Edit those notes afterwards; if a release for the tag already
+    exists, the workflow only uploads `dist/` to it.
 - [ ] Watch the run: `gh run watch` (or the Actions tab). The `publish` job
       uploads to PyPI on success.
 - [ ] Verify: `pip install -U glassport` in a clean venv, then `glassport serve`
