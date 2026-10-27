@@ -55,7 +55,8 @@ rescanning. Replay refuses a `/2` journal as `unsupported` with
 `profile_mismatch_detector_engine` (bundle verify exit `2`), rather than
 claiming different findings are a divergence. Stable finding IDs change with
 the engine string. Encoded scanning is analysis-only and finding-only: it
-decodes once, with one 64 KiB decoded-byte budget per call frame. Hex and
+decodes once, with one 64 KiB decoded-byte budget per call frame; an oversized
+candidate is skipped while later arguments are still checked. Hex and
 percent decoding are out of scope; JSON parsing already resolves `\u` escapes.
 
 `bundle verify OUT [--trusted-key PUB] [--json]` prints **analysis reproduced**

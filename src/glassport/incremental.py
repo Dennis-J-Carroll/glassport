@@ -118,6 +118,7 @@ class ContextDetector(StreamingDetector):
     def _surface_mutations(self, event: Event, state: SessionState) -> list[Annotation]:
         if state.surface is None or state.tool_defs is self._tool_defs:
             return []
+        current: dict[str, str] = {}
         try:
             current = {name: digest for name, definition in state.tool_defs.items()
                        if (digest := _definition_digest(definition)) is not None}
@@ -140,6 +141,10 @@ class ContextDetector(StreamingDetector):
                 if self._digests.get(name) != current[name]:
                     out.extend(_description_poisoning(event, name, state.tool_defs[name]))
         except Exception:
+            # Treat this declaration as processed. A completed digest pass
+            # becomes the new baseline; a failed pass leaves no digests to
+            # compare against definitions we could not safely inspect.
+            self._tool_defs, self._digests = state.tool_defs, current
             return []  # Hostile definitions must not produce detector_error.
         self._tool_defs, self._digests = state.tool_defs, current
         return out

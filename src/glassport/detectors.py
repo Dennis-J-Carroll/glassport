@@ -1316,18 +1316,20 @@ def _scan_encoded(args: Any, patterns: "Sequence[PIIPattern] | None" = None,
     """Depth-one base64 analysis only; never called by stdio gate or _scan_pii.
 
     Returns (pattern, decoded value, encoding, argument path) hits and a
-    budget flag. Decode errors are ordinary non-matches. Work is bounded by
-    one 64 KiB decoded-byte budget across the entire tools/call frame.
+    limit flag. Decode errors are ordinary non-matches. Work is bounded by
+    64 KiB decoded bytes per string and across the entire tools/call frame.
     """
     hits: list[tuple[PIIPattern, str, str, str]] = []
     remaining = MAX_DECODED_BYTES
+    limited = False
     try:
         for path, value in _flatten_strings(args):
             if len(value) < 24 or not any(char in "+/=-_" for char in value):
                 continue
             # Reject huge candidates before regex or decode allocates bytes.
             if len(value) > ((MAX_DECODED_BYTES + 2) // 3) * 4 + 4:
-                return hits, True
+                limited = True
+                continue
             urlsafe = "-" in value or "_" in value
             if not (_BASE64_URL if urlsafe else _BASE64_STANDARD).fullmatch(value):
                 continue
@@ -1349,7 +1351,7 @@ def _scan_encoded(args: Any, patterns: "Sequence[PIIPattern] | None" = None,
                 hits.append((pattern, decoded_value, encoding, path))
     except Exception:
         return hits, True  # Hostile nesting or custom validator: no detector_error.
-    return hits, False
+    return hits, limited
 
 
 def _extract_hosts_from_value(value: Any, hosts: set[str]) -> None:
@@ -1438,8 +1440,8 @@ def _exfiltration_for_event(e: Event, declared: set[str],
             if encoded_limited:
                 out.append(_ann(
                     e, AnnotationKind.ANOMALY, "encoded_scan_limited",
-                    "Encoded argument scan reached its decoded-byte budget",
-                    severity=1, tool=name, limit="decoded_bytes_per_frame",
+                    "Encoded argument scan hit a decoded-byte size limit",
+                    severity=1, tool=name, limit="decoded_bytes",
                     max_decoded_bytes=MAX_DECODED_BYTES))
 
             has_pii = any(p.severity >= 2 for p, _ in hits)

@@ -146,6 +146,12 @@ digest, then re-folds the epoch's wire log through a fresh builder and detector
 engine under the recorded session limits, recomputes each candidate action,
 and compares.
 
+Concurrent requests in one stateless scope can append intents out of wire
+order. Replay verifies the hash chain in journal file order, checks each
+intent's wire-line digest, then compares decisions by sorted `event_seq`.
+Two comparable intents with the same `event_seq` are `unsupported` with
+`journal_duplicate_intent`.
+
 | Status | Meaning | Exit |
 |---|---|---:|
 | `equivalent` | every compared record reproduced its action and finding digest | 0 |
@@ -156,7 +162,7 @@ and compares.
 Unsupported: missing profile, conflicting duplicate profiles, a mismatch in
 schema / policy version / detector engine / pattern digest, unreadable or
 malformed artifacts, reordered wire evidence, an epoch mismatch, or a journal
-whose records are out of sequence. A repeated *identical* profile is a benign
+with duplicate comparable intents. A repeated *identical* profile is a benign
 resume marker, not a conflict.
 
 Incomplete: a non-reproducible pattern profile, a journal truncated by its own
