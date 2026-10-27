@@ -54,6 +54,9 @@ from glassport.interaction_trace import AnnotationKind, EventKind
 JOURNAL_SCHEMA = "glassport.decision-journal/3"
 GENESIS_SHA256 = "0" * 64
 POLICY_VERSION = "glassport.policy/2"  # opt-in strict blocks missing evidence
+# /3: analysis now includes canonical same-name declaration mutation,
+# live description poisoning, and bounded encoded-argument findings. A /2
+# journal is unsupported under /3, never re-judged as divergent.
 # /2: the fold changed. A client request the gate refuses is folded for
 # analysis but never becomes a pending correlation (its wire entry says
 # `admitted: false`), and the reply the gate injects for it (`gate:
@@ -61,7 +64,7 @@ POLICY_VERSION = "glassport.policy/2"  # opt-in strict blocks missing evidence
 # written under /1 was recorded against a fold in which a refused request
 # *did* enter correlation, so this reader reports it unsupported rather
 # than re-judge it; nothing here says how a /1 reader would read a /2 log.
-DETECTOR_ENGINE_VERSION = "glassport.detectors/2"
+DETECTOR_ENGINE_VERSION = "glassport.detectors/3"
 
 MODE_OBSERVE = "observe"
 MODE_GATE = "gate"

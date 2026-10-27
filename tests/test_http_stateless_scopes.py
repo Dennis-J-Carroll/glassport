@@ -59,7 +59,9 @@ class StatelessUpstream(BaseHTTPRequestHandler):
             names = type(self).lists.get(who, type(self).lists.get('*', []))
             extra = [('Mcp-Session-Id', 'minted')] if type(self).session_header else []
             return self.reply(200, {'jsonrpc': '2.0', 'id': rid, 'result': {
-                'tools': [{'name': n, 'inputSchema': {'type': 'object'}} for n in names]}}, extra)
+                'tools': [n if isinstance(n, dict) else
+                          {'name': n, 'inputSchema': {'type': 'object'}}
+                          for n in names]}}, extra)
         if method == 'subscriptions/listen':
             self.send_response(200)
             self.send_header('Content-Type', 'text/event-stream')
@@ -128,13 +130,14 @@ class ScopeCase(unittest.TestCase):
         self.addCleanup(box[0].shutdown)
         self.port = box[0].server_address[1]
 
-    def send(self, method, rid, *, name=None, auth='Bearer A', tenant=None, extra=()):
+    def send(self, method, rid, *, name=None, arguments=None,
+             auth='Bearer A', tenant=None, extra=()):
         params = {'_meta': dict(META)}
         headers = [('Content-Type', 'application/json'),
                    ('Accept', 'application/json, text/event-stream'),
                    ('MCP-Protocol-Version', MODERN), ('Mcp-Method', method)]
         if name is not None:
-            params.update(name=name, arguments={})
+            params.update(name=name, arguments=arguments if arguments is not None else {})
             headers.append(('Mcp-Name', name))
         if auth is not None:
             headers.append(('Authorization', auth))

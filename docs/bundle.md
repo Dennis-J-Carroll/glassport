@@ -49,6 +49,15 @@ future schemas change the `schema` value rather than silently redefining one.
 | `delivery[]` | One row per recorded delivery: epoch, intent and delivery ordinals, wire sequence and exact wire-line digest from the intent, outcome, code, evidence level. |
 | `limits[]` | Named limitations from `compute_limits`. A signed raw bundle omits `no_signature`. |
 
+Detector engine `glassport.detectors/3` adds in-session tool-definition
+mutation, live declaration poisoning, and bounded base64/base64url argument
+rescanning. Replay refuses a `/2` journal as `unsupported` with
+`profile_mismatch_detector_engine` (bundle verify exit `2`), rather than
+claiming different findings are a divergence. Stable finding IDs change with
+the engine string. Encoded scanning is analysis-only and finding-only: it
+decodes once, with one 64 KiB decoded-byte budget per call frame. Hex and
+percent decoding are out of scope; JSON parsing already resolves `\u` escapes.
+
 `bundle verify OUT [--trusted-key PUB] [--json]` prints **analysis reproduced**
 and **delivery evidence present** separately, then integrity, signature status,
 and the manifest's limits verbatim. It exits 0 only if every epoch replays

@@ -38,6 +38,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from glassport import detectors, provenance
+from glassport.poison_patterns import POISON_PATTERNS, HIDDEN_UNICODE, _strip_invisible
 
 RUBRIC_VERSION = "0.4"          # v0.3: capability-note tier (0 weight)
                                 # v0.4: tool-poisoning severity by context;
@@ -209,49 +210,7 @@ SECRET_PATTERNS = [
      re.compile(r'(?i)\bbearer\s+([A-Za-z0-9\-_.]{20,})')),
 ]
 
-# a real dotenv file (.env, .env.local, .env.production), but not the
-# committed placeholder templates every project ships
-_ENV_FILE = r"\.env\b(?!\.(?:example|sample|template|dist|defaults?)\b)"
-
-POISON_PATTERNS = [
-    re.compile(r"(?i)ignore\s+(all\s+|any\s+)?(previous|prior|above|"
-               r"earlier)\s+(instructions|messages|directives|context)"),
-    re.compile(r"(?i)<\s*important\s*>"),
-    re.compile(r"(?i)do\s+not\s+(tell|inform|mention|reveal|alert|"
-               r"notify)\b[^.\n]{0,60}\b(user|human)"),
-    re.compile(r"(?i)\b(read|cat|open)\b[^.\n]{0,60}"
-               r"(\.ssh|id_rsa|" + _ENV_FILE + r"|credentials|api[_ ]?keys?)"),
-    re.compile(r"(?i)\b(send|upload|post|forward|exfiltrate)\b[^.\n]{0,60}"
-               r"(\.ssh|id_rsa|" + _ENV_FILE + r"|credentials|api[_ ]?keys?|"
-               r"conversation|system prompt)"),
-    re.compile(r"(?i)reveal\s+the\s+system\s+prompt"),
-    re.compile(r"(?i)instead\s+of\s+(telling|showing|asking)\s+the\s+user"),
-]
-
-# zero-width (200B-200F, 2060-2064, FEFF) and bidi controls (202A-202E,
-# 2066-2069) — escaped, not literal, so the audit never flags itself
-HIDDEN_UNICODE = re.compile(
-    "[\\u200b-\\u200f\\u2060-\\u2064\\u202a-\\u202e\\u2066-\\u2069\\ufeff]")
-
 NPX_AUTO_INSTALL = re.compile(r"\bnpx\s+(-y|--yes)\b")
-
-
-def _strip_invisible(text: str) -> tuple[str, list[int]]:
-    """Return (text without invisible/bidi chars, index_map) where
-    index_map[i] is the position of stripped char i in the original.
-
-    A poisoning directive with a zero-width joiner between every letter
-    matches no raw pattern, yet a model reads it whole. We scan the
-    stripped view but map matches back so the reported line is exact.
-    Deletion-only, so the map is a clean one-to-one."""
-    kept: list[str] = []
-    index_map: list[int] = []
-    for i, ch in enumerate(text):
-        if HIDDEN_UNICODE.match(ch):
-            continue
-        kept.append(ch)
-        index_map.append(i)
-    return "".join(kept), index_map
 
 # JavaScript/TypeScript — pattern depth only, and the report says so
 JS_PATTERNS = [

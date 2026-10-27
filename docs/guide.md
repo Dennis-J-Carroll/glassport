@@ -340,6 +340,9 @@ durability guarantee.
 | `unknown_server_request` | **2** | server-initiated request outside the MCP specification |
 | `premature_call` | **2** | `tools/call` before `notifications/initialized` |
 | `surface_change` | **2** | `tools/list` result changed mid-session |
+| `surface_mutation` | **2** | same named tool changed its canonical definition in a completed relist; `fields_changed` identifies fields and `schema_change` classifies inputSchema changes |
+| `tool_description_poisoning` | **2** | a new or changed tool description or inputSchema string matched a tool-poisoning rule; finding only |
+| `tool_description_hidden_unicode` | **2** | a new or changed tool description or inputSchema string contained invisible or bidi controls; finding only |
 | `call_before_declaration` | **1** | `tools/call` after `notifications/initialized` with no `tools/list` requested yet |
 | `declaration_unavailable` | **1** | `tools/call` that cannot be checked against an available complete declaration — `tools/list` requested but not yet answered, or the listing incomplete or invalidated |
 | `orphaned_response` | **1** | response whose JSON-RPC `id` matched no request |
@@ -353,6 +356,8 @@ Severity-3 findings drive the session verdict to `HOSTILE OR HALLUCINATED`. INFO
 | Subcategory | Sev | What the wire proved |
 |---|:---:|---|
 | `pii_<category>` | **3**/2/1 | credential or PII in tool-call arguments — `pii_rsa_private_key`, `pii_openai_key`, `pii_aws_secret_key`, `pii_github_token`, `pii_ssn`, `pii_credit_card`, `pii_iban`, … (sev by category) |
+| `pii_encoded_<category>` | **2**/1 | credential or PII found after one bounded base64/base64url decode of an argument string; finding only, never a gate block |
+| `encoded_scan_limited` | **1** | encoded-argument scan stopped at its 64 KiB decoded-byte frame budget |
 | `unexpected_egress_host` | **3**/2 | tool call reaches a host outside the declared surface; **3** when sensitive data rides along, **2** otherwise |
 | `pii_in_result_<category>` | **3** | a credential came back in a tool *result* — a server leaking secrets to the client |
 

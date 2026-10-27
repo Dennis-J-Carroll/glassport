@@ -138,6 +138,10 @@ def _runtime_line(ann) -> str:
         delta = md.get("delta") or []
         names = ", ".join(_sanitize_inline(n, label="tool") for n in delta[:8]) or "(unknown)"
         return f"**[{tag}] Surface change** — the tool list changed mid-session; delta: {names}."
+    if sub == "surface_mutation":
+        fields = ", ".join(md.get("fields_changed") or []) or "unknown fields"
+        who = f"tool {tool_s} " if tool_s else "a tool "
+        return f"**[{tag}] Surface mutation** — {who}changed {fields} within one session."
     if sub == "detector_error":
         det = _sanitize_inline(md.get("detector", "?"), label="detector")
         return f"**[{tag}] Detector error** — detector {det} crashed; coverage was incomplete."
