@@ -258,7 +258,7 @@ _RUNTIME_RULE_TEXT = {
     "surface_mutation": "A declared tool changed definition within one session",
     "tool_description_poisoning": "Tool declaration contains a model-directed instruction",
     "tool_description_hidden_unicode": "Tool declaration contains invisible or bidi characters",
-    "encoded_scan_limited": "Encoded argument scan reached its decoded-byte budget",
+    "encoded_scan_limited": "Encoded argument scan hit a decoded-byte size limit",
     "unexpected_egress_host": "Tool call reached an undeclared host",
     "premature_call": "tools/call issued before notifications/initialized",
     "call_before_declaration": "tools/call before any tools/list was seen",

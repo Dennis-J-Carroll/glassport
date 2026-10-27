@@ -97,6 +97,20 @@ class TestEncodedAnalysis(unittest.TestCase):
         self.assertEqual(limits[0].metadata['max_decoded_bytes'], 64 * 1024)
         self.assertNotIn('detector_error', [a.subcategory for a in found])
 
+    def test_oversized_candidate_does_not_hide_later_encoded_secret(self):
+        args = {'prose': 'ordinary-prose-' + 'x' * 100_000,
+                'secret': self.encoded(0)}
+        hits, limited = detectors._scan_encoded(args)
+        self.assertTrue(limited)
+        self.assertEqual([(pattern.category, path) for pattern, _, _, path in hits],
+                         [('anthropic_key', 'secret')])
+        trace = from_mcp_session(handshake() + [call(6, 3, 'web_search', args)])
+        found = detectors.annotate(trace)
+        self.assertIn('pii_encoded_anthropic_key', [a.subcategory for a in found])
+        limits = [a for a in found if a.subcategory == 'encoded_scan_limited']
+        self.assertEqual(len(limits), 1)
+        self.assertEqual(limits[0].metadata['limit'], 'decoded_bytes')
+
     def test_image_surrogate_and_pathological_base64_are_total(self):
         image = base64.b64encode(b'\x89PNG\r\n\x1a\n' + b'\xff' * 128).decode()
         for args in ({'image': image}, {'payload': '\ud800' + self.encoded(0)},
