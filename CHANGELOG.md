@@ -6,20 +6,25 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versions follow 
 
 ## [Unreleased]
 
+### Changed
+- Fix concurrent replay order and harden live detector limits (#124)
+- Detect live surface mutation, declaration poisoning, and encoded secrets (#123)
+
+### Internal
+- attach dist to an existing GitHub release instead of failing (#122)
+
+## [0.8.0] - 2026-10-26
+
 ### Added
 - add opt-in strict HTTP evidence-gap blocking (#112)
 - accept --port for http wrap and gate (#101)
 
 ### Fixed
-- cache mutation declaration after local failure
-- continue encoded scan after oversized candidate
-- compare concurrent journal intents by wire sequence
 - read only release tags and refuse shallow writes (#121)
 - close Phase 3a review gaps in capture evidence (#115)
 - make evidence claims and session diagnostics precise
 
 ### Changed
-- Detect live surface mutation, declaration poisoning, and encoded secrets (#123)
 - 0.8.0 — provable decision bundles (#120)
 - Phase 4: public gate hardening and acceptance matrix (#119)
 - Phase 3b.1: secure public bundles and classify verify exits (#117)
@@ -36,7 +41,6 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versions follow 
 - add a Parallel Search MCP capture recipe (#99)
 
 ### Internal
-- attach dist to an existing GitHub release instead of failing (#122)
 - skip journal permission test when running as root (#108)
 - skip journal permission test when running as root (#106)
 - pin server-filesystem and wait for the tools/call reply (#102)
