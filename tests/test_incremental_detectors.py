@@ -4,8 +4,9 @@ from dataclasses import asdict
 import json
 import unittest
 from pathlib import Path
+from unittest import mock
 
-from glassport import detectors
+from glassport import detectors, incremental
 from glassport.adapters.mcp_session import MCPTraceBuilder, from_mcp_session, _iter_entries
 from glassport.incremental import DetectorEngine, FabricatedCallsDetector, ContextDetector, DataExfiltrationDetector, StreamingDetector
 from glassport.session import SessionLimits, SessionState
@@ -244,6 +245,34 @@ class TestContextParity(unittest.TestCase):
                  {"name": "deep", "inputSchema": nested}]
         _, found = self.check(handshake(tools=tools))
         self.assertNotIn("detector_error", [a.subcategory for a in found])
+
+    def test_failed_mutation_does_not_rehash_on_next_event(self):
+        builder = MCPTraceBuilder(retain_events=False)
+        detector = ContextDetector()
+        engine = DetectorEngine([detector])
+        for line in handshake(tools=[{"name": "foo", "description": "first"}]):
+            event = builder.feed(json.loads(line))
+            if event:
+                engine.on_event(event, builder.state)
+        changed = {"name": "foo", "description": "second"}
+        relist = [L(6, "c2s", {"id": 3, "method": "tools/list"}),
+                  L(7, "s2c", {"id": 3, "result": {"tools": [changed]}})]
+        with mock.patch.object(incremental, "_definition_digest",
+                               wraps=incremental._definition_digest) as digest:
+            with mock.patch.object(incremental, "_changed_definition_fields",
+                                   side_effect=RuntimeError("forced failure")):
+                for line in relist:
+                    event = builder.feed(json.loads(line))
+                    found = engine.on_event(event, builder.state) if event else []
+                self.assertNotIn("detector_error", [a.subcategory for a in found])
+                self.assertEqual(digest.call_count, 1)
+                event = builder.feed(json.loads(call(8, 4, "foo", {})))
+                found = engine.on_event(event, builder.state)
+                self.assertNotIn("detector_error", [a.subcategory for a in found])
+                self.assertEqual(digest.call_count, 1)
+        self.assertIs(detector._tool_defs, builder.state.tool_defs)
+        self.assertEqual(detector._digests["foo"],
+                         incremental._definition_digest(changed))
 
     def test_server_notification_cannot_initialize_client(self):
         _, found = self.check([L(1, "s2c", {"method": "notifications/initialized"}), call(2, 2, "foo", {})])
