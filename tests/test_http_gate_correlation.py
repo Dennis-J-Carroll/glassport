@@ -424,37 +424,38 @@ class TestReplayWithRefusals(CorrelationCase):
 # ── fold-version provenance ──────────────────────────────────────────────
 
 class TestFoldProvenance(JournalCase):
-    def test_a_journal_recorded_under_engine_1_is_unsupported_under_2(self):
+    def test_older_detector_engine_journals_are_unsupported_under_3(self):
         lease = self.session()
         self.observed(lease, wire(id=4, method='tools/call',
                                   params={'name': 'nope', 'arguments': {}}))
         epoch = lease.context.epoch
-        self.assertEqual(dj.DETECTOR_ENGINE_VERSION, 'glassport.detectors/2')
+        self.assertEqual(dj.DETECTOR_ENGINE_VERSION, 'glassport.detectors/3')
         self.assertEqual(self.verify(lease).status, 'equivalent')
 
-        # The same journal, as a /1 writer would have recorded it.
-        legacy = self.root / 'legacy.jsonl'
-        lines = []
-        for record in self.journal_lines(epoch):
-            if record['kind'] == 'profile':
-                record['detector_engine'] = 'glassport.detectors/1'
-            lines.append(json.dumps(record))
-        legacy.write_text('\n'.join(lines) + '\n')
-        result = dr.verify_journal(legacy, self.wire_path(epoch))
-        self.assertEqual(result.status, 'unsupported')
-        self.assertEqual(result.reasons, ['profile_mismatch_detector_engine'])
-        self.assertEqual(result.recorded_engine, 'glassport.detectors/1')
-        self.assertEqual(result.analyzer_engine, 'glassport.detectors/2')
-        as_dict = result.as_dict()
-        self.assertEqual((as_dict['recorded_engine'], as_dict['analyzer_engine']),
-                         ('glassport.detectors/1', 'glassport.detectors/2'))
+        for old_engine in ('glassport.detectors/1', 'glassport.detectors/2'):
+            with self.subTest(old_engine=old_engine):
+                legacy = self.root / 'legacy.jsonl'
+                lines = []
+                for record in self.journal_lines(epoch):
+                    if record['kind'] == 'profile':
+                        record['detector_engine'] = old_engine
+                    lines.append(json.dumps(record))
+                legacy.write_text('\n'.join(lines) + '\n')
+                result = dr.verify_journal(legacy, self.wire_path(epoch))
+                self.assertEqual(result.status, 'unsupported')
+                self.assertEqual(result.reasons, ['profile_mismatch_detector_engine'])
+                self.assertEqual(result.recorded_engine, old_engine)
+                self.assertEqual(result.analyzer_engine, 'glassport.detectors/3')
+                as_dict = result.as_dict()
+                self.assertEqual((as_dict['recorded_engine'], as_dict['analyzer_engine']),
+                                 (old_engine, 'glassport.detectors/3'))
 
-        out = io.StringIO()
-        with contextlib.redirect_stdout(out):
-            code = dr.main([str(legacy), '--wire', str(self.wire_path(epoch))])
-        self.assertEqual(code, 1)
-        self.assertIn('recorded detector engine: glassport.detectors/1; '
-                      'this analyzer: glassport.detectors/2', out.getvalue())
+                out = io.StringIO()
+                with contextlib.redirect_stdout(out):
+                    code = dr.main([str(legacy), '--wire', str(self.wire_path(epoch))])
+                self.assertEqual(code, 1)
+                self.assertIn(f'recorded detector engine: {old_engine}; '
+                              'this analyzer: glassport.detectors/3', out.getvalue())
         lease.release()
 
     def test_a_profile_without_an_engine_names_none_not_the_analyzer(self):

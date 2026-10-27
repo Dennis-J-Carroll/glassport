@@ -43,6 +43,9 @@ ANNOTATOR = "glassport.detectors"
 # are small; a multi-megabyte tool result is either a mistake or an attempt
 # to make the scanner the bottleneck. Matches audit.MAX_FILE_BYTES.
 MAX_SCAN_BYTES = 1_000_000
+MAX_DECODED_BYTES = 64 * 1024
+_BASE64_STANDARD = re.compile(r"[A-Za-z0-9+/]+={0,2}\Z")
+_BASE64_URL = re.compile(r"[A-Za-z0-9_-]+={0,2}\Z")
 
 # Server-initiated requests and the client capability that must have been
 # granted in the initialize handshake for the server to send them.
@@ -1308,6 +1311,47 @@ def _scan_pii(text: str,
     return [(p, v) for p, v, _, _ in _scan_pii_spanned(text, patterns)]
 
 
+def _scan_encoded(args: Any, patterns: "Sequence[PIIPattern] | None" = None,
+                  ) -> tuple[list[tuple[PIIPattern, str, str, str]], bool]:
+    """Depth-one base64 analysis only; never called by stdio gate or _scan_pii.
+
+    Returns (pattern, decoded value, encoding, argument path) hits and a
+    budget flag. Decode errors are ordinary non-matches. Work is bounded by
+    one 64 KiB decoded-byte budget across the entire tools/call frame.
+    """
+    hits: list[tuple[PIIPattern, str, str, str]] = []
+    remaining = MAX_DECODED_BYTES
+    try:
+        for path, value in _flatten_strings(args):
+            if len(value) < 24 or not any(char in "+/=-_" for char in value):
+                continue
+            # Reject huge candidates before regex or decode allocates bytes.
+            if len(value) > ((MAX_DECODED_BYTES + 2) // 3) * 4 + 4:
+                return hits, True
+            urlsafe = "-" in value or "_" in value
+            if not (_BASE64_URL if urlsafe else _BASE64_STANDARD).fullmatch(value):
+                continue
+            if ((len(value) + 3) // 4) * 3 > remaining + 2:
+                return hits, True
+            try:
+                source = value.encode("ascii")
+                decoded = base64.b64decode(source + b"=" * (-len(source) % 4),
+                                           altchars=b"-_" if urlsafe else None,
+                                           validate=True)
+                if len(decoded) > remaining:
+                    return hits, True
+                remaining -= len(decoded)
+                text = decoded.decode("utf-8")
+            except (ValueError, UnicodeError, base64.binascii.Error):
+                continue
+            encoding = "base64url" if urlsafe else "base64"
+            for pattern, decoded_value in _scan_pii(text, patterns):
+                hits.append((pattern, decoded_value, encoding, path))
+    except Exception:
+        return hits, True  # Hostile nesting or custom validator: no detector_error.
+    return hits, False
+
+
 def _extract_hosts_from_value(value: Any, hosts: set[str]) -> None:
     """Recursively collect hostnames: embedded URLs anywhere, plus bare
     domain values. Deliberately does NOT mine domains out of prose or
@@ -1379,6 +1423,24 @@ def _exfiltration_for_event(e: Event, declared: set[str],
                     severity=pat.severity,
                     category=HallucinationCategory.TOOL_USE,
                     pii_category=pat.category, tool=name))
+
+            encoded_hits, encoded_limited = _scan_encoded(args, patterns)
+            for pat, value, encoding, path in encoded_hits:
+                out.append(_ann(
+                    e, AnnotationKind.DIVERGENCE,
+                    f"pii_encoded_{pat.category}",
+                    f"Encoded {pat.description} in tools/call argument "
+                    f"(field_path in metadata): {_redact(value, pat.category)}",
+                    severity=min(pat.severity, 2),
+                    category=HallucinationCategory.TOOL_USE,
+                    encoding=encoding, field_path=path,
+                    pii_category=pat.category, tool=name))
+            if encoded_limited:
+                out.append(_ann(
+                    e, AnnotationKind.ANOMALY, "encoded_scan_limited",
+                    "Encoded argument scan reached its decoded-byte budget",
+                    severity=1, tool=name, limit="decoded_bytes_per_frame",
+                    max_decoded_bytes=MAX_DECODED_BYTES))
 
             has_pii = any(p.severity >= 2 for p, _ in hits)
             for host in _extract_hosts_from_args(args):

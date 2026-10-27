@@ -1,4 +1,5 @@
 """Permanent semantic parity harness for batch, event replay, and live frames."""
+import base64
 from dataclasses import asdict
 import json
 import unittest
@@ -276,6 +277,17 @@ class TestExfiltrationParity(unittest.TestCase):
         self.assertIn("pii_anthropic_key", [a.subcategory for a in found])
         self.assertIn("pii_in_result_anthropic_key", [a.subcategory for a in found])
         self.assertNotIn(secret, json.dumps([asdict(a) for a in found]))
+
+    def test_encoded_secret_has_live_batch_stable_id_parity(self):
+        secret = "sk-ant-api03-" + "A" * 90
+        encoded = base64.b64encode(secret.encode()).decode()
+        _, found = self.check(handshake() + [
+            call(6, 3, "web_search", {"payload": encoded})])
+        encoded_findings = [a for a in found if a.subcategory ==
+                            "pii_encoded_anthropic_key"]
+        self.assertEqual(len(encoded_findings), 1)
+        self.assertEqual(encoded_findings[0].severity, 2)
+        self.assertRegex(encoded_findings[0].metadata["stable_id"], r"^[0-9a-f]{24}$")
 
     def test_future_host_declaration_cannot_erase_egress(self):
         h = handshake(tools=[{"name": "foo", "description": "https://api.example.test"}])

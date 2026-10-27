@@ -11,10 +11,16 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versions follow 
 - accept --port for http wrap and gate (#101)
 
 ### Fixed
+- read only release tags and refuse shallow writes (#121)
 - close Phase 3a review gaps in capture evidence (#115)
 - make evidence claims and session diagnostics precise
 
 ### Changed
+- Detect encoded tool-call secrets without changing gate
+- Scan live tool declarations for poisoning
+- Detect same-name tool definition mutation live
+- Guard emitted gate action vocabulary
+- 0.8.0 — provable decision bundles (#120)
 - Phase 4: public gate hardening and acceptance matrix (#119)
 - Phase 3b.1: secure public bundles and classify verify exits (#117)
 - Phase 3b: replayable decision bundles and CI artifact (#116)
@@ -22,7 +28,6 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versions follow 
 - Phase 2: evidence-level claims across gate, journal, and reports (#113)
 
 ### Documentation
-- state that public-tier digests are unsalted
 - define tested per-path enforcement contract
 - move internal working notes out of the public tree (#109)
 - correct Sem recipe and guide against a verified literal run (#105)
@@ -31,7 +36,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versions follow 
 - add a Parallel Search MCP capture recipe (#99)
 
 ### Internal
-- keep acceptance fingerprints stable across version bumps
+- attach dist to an existing GitHub release instead of failing (#122)
 - skip journal permission test when running as root (#108)
 - skip journal permission test when running as root (#106)
 - pin server-filesystem and wait for the tools/call reply (#102)

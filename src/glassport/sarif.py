@@ -55,6 +55,7 @@ _TAXONOMY: dict[str, dict[str, str]] = {
     "surface_mutation": {"asi": "ASI04", "maestro_layer": "ecosystem"},
     "tool_description_poisoning": {"asi": "ASI01", "maestro_layer": "agent_frameworks"},
     "tool_description_hidden_unicode": {"asi": "ASI01", "maestro_layer": "agent_frameworks"},
+    "encoded_scan_limited": {"asi": "ASI06", "maestro_layer": "data_operations"},
     "role_switch_delimiter": {"asi": "ASI01", "maestro_layer": "agent_frameworks"},
     "zero_width_obfuscation": {"asi": "ASI01", "maestro_layer": "agent_frameworks"},
 }
@@ -257,6 +258,7 @@ _RUNTIME_RULE_TEXT = {
     "surface_mutation": "A declared tool changed definition within one session",
     "tool_description_poisoning": "Tool declaration contains a model-directed instruction",
     "tool_description_hidden_unicode": "Tool declaration contains invisible or bidi characters",
+    "encoded_scan_limited": "Encoded argument scan reached its decoded-byte budget",
     "unexpected_egress_host": "Tool call reached an undeclared host",
     "premature_call": "tools/call issued before notifications/initialized",
     "call_before_declaration": "tools/call before any tools/list was seen",
@@ -331,6 +333,8 @@ def _runtime_rule_object(ann) -> dict:
         short = _RUNTIME_RULE_TEXT[sub]
     elif sub.startswith("pii_in_result_"):
         short = "Secret or PII leaked back in a tool result"
+    elif sub.startswith("pii_encoded_"):
+        short = "Encoded secret or PII in tool-call arguments"
     elif sub.startswith("pii_"):
         short = "Secret or PII in tool-call arguments"
     else:

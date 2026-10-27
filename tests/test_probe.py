@@ -203,7 +203,7 @@ class TestProbeCli(_FakeServer, unittest.TestCase):
             rc = probe_mod.main(["--json", "--log-dir", str(self.log_dir),
                                  "--call", "echo", '{"text": "hi"}',
                                  "--", *self.cmd("ok")])
-        self.assertEqual(rc, 0)
+        self.assertEqual(rc, 0, buf.getvalue())
         self.assertEqual(json.loads(buf.getvalue())["called"], ["echo"])
 
     def test_usage_errors_exit_2(self):

@@ -186,8 +186,11 @@ the text output prints both values. The analyzer's version is a property of
 the reader; it is not written into a log the reader merely opens, and opening
 a log with a newer glassport does not upgrade what the log recorded.
 
-The current fold is `glassport.detectors/2`. It differs from `/1` in how a
-gate's own actions enter correlation:
+The current engine is `glassport.detectors/3`. It adds finding-only live
+declaration mutation, description poisoning, and bounded encoded-argument
+analysis. Journals recorded under `/2` are unsupported by a `/3` reader.
+
+The `/2` fold differed from `/1` in how a gate's own actions enter correlation:
 
 - A client request the gate refuses is folded for analysis (its event, its
   stamps, and the session-state fold are exactly those of a forwarded
