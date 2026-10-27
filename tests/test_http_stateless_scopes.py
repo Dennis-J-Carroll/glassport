@@ -309,6 +309,27 @@ class TestStatelessEnforcement(ScopeCase):
 
 
 class TestScopeReplay(ScopeCase):
+    def test_concurrent_strict_scope_bundle_verifies(self):
+        from glassport import bundle
+        self.proxy(strict=True)
+        StatelessUpstream.list_delay = 0.2
+        threads = [threading.Thread(target=self.send, args=('tools/list', rid))
+                   for rid in range(1, 4)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        self.settle()
+        StatelessUpstream.list_delay = 0.0
+        self.assertEqual(self.call('search', 4), ('forwarded', 1))
+        self.assertEqual(self.call('nope', 5), ('blocked', 0))
+        self.observer.close()
+        output = self.root / 'bundle'
+        bundle.build_bundle(sorted((self.root / 'wire').glob('*.jsonl')),
+                            self.root / 'decisions', None, output)
+        verified = bundle.verify_bundle(output)
+        self.assertEqual(bundle.verify_exit_code(verified), 0, verified)
+
     def test_interleaved_scope_decisions_replay_as_equivalent(self):
         """One scope epoch carries many interleaved exchanges; intent and
         delivery linkage must still replay from the wire log."""

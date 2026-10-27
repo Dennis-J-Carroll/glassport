@@ -201,6 +201,22 @@ class TestIntentAndDelivery(JournalCase):
 
 
 class TestReplayPositiveControl(JournalCase):
+    def test_intents_recorded_out_of_wire_order_replay_equivalently(self):
+        lease = self.session()
+        first = lease.record('c2s', wire(id=4, method='tools/call',
+                                         params={'name': 'search', 'arguments': {'q': 'A'}}))
+        second = lease.record('c2s', wire(id=5, method='tools/call',
+                                          params={'name': 'search', 'arguments': {'q': 'B'}}))
+        self.assertLess(first.seq, second.seq)
+        for observation in (second, first):
+            intent = self.journal.record_intent(lease.context.epoch, observation)
+            self.journal.record_delivery(intent, dj.OUTCOME_SENT,
+                                         code='upstream_response', status=200)
+        lease.release()
+        result = self.verify(lease)
+        self.assertEqual(result.status, 'equivalent', result.as_dict())
+        self.assertEqual(result.compared, 2)
+
     def test_default_configuration_epoch_replays_as_equivalent(self):
         """The control that keeps every other replay test from being vacuous.
 
@@ -599,13 +615,33 @@ class TestMalformedArtifacts(JournalCase):
         self.assertEqual(result.reasons, ['no_comparable_records'])
         self.assertEqual(result.not_analyzable, 1)
 
-    def test_out_of_order_journal_records_are_unsupported(self):
+    def test_duplicate_comparable_intent_is_unsupported(self):
         lease = self.prepared()
         path = self.journal.path_for(lease.context.epoch)
         records = [json.loads(x) for x in path.read_text().splitlines() if x.strip()]
         intent = [r for r in records if r['kind'] == 'intent'][0]
-        rewrite_chained(path, records + [dict(intent, n=99, event_seq=1)])
-        self.assertEqual(self.verify(lease).reasons, ['journal_reordered'])
+        rewrite_chained(path, records + [dict(intent, n=99)])
+        result = self.verify(lease)
+        self.assertEqual(result.status, 'unsupported')
+        self.assertEqual(result.reasons, ['journal_duplicate_intent'])
+
+    def test_swapped_intents_without_rechaining_fail_chain(self):
+        lease = self.session()
+        self.observed(lease, wire(id=4, method='tools/call',
+                                  params={'name': 'search', 'arguments': {}}))
+        self.observed(lease, wire(id=5, method='tools/call',
+                                  params={'name': 'search', 'arguments': {}}))
+        lease.release()
+        self.journal.close()
+        path = self.journal.path_for(lease.context.epoch)
+        lines = path.read_bytes().splitlines(keepends=True)
+        positions = [index for index, line in enumerate(lines)
+                     if json.loads(line).get('kind') == 'intent']
+        lines[positions[0]], lines[positions[1]] = lines[positions[1]], lines[positions[0]]
+        path.write_bytes(b''.join(lines))
+        result = self.verify(lease)
+        self.assertEqual(result.status, 'divergent')
+        self.assertEqual(result.reasons, ['journal_chain_mismatch'])
 
     def test_metrics_lines_and_custom_limits_survive_replay(self):
         observer = HTTPObserver(self.root / 'wire5',

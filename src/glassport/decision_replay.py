@@ -245,7 +245,7 @@ def verify_journal(journal_path, wire_path, *, patterns=None) -> ReplayResult:
                                       "replayed_action": None})
             return result
 
-    previous = None
+    comparable = []
     for record in intents:
         seq = record.get("event_seq")
         if record.get("faults"):
@@ -257,9 +257,17 @@ def verify_journal(journal_path, wire_path, *, patterns=None) -> ReplayResult:
         if not isinstance(seq, int) or isinstance(seq, bool):
             result.not_analyzable += 1
             continue
-        if previous is not None and seq <= previous:
-            return _unsupported("journal_reordered", epoch)
-        previous = seq
+        comparable.append(record)
+
+    # Concurrent HTTP requests can append intents in a different order from
+    # their locked wire writes. Chain and wire-line digests were checked above
+    # in file order; only decision comparison follows wire sequence order.
+    comparable.sort(key=lambda record: record["event_seq"])
+    if any(left["event_seq"] == right["event_seq"]
+           for left, right in zip(comparable, comparable[1:])):
+        return _unsupported("journal_duplicate_intent", epoch)
+    for record in comparable:
+        seq = record["event_seq"]
         if seq not in by_seq:
             result.missing_evidence.append(seq)
             continue
