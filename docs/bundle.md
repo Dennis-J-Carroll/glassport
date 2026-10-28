@@ -85,6 +85,8 @@ for resistance to that rewrite.
 
 ## Stdio verification scope
 
+For journal-enabled stdio captures, the wire log records what the tap received before relay, so an s2c entry does not prove the client received it; passive wrap retains post-write logging.
+
 A clean stdio `gate` or `wrap --journal` capture can verify exit `0`: detector analysis and policy
 candidates reproduce, and every client line has one intent plus one linked
 delivery. `Gate.check_c2s` remains the only blocking authority. The journal

@@ -755,6 +755,8 @@ onto this engine. See [the API, bounds, validation, and implementation record](p
 
 ## Stdio decision bundles
 
+For journal-enabled stdio captures, the wire log records what the tap received before relay, so an s2c entry does not prove the client received it; passive wrap retains post-write logging.
+
 Stdio `gate` writes decision journals by default alongside its session log.
 Plain `wrap` and internal probe captures remain passive: no live detector
 analysis or journal, and bundles verify `2` (`no_journal_for_path`). Use
