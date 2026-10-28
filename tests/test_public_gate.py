@@ -46,7 +46,7 @@ class TestPublicGate(unittest.TestCase):
         max_state_bytes max_tools n outcome path_sha256 pattern_digest
         pattern_snapshot_exact pattern_status persisted port prev_sha256 records
         registry_limits remote scheme session_limits status wire_b64_sha256
-        wire_entry_sha256
+        wire_entry_sha256 gate_action reasons
     """.split())
 
     @classmethod
@@ -65,6 +65,9 @@ class TestPublicGate(unittest.TestCase):
                      "url_userinfo", "url_query", "url_fragment", "url_path",
                      "header_values", "stdio_decoded_text_no_raw_bytes",
                      "no_journal_for_path", "default_profile", "strict_profile",
+                     "stdio_gate_reasons_not_replayed", "stdio_written",
+                     "stdio_write_failed", "stdio_gate_blocked",
+                     "stdio_gate_strict_blocked", "blocked", "block", "unknown",
                      "authorization_not_evaluated", "no_signature",
                      "public_redaction_not_replay_equivalent",
                      "public_raw_bytes_removed", "public_peer_text_removed",

@@ -1476,7 +1476,10 @@ def run_tap(server_cmd: list[str], log_dir: Path,
             session_duration_s=round(time.time() - session_start, 3))
         log.close()
     if journal is not None:
-        journal.close()
+        try:
+            journal.close()
+        except Exception:
+            pass
     log_note = str(log_path) if log is not None else "(logging disabled)"
     suffix = f"; blocked {gate.blocked_count} call(s)" \
         if gate is not None and gate.blocked_count else ""

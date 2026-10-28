@@ -2,6 +2,34 @@
 from __future__ import annotations
 
 
+STDIO_GATE_LIMIT = "stdio_gate_reasons_not_replayed"
+
+
+def stdio_gate_reasons(entries) -> list[str]:
+    """Fixed codes for gate facts whose justification replay does not re-judge."""
+    from glassport.evidence import GATE_ACTIONS, GATE_REASONS
+    reasons = set()
+    for entry in entries:
+        gate = entry.get("gate")
+        if not isinstance(gate, dict):
+            continue
+        action = gate.get("action")
+        if action in ("injected", None):
+            continue
+        reason = gate.get("reason")
+        if action == "blocked" and (reason == "gate_blocked" or
+                                     reason is None and "declared" in gate):
+            continue
+        if isinstance(action, str) and action in GATE_ACTIONS and action != "blocked":
+            reasons.add(action)
+        if reason is not None or action == "blocked":
+            reasons.add(reason if isinstance(reason, str) and reason in GATE_REASONS
+                        else "redacted")
+        for extra in gate.get("also_skipped", []) if isinstance(gate.get("also_skipped"), list) else []:
+            reasons.add(extra if isinstance(extra, str) and extra in GATE_REASONS else "redacted")
+    return sorted(reasons)
+
+
 def compute_limits(header, trailer, journal_records, wire_entries) -> list[dict]:
     """Return named evidence limitations; never infer delivery or authority.
 
@@ -22,6 +50,9 @@ def compute_limits(header, trailer, journal_records, wire_entries) -> list[dict]
     if header is not None and header.get("transport") == "stdio":
         missing_raw = sum(1 for e in entries if e.get("dir") in ("c2s", "s2c")
                           and "wire_b64" not in e)
+        reasons = stdio_gate_reasons(entries)
+        if reasons:
+            out.append({"code": STDIO_GATE_LIMIT, "reasons": reasons})
         if missing_raw:
             out.append({"code": "stdio_decoded_text_no_raw_bytes",
                         "entries": missing_raw})

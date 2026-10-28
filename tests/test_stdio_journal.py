@@ -271,3 +271,198 @@ class TestStdioObserver(unittest.TestCase):
                 capture.send('c2s', b'\n')
             self.assertEqual(capture.records()[0]['pattern_digest'],
                              __import__('glassport.decision_journal', fromlist=['pattern_profile']).pattern_profile(snapshot).digest)
+
+
+class TestStdioReplay(unittest.TestCase):
+    def capture(self, root, *, pii=False, undeclared=False):
+        capture = Capture(root, tap.Gate())
+        capture.declare()
+        capture.call('ghost' if undeclared else 'search',
+                     {'q': 'sk-' + 'A' * 40} if pii else {})
+        capture.close()
+        return capture
+
+    def test_clean_pii_and_undeclared_bundles(self):
+        from glassport.decision_replay import verify_journal
+        from tests.test_public_gate import assert_public_strings
+        for scenario in ('clean', 'pii', 'undeclared'):
+            with self.subTest(scenario=scenario), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                capture = self.capture(root, pii=scenario == 'pii', undeclared=scenario == 'undeclared')
+                replay = verify_journal(capture.journal.path_for(capture.observer.epoch), capture.path)
+                self.assertEqual(replay.status, 'equivalent', replay.as_dict())
+                manifest = bundle.build_bundle([capture.path], None, None, root / 'bundle', redact=True)
+                verdict = bundle.verify_bundle(root / 'bundle')
+                self.assertEqual(bundle.verify_exit_code(verdict), 0, verdict)
+                limits = [item for item in manifest['limits'] if item['code'] == 'stdio_gate_reasons_not_replayed']
+                self.assertEqual(limits, [{'code': 'stdio_gate_reasons_not_replayed',
+                                           'reasons': ['pii_exfiltration']}] if scenario == 'pii' else [])
+                assert_public_strings(self, root / 'bundle/public')
+                self.assertEqual(bundle.verify_exit_code(bundle.verify_bundle(root / 'bundle/public', public=True)), 2)
+
+    def test_quarantine_limit_covers_server_actions_without_intents(self):
+        from glassport.limits import stdio_gate_reasons
+        entries = [{'gate': {'action': action, 'reason': 'quarantine_scan_error'}}
+                   for action in ('quarantined', 'quarantine_replacement', 'quarantine_withheld',
+                                  'quarantine_dropped', 'quarantine_scan_error')]
+        self.assertEqual(stdio_gate_reasons(entries), sorted({
+            'quarantined', 'quarantine_replacement', 'quarantine_withheld',
+            'quarantine_dropped', 'quarantine_scan_error'}))
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            capture = Capture(root, tap.Gate(strict=True))
+            capture.declare()
+            before = len([r for r in capture.records() if r['kind'] == 'intent'])
+            with patch.object(capture.gate, 'check_s2c', side_effect=RuntimeError('fault')):
+                capture.send('s2c', {'id': 9, 'result': {}})
+            self.assertEqual(len([r for r in capture.records() if r['kind'] == 'intent']), before)
+            capture.close()
+            manifest = bundle.build_bundle([capture.path], None, None, root / 'bundle')
+            self.assertIn({'code': 'stdio_gate_reasons_not_replayed',
+                           'reasons': ['quarantine_dropped', 'quarantine_scan_error']}, manifest['limits'])
+            self.assertEqual(bundle.verify_exit_code(bundle.verify_bundle(root / 'bundle')), 0)
+
+    def test_missing_intent_and_analysis_fault_cannot_certify_prefix(self):
+        from glassport.decision_replay import verify_journal
+        for scenario in ('missing', 'fault'):
+            with self.subTest(scenario=scenario), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                capture = Capture(root)
+                capture.declare()
+                if scenario == 'missing':
+                    with patch.object(capture.journal, 'record_intent', return_value=None):
+                        capture.call()
+                else:
+                    with patch.object(capture.observer.builder, 'feed', side_effect=RuntimeError('fault')):
+                        capture.call()
+                capture.close()
+                result = verify_journal(capture.journal.path_for(capture.observer.epoch), capture.path)
+                self.assertEqual(result.status, 'incomplete', result.as_dict())
+                self.assertIn('stdio_intent_missing' if scenario == 'missing' else
+                              'recorded_fault_not_re_executed', result.reasons)
+
+    def test_tampering_and_undeclared_consistency(self):
+        from glassport.decision_replay import verify_journal
+        from glassport.decision_journal import GENESIS_SHA256
+        for scenario in ('chain', 'wire', 'swapped', 'deleted-final', 'unproven', 'missing-limit'):
+            with self.subTest(scenario=scenario), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                capture = self.capture(root, undeclared=True)
+                journal = capture.journal.path_for(capture.observer.epoch)
+                if scenario == 'unproven':
+                    records = capture.records()
+                    for record in records:
+                        if record['kind'] == 'intent' and record['candidate_block']:
+                            record['candidate_block'] = False
+                    previous = GENESIS_SHA256
+                    data = b''
+                    for record in records:
+                        record['prev_sha256'] = previous
+                        raw = line(record)
+                        previous = hashlib.sha256(raw).hexdigest()
+                        data += raw
+                    journal.write_bytes(data)
+                out = root / 'bundle'
+                manifest = bundle.build_bundle([capture.path], None, None, out)
+                copied_journal = out / manifest['evidence']['epochs'][0]['journal']['path']
+                copied_wire = out / manifest['evidence']['epochs'][0]['wire']['path']
+                raw_lines = copied_journal.read_bytes().splitlines(keepends=True)
+                if scenario == 'chain':
+                    record = json.loads(raw_lines[1]); record['prev_sha256'] = '1' * 64
+                    raw_lines[1] = line(record)
+                    copied_journal.write_bytes(b''.join(raw_lines))
+                elif scenario == 'swapped':
+                    positions = [i for i, raw in enumerate(raw_lines) if json.loads(raw)['kind'] == 'intent']
+                    a, b = positions[:2]
+                    raw_lines[a], raw_lines[b] = raw_lines[b], raw_lines[a]
+                    copied_journal.write_bytes(b''.join(raw_lines))
+                elif scenario == 'wire':
+                    copied_wire.write_bytes(copied_wire.read_bytes().replace(b'ghost', b'other'))
+                elif scenario == 'deleted-final':
+                    copied_journal.write_bytes(b''.join(raw_lines[:-1]))
+                elif scenario == 'missing-limit':
+                    manifest['limits'].append({'code': 'stdio_gate_reasons_not_replayed', 'reasons': ['redacted']})
+                    (out / 'manifest.json').write_bytes(bundle.canonical_bytes(manifest))
+                result = bundle.verify_bundle(out)
+                self.assertEqual(bundle.verify_exit_code(result), 1, result)
+                if scenario == 'unproven':
+                    self.assertIn('stdio_undeclared_block_unproven', result['integrity']['reasons'])
+                if scenario == 'missing-limit':
+                    self.assertIn('stdio_gate_limit_mismatch', result['integrity']['reasons'])
+                if scenario in ('chain', 'swapped', 'wire'):
+                    replay = verify_journal(copied_journal, copied_wire)
+                    self.assertEqual(replay.status, 'divergent')
+                    self.assertIn('wire_digest_mismatch' if scenario == 'wire' else
+                                  'journal_chain_mismatch', replay.reasons)
+
+    def test_concurrent_pumps_replay_in_wire_order(self):
+        import threading
+        from glassport.decision_replay import verify_journal
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            capture = Capture(root, tap.Gate(idempotency_max_repeats=10000))
+            capture.declare()
+            start = threading.Barrier(2)
+
+            def client():
+                start.wait()
+                for index in range(100):
+                    capture.call('ghost' if index % 2 else 'search', {'q': str(index)}, index + 10)
+
+            def server():
+                start.wait()
+                for index in range(100):
+                    capture.send('s2c', {'jsonrpc': '2.0', 'method': 'notifications/message',
+                                         'params': {'data': str(index)}})
+
+            workers = [threading.Thread(target=client), threading.Thread(target=server)]
+            for worker in workers:
+                worker.start()
+            for worker in workers:
+                worker.join(10)
+                self.assertFalse(worker.is_alive())
+            capture.close()
+            result = verify_journal(capture.journal.path_for(capture.observer.epoch), capture.path)
+            self.assertEqual(result.status, 'equivalent', result.as_dict())
+            self.assertEqual(capture.upstream.getvalue().count(b'"tools/call"'), 50)
+            bundle.build_bundle([capture.path], None, None, root / 'bundle')
+            self.assertEqual(bundle.verify_exit_code(bundle.verify_bundle(root / 'bundle')), 0)
+
+    def test_hostile_frames_are_total_and_cannot_veto_gate(self):
+        hostile = [b'\xff\n', b'{"id":1,"method":[],"params":[]}\n',
+                   b'{"id":[],"method":"tools/call","params":{"name":[]}}\n',
+                   b'{"id":true,"method":"tools/call","params":null}\n',
+                   b'{"id":3,"method":"tools/call","params":{"name":"\\ud800"}}\n',
+                   b'[' * 1500 + b'0' + b']' * 1500 + b'\n']
+        with tempfile.TemporaryDirectory() as tmp:
+            capture = Capture(Path(tmp), tap.Gate())
+            capture.declare()
+            for raw in hostile:
+                capture.send('c2s', raw)
+            capture.close()
+            intents = [r for r in capture.records() if r['kind'] == 'intent']
+            self.assertEqual(len(intents), len(hostile) + 1)
+            for record in intents:
+                if record['faults']:
+                    self.assertTrue(record['enforce'], record)
+            self.assertEqual(capture.upstream.getvalue().count(b'"tools/call"'), 0)
+
+
+class TestStdioRunTap(unittest.TestCase):
+    def test_wrap_creates_journal_by_default_and_relays_exact_bytes(self):
+        import os
+        import subprocess
+        import sys
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            payload = b'{"jsonrpc":"2.0","id":1,"method":"ping"}\n\n'
+            code = "from glassport.tap import run_tap; from pathlib import Path; import sys; run_tap([sys.executable, '-c', 'import sys; sys.stdout.buffer.write(sys.stdin.buffer.read()); sys.stdout.buffer.flush()'], Path(sys.argv[1]))"
+            result = subprocess.run([sys.executable, '-c', code, str(root)], input=payload,
+                                    capture_output=True, timeout=15,
+                                    env=dict(os.environ, PYTHONPATH=str(Path(tap.__file__).parents[1])))
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout, payload)
+            self.assertEqual(len(list((root / 'decisions').glob('*.jsonl'))), 1)
+            bundle.build_bundle(list(root.glob('*.jsonl')), None, None, root / 'bundle')
+            verdict = bundle.verify_bundle(root / 'bundle')
+            self.assertEqual(bundle.verify_exit_code(verdict), 0, verdict)
