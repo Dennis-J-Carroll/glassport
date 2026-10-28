@@ -68,6 +68,7 @@ import os
 import re
 import secrets
 import shlex
+import secrets
 import shutil
 import signal
 import subprocess
@@ -119,6 +120,8 @@ def build_session_header(*, transport: str, mode: str, strict: bool = False,
               "policy_version": POLICY_VERSION,
               "detector_engine": DETECTOR_ENGINE_VERSION,
               "journal_schema": JOURNAL_SCHEMA, "started_at": _now_iso()}
+    if transport == "stdio":
+        header["epoch"] = secrets.token_hex(16)
     if remote_url is not None:
         parsed = urlsplit(remote_url)
         header["remote"] = {
@@ -329,7 +332,8 @@ class SessionLog:
         else:
             # Non-POSIX: st_mode is advisory; do not fake enforcement.
             self._fh = open(path, "ab", buffering=0)
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
+        self.header = header
         self._seq = 0
         self.write_failures = 0
         self._warned_write_failure = False
@@ -403,15 +407,27 @@ class SessionLog:
         :meth:`write_entry` under one lock; a caller that must fold an entry
         before it knows every outer fact uses those two steps directly.
         """
+        receipt = self.record_with_digest(
+            direction, line, gate, metadata, observation=observation,
+            wire_bytes=wire_bytes, sequence=sequence)
+        return receipt[0] if receipt else None
+
+    def record_with_digest(self, direction: str, line: bytes,
+                           gate: dict | None = None, metadata: dict | None = None,
+                           *, observation=None, wire_bytes=None, sequence=None):
+        """Build once and append once; return the exact entry and line digest.
+
+        The reentrant lock keeps sequence allocation and write_entry atomic.
+        Existing record callers retain their original envelope-only receipt.
+        """
         try:
             with self._lock:
-                seq = self._claim_sequence(sequence)
+                seq = self._seq + 1 if sequence is None else sequence
                 entry, text = build_session_entry(
                     direction, line, gate=gate, metadata=metadata,
                     observation=observation, wire_bytes=wire_bytes, seq=seq)
-                self._write(text + "\n")
-                self._entries_written += 1
-                return entry
+                digest = self.write_entry(entry, text)
+                return (entry, digest) if digest else None
         except Exception:
             return None  # logging is best-effort; the relay is sacred
 
@@ -1251,11 +1267,11 @@ def pump(src, dst, log: SessionLog | None, direction: str,
                             {"action": "gate_skipped", "reason": "gate_check_error"})
                 if action == "block" and info is not None:
                     if log is not None:
-                        log.record(direction, line, gate=info)
+                        log.record_with_digest(direction, line, gate=info)
                     if response is not None and client_write is not None:
                         client_write(response)
                         if log is not None:
-                            log.record("s2c", response,
+                            log.record_with_digest("s2c", response,
                                        gate={"action": "injected",
                                              "tool": info["tool"]})
                     continue
@@ -1284,11 +1300,11 @@ def pump(src, dst, log: SessionLog | None, direction: str,
                         else ("forward", None, {"action": "quarantine_scan_error"}))
                 if s2c_action == "drop":
                     if log is not None:
-                        log.record(direction, line, gate=s2c_info)
+                        log.record_with_digest(direction, line, gate=s2c_info)
                     continue
                 if s2c_action == "rewrite" and s2c_new_line is not None:
                     if log is not None:
-                        log.record(direction, line, gate=s2c_info)
+                        log.record_with_digest(direction, line, gate=s2c_info)
                     line = s2c_new_line
                     # The common log call below records the replacement once.
                     gate_info = {**(s2c_info or {}), "action": "quarantine_replacement"}
@@ -1302,7 +1318,7 @@ def pump(src, dst, log: SessionLog | None, direction: str,
                 dst.write(line)
                 dst.flush()
             if log is not None:
-                log.record(direction, line, gate=gate_info)
+                log.record_with_digest(direction, line, gate=gate_info)
     except (BrokenPipeError, ValueError, OSError):
         pass  # one side hung up; let the session wind down
     finally:

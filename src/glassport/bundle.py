@@ -101,7 +101,8 @@ def _wire_facts(records: list[dict], lines: list[bytes]):
               if isinstance(obs, dict) and isinstance(obs.get("epoch"), str)}
     if len(epochs) > 1:
         raise ValueError("wire_epoch_mismatch: multiple epochs in one log")
-    epoch = next(iter(epochs)) if epochs else "stdio"
+    header_epoch = header.get("epoch") if header and header.get("transport") == "stdio" else None
+    epoch = next(iter(epochs)) if epochs else header_epoch or "stdio"
     return header, trailer, entries, seqs, pretrailer, epoch
 
 
