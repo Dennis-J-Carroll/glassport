@@ -91,7 +91,8 @@ DELIVERY_CODES = frozenset({
     "not_begun", "framing_rejected", "connect_failed", "send_indeterminate",
     "response_indeterminate", "upstream_response", "body_transfer_failed",
     "handler_aborted", "http_gate_blocked", "http_gate_strict_blocked",
-    "invalid_mcp_request", "unspecified"})
+    "invalid_mcp_request", "unspecified", "stdio_written", "stdio_write_failed",
+    "stdio_gate_blocked", "stdio_gate_strict_blocked"})
 
 # A candidate BLOCK computed alongside any of these is never enforced: each one
 # says the analysis pass that produced it was itself incomplete, so the
@@ -368,6 +369,9 @@ class DecisionJournal:
             raise ValueError(f"unknown journal mode {mode!r}")
         if type(strict) is not bool or (strict and mode != MODE_GATE):
             raise ValueError("strict requires gate mode and a boolean value")
+        self.transport = getattr(observer, "transport", "http")
+        if self.transport not in ("stdio", "http"):
+            raise ValueError("unknown journal transport")
         self.mode = mode
         self.strict = strict
         self._lock = threading.Lock()
@@ -482,6 +486,7 @@ class DecisionJournal:
             "kind": "profile", "schema": JOURNAL_SCHEMA, "epoch": epoch,
             "n": next(self._counter), "ts": _now_iso(), "mode": self.mode,
             "policy_version": POLICY_VERSION, "strict": self.strict,
+            "transport": self.transport,
             "authorization": {"status": "not_evaluated"},
             "detector_engine": DETECTOR_ENGINE_VERSION,
             "pattern_digest": profile.digest,
@@ -565,6 +570,8 @@ class DecisionJournal:
         """
         if self._closed or not isinstance(epoch, str) or not epoch:
             return None
+        if self.transport == "stdio" and enforce is None:
+            return None  # Only Gate.check_c2s can supply the stdio verdict.
         enforce = bool(self.evaluate(observation)) if enforce is None else bool(enforce)
         # Epoch ids are locally generated hex today, so this is a no-op for
         # every real caller — and a guarantee that no future one can route an
@@ -606,6 +613,9 @@ class DecisionJournal:
             # "nothing to attribute the decision to" case used above —
             # unavailable evidence stays fail-open.
             return None
+        if self.transport == "stdio" and getattr(observation, "analysis_fault", None):
+            faults.append({"detector": "stdio_observer", "error_type":
+                           _safe_token(observation.analysis_fault)})
         wire_seq = getattr(observation, "seq", None)
         if isinstance(wire_seq, bool) or not isinstance(wire_seq, int):
             wire_seq = None
@@ -626,9 +636,10 @@ class DecisionJournal:
             # deliberately separate so the gap between them stays auditable.
             "candidate_block": action == policy.Action.BLOCK.value,
             "enforce": enforce,
-            "evidence_level": evidence.intent_level(
+            "evidence_level": (evidence.gate_level(getattr(observation, "gate", None) or {})
+                if self.transport == "stdio" else evidence.intent_level(
                 analyzed=analyzed, candidate_block=action == policy.Action.BLOCK.value,
-                enforce=enforce, strict_gap=bool(self.strict_reason(observation))),
+                enforce=enforce, strict_gap=bool(self.strict_reason(observation)))),
             "wire_seq": wire_seq,
             "wire_entry_sha256": (getattr(observation, "wire_entry_sha256", None)
                                   if getattr(observation, "persisted", False) else None),
@@ -655,7 +666,7 @@ class DecisionJournal:
                       analyzed)
 
     def record_delivery(self, intent, outcome, *, code=None, status=None,
-                        reason=None) -> bool:
+                        reason=None, gate=None) -> bool:
         """Record the terminal delivery outcome for one recorded intent.
 
         A "sent" outcome means the complete request left the local socket and
@@ -687,6 +698,18 @@ class DecisionJournal:
                 outcome=outcome, code=code, candidate_action=intent.action,
                 analyzed=intent.analyzed),
         }
+        if self.transport == "stdio":
+            marker = gate if isinstance(gate, dict) else {}
+            record["evidence_level"] = evidence.gate_level(marker)
+            action = marker.get("action")
+            if isinstance(action, str) and action in evidence.GATE_ACTIONS:
+                record["gate_action"] = action
+            if marker:
+                reason = marker.get("reason")
+                if reason is None and action == "blocked" and "declared" in marker:
+                    reason = "gate_blocked"
+                record["reason"] = (reason if isinstance(reason, str)
+                                    and reason in evidence.GATE_REASONS else "redacted")
         if code == "http_gate_strict_blocked":
             record["reason"] = _safe_token(reason, default="evidence_unavailable")
         with self._lock:

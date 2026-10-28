@@ -51,6 +51,8 @@ Author: Dennis J. Carroll · 2026 (skeleton drafted with Claude)
 """
 from __future__ import annotations
 
+from contextlib import nullcontext
+
 from glassport.adapters.mcp_session import MCPTraceBuilder
 from glassport.attestation import ATTESTATION_KEY, validate_public_key
 from glassport.evidence import gate_level
@@ -1233,7 +1235,8 @@ class Gate:
 # ─────────────────────────────────────────────────────────────────
 def pump(src, dst, log: SessionLog | None, direction: str,
          gate: Gate | None = None, client_write=None,
-         dst_lock: threading.Lock | None = None) -> None:
+         dst_lock: threading.Lock | None = None,
+         observer=None, journal=None) -> None:
     """
     Read newline-delimited lines from src, relay them to dst, and tap each
     into the session log. Binary-safe for untouched lines; a gate quarantine
@@ -1248,6 +1251,31 @@ def pump(src, dst, log: SessionLog | None, direction: str,
     dst_lock serializes client-bound writes so an
     injected error can't interleave with a real server response.
     """
+    def record(direction, raw, marker=None):
+        try:
+            if observer is not None:
+                return observer.record(direction, raw, marker)
+            if log is not None:
+                log.record_with_digest(direction, raw, gate=marker)
+        except Exception:
+            pass  # optional evidence never changes transport control flow
+        return None
+
+    def intent(observation, blocked):
+        try:
+            if journal is not None and observation is not None:
+                return journal.record_intent(observer.epoch, observation, enforce=blocked)
+        except Exception:
+            pass
+        return None
+
+    def delivery(handle, outcome, code, marker):
+        try:
+            if journal is not None:
+                journal.record_delivery(handle, outcome, code=code, gate=marker)
+        except Exception:
+            pass
+
     try:
         for line in iter(src.readline, b""):
             gate_info = None   # marker for forwarded-but-noteworthy frames
@@ -1266,59 +1294,70 @@ def pump(src, dst, log: SessionLog | None, direction: str,
                             "forward", None,
                             {"action": "gate_skipped", "reason": "gate_check_error"})
                 if action == "block" and info is not None:
-                    if log is not None:
-                        log.record_with_digest(direction, line, gate=info)
+                    handle = intent(record(direction, line, info), True)
+                    # A refusal is already terminal even if the client pipe fails.
+                    code = ("stdio_gate_strict_blocked"
+                            if gate_level(info) == "blocked_evidence_gap"
+                            else "stdio_gate_blocked")
+                    delivery(handle, "blocked", code, info)
                     if response is not None and client_write is not None:
                         client_write(response)
-                        if log is not None:
-                            log.record_with_digest("s2c", response,
-                                       gate={"action": "injected",
-                                             "tool": info["tool"]})
+                        record("s2c", response, {"action": "injected",
+                                                 "tool": info["tool"]})
                     continue
                 gate_info = info   # e.g. gate_skipped fail-open
                 # Before the write: the reply must find its request folded.
                 gate.observe_c2s(line)
-            elif gate is not None and direction == "s2c":
-                try:
-                    gate.observe_s2c(line)
-                except Exception:
-                    # never let a surface-harvest defect stop the s2c relay
-                    gate_info = {"action": "gate_skipped",
-                                 "reason": "surface_observe_error"}
-                try:
-                    s2c_action, s2c_new_line, s2c_info = gate.check_s2c(line)
-                except Exception:
-                    strict_now = getattr(gate, "strict", False)
+            # Gate publication on s2c and observer folding share this order.
+            # c2s gate checks above remain outside the observer lock.
+            with (observer.lock if observer is not None and direction == "s2c"
+                  else nullcontext()):
+                if gate is not None and direction == "s2c":
                     try:
-                        strict_now = strict_now and gate._enforcement_on()
+                        gate.observe_s2c(line)
                     except Exception:
-                        pass   # strict: an unreadable override keeps enforcing
-                    s2c_action, s2c_new_line, s2c_info = (
-                        ("drop", None, {"action": "quarantine_dropped",
-                                        "reason": "quarantine_scan_error"})
-                        if strict_now
-                        else ("forward", None, {"action": "quarantine_scan_error"}))
-                if s2c_action == "drop":
-                    if log is not None:
-                        log.record_with_digest(direction, line, gate=s2c_info)
-                    continue
-                if s2c_action == "rewrite" and s2c_new_line is not None:
-                    if log is not None:
-                        log.record_with_digest(direction, line, gate=s2c_info)
-                    line = s2c_new_line
-                    # The common log call below records the replacement once.
-                    gate_info = {**(s2c_info or {}), "action": "quarantine_replacement"}
-                elif s2c_info is not None:
-                    gate_info = s2c_info
-            if dst_lock is not None:
-                with dst_lock:
+                        # never let a surface-harvest defect stop the s2c relay
+                        gate_info = {"action": "gate_skipped",
+                                     "reason": "surface_observe_error"}
+                    try:
+                        s2c_action, s2c_new_line, s2c_info = gate.check_s2c(line)
+                    except Exception:
+                        strict_now = getattr(gate, "strict", False)
+                        try:
+                            strict_now = strict_now and gate._enforcement_on()
+                        except Exception:
+                            pass   # strict: an unreadable override keeps enforcing
+                        s2c_action, s2c_new_line, s2c_info = (
+                            ("drop", None, {"action": "quarantine_dropped",
+                                            "reason": "quarantine_scan_error"})
+                            if strict_now
+                            else ("forward", None, {"action": "quarantine_scan_error"}))
+                    if s2c_action == "drop":
+                        record(direction, line, s2c_info)
+                        continue
+                    if s2c_action == "rewrite" and s2c_new_line is not None:
+                        record(direction, line, s2c_info)
+                        line = s2c_new_line
+                        # The common log call below records the replacement once.
+                        gate_info = {**(s2c_info or {}), "action": "quarantine_replacement"}
+                    elif s2c_info is not None:
+                        gate_info = s2c_info
+                observation = record(direction, line, gate_info)
+            handle = intent(observation, False) if direction == "c2s" else None
+            try:
+                if dst_lock is not None:
+                    with dst_lock:
+                        dst.write(line)
+                        dst.flush()
+                else:
                     dst.write(line)
                     dst.flush()
-            else:
-                dst.write(line)
-                dst.flush()
-            if log is not None:
-                log.record_with_digest(direction, line, gate=gate_info)
+            except (BrokenPipeError, ValueError, OSError):
+                if direction == "c2s":
+                    delivery(handle, "unknown", "stdio_write_failed", gate_info)
+                raise
+            if direction == "c2s":
+                delivery(handle, "sent", "stdio_written", gate_info)
     except (BrokenPipeError, ValueError, OSError):
         pass  # one side hung up; let the session wind down
     finally:
@@ -1358,6 +1397,18 @@ def run_tap(server_cmd: list[str], log_dir: Path,
     log = open_session_log(log_path, transport="stdio", mode=mode,
                            strict=bool(gate is not None and gate.strict))
 
+    observer = journal = None
+    if log is not None:
+        try:
+            from glassport.stdio_sessions import StdioObserver
+            from glassport.decision_journal import DecisionJournal
+            observer = StdioObserver(log)
+            journal = DecisionJournal(log_dir / "decisions", observer,
+                                      mode="gate" if gate else "observe",
+                                      strict=gate.strict if gate else False)
+        except Exception:
+            pass  # capture/analysis setup cannot prevent the child from running
+
     # Announce on stderr only — stdout belongs to the protocol.
     print(f"[glassport] tapping: {shlex.join(server_cmd)}", file=sys.stderr)
     print(f"[glassport] session log: {log_path}", file=sys.stderr)
@@ -1396,10 +1447,12 @@ def run_tap(server_cmd: list[str], log_dir: Path,
     threads = [
         threading.Thread(target=pump, daemon=True,
                          args=(stdin_b, child.stdin, log, "c2s"),
-                         kwargs={"gate": gate, "client_write": client_write}),
+                         kwargs={"gate": gate, "client_write": client_write,
+                                 "observer": observer, "journal": journal}),
         threading.Thread(target=pump, daemon=True,
                          args=(child.stdout, stdout_b, log, "s2c"),
-                         kwargs={"gate": gate, "dst_lock": out_lock}),
+                         kwargs={"gate": gate, "dst_lock": out_lock,
+                                 "observer": observer}),
         threading.Thread(target=pump_stderr, daemon=True,
                          args=(child.stderr, sys.stderr.buffer)),
     ]
@@ -1422,6 +1475,8 @@ def run_tap(server_cmd: list[str], log_dir: Path,
             frames_blocked=gate.blocked_count if gate is not None else 0,
             session_duration_s=round(time.time() - session_start, 3))
         log.close()
+    if journal is not None:
+        journal.close()
     log_note = str(log_path) if log is not None else "(logging disabled)"
     suffix = f"; blocked {gate.blocked_count} call(s)" \
         if gate is not None and gate.blocked_count else ""
