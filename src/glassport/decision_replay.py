@@ -311,6 +311,12 @@ def verify_journal(journal_path, wire_path, *, patterns=None) -> ReplayResult:
             problems.append("unrecorded_fault")
         if decision.action.value != record.get("action"):
             problems.append("action_mismatch")
+        # Stdio historical-surface proof may accept a false candidate. Keep
+        # that redundant flag bound to the recomputed policy action, so the
+        # fallback cannot hide a rewritten candidate on an ordinary block.
+        if (transport == "stdio" and record.get("candidate_block") is not
+                (decision.action is policy.Action.BLOCK)):
+            problems.append("candidate_block_mismatch")
         if dj.findings_digest(findings) != record.get("findings_digest"):
             problems.append("findings_mismatch")
         result.compared += 1

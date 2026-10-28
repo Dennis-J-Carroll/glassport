@@ -94,8 +94,17 @@ probe captures have no journal or live analysis and verify `2`
 (`no_journal_for_path`), while retaining their unique header epochs.
 
 Replay re-judges undeclared-tool candidates. A stdio `blocked` delivery with
-`reason: gate_blocked` requires `candidate_block: true`; otherwise verification
-is contradicted, exit `1`, with `stdio_undeclared_block_unproven`.
+`reason: gate_blocked` requires `candidate_block: true`, or a wire gate marker
+whose `tool` is absent from its `declared` list and whose declared name set
+matches a **completed declaration earlier in the same wire log**, folded by
+`MCPTraceBuilder`/`SessionState` with the recorded session limits. This accepts
+an honest race: the gate used an earlier surface, then a newer listing folded
+before the blocked call was recorded. Orphaned replies, incomplete pagination,
+future declarations and invented declared sets provide no historical proof.
+A marker including its own blocked tool also provides no historical proof.
+Without either justification, verification is contradicted, exit `1`, with
+`stdio_undeclared_block_unproven`. Journal replay and all digest/linkage checks
+still apply; this rule does not excuse a tampered candidate verdict.
 
 Replay does **not** re-judge schema, PII, taint, depth, size, retries,
 attestation, batch/admission refusals, strict faults, skipped/disabled checks,

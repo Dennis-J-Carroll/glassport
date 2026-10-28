@@ -301,6 +301,91 @@ class TestStdioReplay(unittest.TestCase):
                 assert_public_strings(self, root / 'bundle/public')
                 self.assertEqual(bundle.verify_exit_code(bundle.verify_bundle(root / 'bundle/public', public=True)), 2)
 
+    def declaration_race(self, root, marker_kind='honest'):
+        capture = Capture(root, tap.Gate())
+        try:
+            capture.declare()  # completed old surface: search only
+            capture.send('c2s', {'jsonrpc': '2.0', 'id': 3, 'method': 'tools/list'})
+            check = capture.gate.check_c2s
+
+            def decide_then_publish(raw):
+                verdict = check(raw)
+                self.assertEqual(verdict[0], 'block')
+                self.assertEqual(verdict[2]['declared'], ['search'])
+                # Deterministic interleaving: gate already decided, but the call
+                # has not reached StdioObserver.record. No sleeps or scheduling bets.
+                capture.send('s2c', {'jsonrpc': '2.0', 'id': 3, 'result': {
+                    'tools': [{'name': 'search'}, {'name': 'ghost'}]}})
+                action, response, marker = verdict
+                if marker_kind == 'forged':
+                    marker = {**marker, 'declared': ['never-declared']}
+                elif marker_kind == 'self-contradicting':
+                    marker = {**marker, 'declared': ['search', 'ghost']}
+                return action, response, marker
+
+            with patch.object(capture.gate, 'check_c2s', side_effect=decide_then_publish):
+                capture.call('ghost', rid=4)
+            last_intent = next(r for r in reversed(capture.records()) if r['kind'] == 'intent')
+            self.assertTrue(last_intent['enforce'])
+            self.assertFalse(last_intent['candidate_block'])
+            self.assertEqual(capture.upstream.getvalue().count(b'"tools/call"'), 0)
+        finally:
+            capture.close()
+        bundle.build_bundle([capture.path], None, None, root / 'bundle')
+        return bundle.verify_bundle(root / 'bundle')
+
+    def test_declaration_race_verifies_honest_capture(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            verdict = self.declaration_race(Path(tmp))
+            self.assertEqual(bundle.verify_exit_code(verdict), 0, verdict)
+            self.assertEqual(verdict['analysis_reproduced']['status'], 'equivalent')
+
+    def test_declaration_race_rejects_forged_and_self_contradicting_markers(self):
+        for kind in ('forged', 'self-contradicting'):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as tmp:
+                verdict = self.declaration_race(Path(tmp), kind)
+                self.assertEqual(bundle.verify_exit_code(verdict), 1, verdict)
+                self.assertIn('stdio_undeclared_block_unproven', verdict['integrity']['reasons'])
+
+    def test_historical_exclusion_requires_completed_prior_declaration(self):
+        from dataclasses import asdict
+        from glassport.session import SessionLimits
+        profile = {'session_limits': asdict(SessionLimits())}
+        request = {'id': 1, 'method': 'tools/list'}
+        reply = {'id': 1, 'result': {'tools': [{'name': 'search'}]}}
+        block = {'id': 4, 'method': 'tools/call', 'params': {'name': 'ghost'}}
+        marker = {'action': 'blocked', 'tool': 'ghost', 'declared': ['search']}
+        for scenario in ('complete', 'empty', 'partial', 'orphan', 'future',
+                         'paginated', 'malformed', 'non-list', 'non-string'):
+            with self.subTest(scenario=scenario):
+                frames = [('c2s', request, None), ('s2c', reply, None)]
+                gate_marker = marker
+                if scenario == 'empty':
+                    frames[1] = ('s2c', {'id': 1, 'result': {'tools': []}}, None)
+                    gate_marker = {**marker, 'declared': []}
+                elif scenario in ('partial', 'paginated'):
+                    frames[1] = ('s2c', {'id': 1, 'result': {
+                        'tools': [{'name': 'search'}], 'nextCursor': 'more'}}, None)
+                    if scenario == 'paginated':
+                        frames += [('c2s', {'id': 2, 'method': 'tools/list',
+                                            'params': {'cursor': 'more'}}, None),
+                                   ('s2c', {'id': 2, 'result': {'tools': []}}, None)]
+                elif scenario == 'orphan':
+                    frames[1] = ('s2c', {**reply, 'id': 99}, None)
+                elif scenario == 'malformed':
+                    frames[1] = ('s2c', {'id': 1, 'result': {'tools': 'search'}}, None)
+                elif scenario == 'non-list':
+                    gate_marker = {**marker, 'declared': 'search'}
+                elif scenario == 'non-string':
+                    gate_marker = {**marker, 'declared': [['search']]}
+                blocked = ('c2s', block, gate_marker)
+                frames = [blocked] + frames if scenario == 'future' else frames + [blocked]
+                entries = [tap.build_session_entry(direction, line(frame), gate=gate, seq=i)[0]
+                           for i, (direction, frame, gate) in enumerate(frames, 1)]
+                proven = bundle._stdio_historical_exclusions(entries, profile)
+                expected = {len(entries)} if scenario in ('complete', 'empty', 'paginated') else set()
+                self.assertEqual(proven, expected)
+
     def test_quarantine_limit_covers_server_actions_without_intents(self):
         from glassport.limits import stdio_gate_reasons
         entries = [{'gate': {'action': action, 'reason': 'quarantine_scan_error'}}
@@ -387,7 +472,9 @@ class TestStdioReplay(unittest.TestCase):
                 result = bundle.verify_bundle(out)
                 self.assertEqual(bundle.verify_exit_code(result), 1, result)
                 if scenario == 'unproven':
-                    self.assertIn('stdio_undeclared_block_unproven', result['integrity']['reasons'])
+                    # The historical marker is honest, but rewriting the
+                    # policy candidate still contradicts detector replay.
+                    self.assertEqual(result['analysis_reproduced']['status'], 'divergent')
                 if scenario == 'missing-limit':
                     self.assertIn('stdio_gate_limit_mismatch', result['integrity']['reasons'])
                 if scenario in ('chain', 'swapped', 'wire'):

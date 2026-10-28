@@ -550,6 +550,45 @@ def build_bundle(wire_paths: list[Path], journal_dir: Path | None,
     return manifest
 
 
+def _stdio_historical_exclusions(entries, profile) -> set[int]:
+    """Prove gate-marker exclusions against earlier completed wire declarations.
+
+    Gate decisions can precede an observer fold of a newer tools/list reply.
+    Reuse the adapter's correlation, pagination and limits instead of treating
+    arbitrary tools/list-shaped JSON as a declaration. This is verification
+    only: it does not replay the gate or alter a transport decision.
+    """
+    from glassport.adapters.mcp_session import MCPTraceBuilder
+
+    limits = decision_replay._session_limits(profile)
+    if limits is None:
+        return set()
+    builder = MCPTraceBuilder(retain_events=False, limits=limits)
+    completed: set[frozenset[str]] = set()
+    proven: set[int] = set()
+    for entry in entries:
+        seq = entry.get("seq")
+        marker = entry.get("gate")
+        if (type(seq) is int and entry.get("dir") == "c2s"
+                and isinstance(marker, dict) and marker.get("action") == "blocked"):
+            tool, declared = marker.get("tool"), marker.get("declared")
+            if (isinstance(tool, str) and isinstance(declared, list)
+                    and all(isinstance(name, str) for name in declared)
+                    and tool not in declared and frozenset(declared) in completed):
+                proven.add(seq)
+        try:
+            event = builder.feed(entry)
+        except Exception:
+            return set()  # an unfoldable log proves no historical exemption
+        state = builder.state
+        if (event is not None and state.surface is not None
+                and state.surface_event_id == event.id):
+            # Add only after this entry: a future, orphaned or partial listing
+            # cannot justify an earlier block. Empty completed sets are valid.
+            completed.add(state.surface)
+    return proven
+
+
 def _verify_bundle_impl(root: Path, trusted_key: Path | None = None) -> dict:
     """Derive replay, delivery, and integrity verdicts from copied artifacts."""
     raw_manifest = (root / "manifest.json").read_bytes()
@@ -633,6 +672,10 @@ def _verify_bundle_impl(root: Path, trusted_key: Path | None = None) -> dict:
                     delivery_reasons.append("delivery_missing_or_duplicate")
             seq_hashes = {r["seq"]: _digest(raw) for r, raw in zip(wire, raw_lines)
                           if type(r.get("seq")) is int}
+            historical_exclusions = (
+                _stdio_historical_exclusions(entries, recorded_profile)
+                if recorded_profile and recorded_profile.get("transport") == "stdio"
+                else set())
             actual_delivery = []
             for record in deliveries:
                 intent = intents.get(record.get("intent"))
@@ -642,7 +685,8 @@ def _verify_bundle_impl(root: Path, trusted_key: Path | None = None) -> dict:
                 if (recorded_profile and recorded_profile.get("transport") == "stdio"
                         and record.get("outcome") == "blocked"
                         and record.get("reason") == "gate_blocked"
-                        and intent.get("candidate_block") is not True):
+                        and intent.get("candidate_block") is not True
+                        and intent.get("wire_seq") not in historical_exclusions):
                     epoch_integrity.append("stdio_undeclared_block_unproven")
                 seq = intent.get("wire_seq")
                 digest = intent.get("wire_entry_sha256")
