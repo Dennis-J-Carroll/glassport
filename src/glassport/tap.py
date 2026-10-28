@@ -409,10 +409,17 @@ class SessionLog:
         :meth:`write_entry` under one lock; a caller that must fold an entry
         before it knows every outer fact uses those two steps directly.
         """
-        receipt = self.record_with_digest(
-            direction, line, gate, metadata, observation=observation,
-            wire_bytes=wire_bytes, sequence=sequence)
-        return receipt[0] if receipt else None
+        try:
+            with self._lock:
+                seq = self._claim_sequence(sequence)
+                entry, text = build_session_entry(
+                    direction, line, gate=gate, metadata=metadata,
+                    observation=observation, wire_bytes=wire_bytes, seq=seq)
+                self._write(text + "\n")
+                self._entries_written += 1
+                return entry
+        except Exception:
+            return None  # logging is best-effort; the relay is sacred
 
     def record_with_digest(self, direction: str, line: bytes,
                            gate: dict | None = None, metadata: dict | None = None,

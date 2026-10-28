@@ -1,6 +1,7 @@
 """Stdio write receipts, observer ordering, and transport-independent evidence."""
 from __future__ import annotations
 
+from contextlib import ExitStack
 import hashlib
 import io
 import json
@@ -46,7 +47,7 @@ class TestStdioReceipts(unittest.TestCase):
             self.assertEqual(path.read_bytes(), expected)
 
     def test_two_sessions_bundle_and_old_no_epoch_still_exits_two(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with tempfile.TemporaryDirectory() as tmp, ExitStack() as cleanup:
             root = Path(tmp)
             paths = []
             for index in range(2):
@@ -130,10 +131,10 @@ class TestStdioObserver(unittest.TestCase):
             'uninspectable': (True, 'stdio_gate_blocked', 'uninspectable_frame', 'blocked_admission'),
         }
         for name, expected in cases.items():
-            with self.subTest(name=name), tempfile.TemporaryDirectory() as tmp:
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as tmp, ExitStack() as cleanup:
                 gate = tap.Gate(strict=name == 'strict', hold_timeout=0.001)
                 capture = Capture(Path(tmp), gate)
-                self.addCleanup(capture.close)
+                cleanup.callback(capture.close)
                 if name != 'skipped':
                     capture.declare()
                 before = len(capture.upstream.getvalue())
@@ -195,9 +196,9 @@ class TestStdioObserver(unittest.TestCase):
                 self.assertEqual(records[0]['transport'], 'stdio')
 
     def test_intent_precedes_pipe_write_and_injected_reply(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with tempfile.TemporaryDirectory() as tmp, ExitStack() as cleanup:
             capture = Capture(Path(tmp), tap.Gate())
-            self.addCleanup(capture.close)
+            cleanup.callback(capture.close)
             capture.declare()
             seen = []
 
@@ -221,9 +222,9 @@ class TestStdioObserver(unittest.TestCase):
             capture.call('ghost')
 
     def test_failed_pipe_has_one_unknown_delivery(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with tempfile.TemporaryDirectory() as tmp, ExitStack() as cleanup:
             capture = Capture(Path(tmp))
-            self.addCleanup(capture.close)
+            cleanup.callback(capture.close)
             capture.upstream.write = lambda raw: (_ for _ in ()).throw(BrokenPipeError())
             capture.send('c2s', b'\n')
             delivery = capture.records()[-1]
@@ -231,12 +232,12 @@ class TestStdioObserver(unittest.TestCase):
 
     def test_unwritable_journal_and_recording_faults_preserve_bytes(self):
         # A file where the directory should be is unwritable on every platform.
-        with tempfile.TemporaryDirectory() as tmp:
+        with tempfile.TemporaryDirectory() as tmp, ExitStack() as cleanup:
             root = Path(tmp)
             path = root / 'not-directory'
             path.write_text('occupied')
             capture = Capture(root, journal_dir=path)
-            self.addCleanup(capture.close)
+            cleanup.callback(capture.close)
             raw = b'\n{"method":"ping","id":2}\ninvalid\xff\n'
             capture.send('c2s', raw)
             self.assertEqual(capture.upstream.getvalue(), raw)
@@ -249,9 +250,9 @@ class TestStdioObserver(unittest.TestCase):
             self.assertEqual(capture.upstream.getvalue(), raw * 4)
 
     def test_fold_fault_records_fault_and_cannot_change_block(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with tempfile.TemporaryDirectory() as tmp, ExitStack() as cleanup:
             capture = Capture(Path(tmp), tap.Gate())
-            self.addCleanup(capture.close)
+            cleanup.callback(capture.close)
             capture.declare()
             before = capture.upstream.getvalue()
             with patch.object(capture.observer.builder, 'feed', side_effect=RuntimeError('fault')):
@@ -263,9 +264,9 @@ class TestStdioObserver(unittest.TestCase):
 
     def test_patterns_are_pinned(self):
         from glassport import detectors
-        with tempfile.TemporaryDirectory() as tmp:
+        with tempfile.TemporaryDirectory() as tmp, ExitStack() as cleanup:
             capture = Capture(Path(tmp))
-            self.addCleanup(capture.close)
+            cleanup.callback(capture.close)
             snapshot = capture.observer.pattern_snapshot(capture.observer.epoch)
             with patch.object(detectors, 'snapshot_pii_patterns', return_value=()):
                 capture.send('c2s', b'\n')
@@ -286,7 +287,7 @@ class TestStdioReplay(unittest.TestCase):
         from glassport.decision_replay import verify_journal
         from tests.test_public_gate import assert_public_strings
         for scenario in ('clean', 'pii', 'undeclared'):
-            with self.subTest(scenario=scenario), tempfile.TemporaryDirectory() as tmp:
+            with self.subTest(scenario=scenario), tempfile.TemporaryDirectory() as tmp, ExitStack() as cleanup:
                 root = Path(tmp)
                 capture = self.capture(root, pii=scenario == 'pii', undeclared=scenario == 'undeclared')
                 replay = verify_journal(capture.journal.path_for(capture.observer.epoch), capture.path)
@@ -308,7 +309,7 @@ class TestStdioReplay(unittest.TestCase):
         self.assertEqual(stdio_gate_reasons(entries), sorted({
             'quarantined', 'quarantine_replacement', 'quarantine_withheld',
             'quarantine_dropped', 'quarantine_scan_error'}))
-        with tempfile.TemporaryDirectory() as tmp:
+        with tempfile.TemporaryDirectory() as tmp, ExitStack() as cleanup:
             root = Path(tmp)
             capture = Capture(root, tap.Gate(strict=True))
             capture.declare()
@@ -325,7 +326,7 @@ class TestStdioReplay(unittest.TestCase):
     def test_missing_intent_and_analysis_fault_cannot_certify_prefix(self):
         from glassport.decision_replay import verify_journal
         for scenario in ('missing', 'fault'):
-            with self.subTest(scenario=scenario), tempfile.TemporaryDirectory() as tmp:
+            with self.subTest(scenario=scenario), tempfile.TemporaryDirectory() as tmp, ExitStack() as cleanup:
                 root = Path(tmp)
                 capture = Capture(root)
                 capture.declare()
@@ -345,7 +346,7 @@ class TestStdioReplay(unittest.TestCase):
         from glassport.decision_replay import verify_journal
         from glassport.decision_journal import GENESIS_SHA256
         for scenario in ('chain', 'wire', 'swapped', 'deleted-final', 'unproven', 'missing-limit'):
-            with self.subTest(scenario=scenario), tempfile.TemporaryDirectory() as tmp:
+            with self.subTest(scenario=scenario), tempfile.TemporaryDirectory() as tmp, ExitStack() as cleanup:
                 root = Path(tmp)
                 capture = self.capture(root, undeclared=True)
                 journal = capture.journal.path_for(capture.observer.epoch)
@@ -398,7 +399,7 @@ class TestStdioReplay(unittest.TestCase):
     def test_concurrent_pumps_replay_in_wire_order(self):
         import threading
         from glassport.decision_replay import verify_journal
-        with tempfile.TemporaryDirectory() as tmp:
+        with tempfile.TemporaryDirectory() as tmp, ExitStack() as cleanup:
             root = Path(tmp)
             capture = Capture(root, tap.Gate(idempotency_max_repeats=10000))
             capture.declare()
@@ -434,7 +435,7 @@ class TestStdioReplay(unittest.TestCase):
                    b'{"id":true,"method":"tools/call","params":null}\n',
                    b'{"id":3,"method":"tools/call","params":{"name":"\\ud800"}}\n',
                    b'[' * 1500 + b'0' + b']' * 1500 + b'\n']
-        with tempfile.TemporaryDirectory() as tmp:
+        with tempfile.TemporaryDirectory() as tmp, ExitStack() as cleanup:
             capture = Capture(Path(tmp), tap.Gate())
             capture.declare()
             for raw in hostile:
@@ -453,7 +454,7 @@ class TestStdioRunTap(unittest.TestCase):
         import os
         import subprocess
         import sys
-        with tempfile.TemporaryDirectory() as tmp:
+        with tempfile.TemporaryDirectory() as tmp, ExitStack() as cleanup:
             root = Path(tmp)
             payload = b'{"jsonrpc":"2.0","id":1,"method":"ping"}\n\n'
             code = "from glassport.tap import run_tap; from pathlib import Path; import sys; run_tap([sys.executable, '-c', 'import sys; sys.stdout.buffer.write(sys.stdin.buffer.read()); sys.stdout.buffer.flush()'], Path(sys.argv[1]))"

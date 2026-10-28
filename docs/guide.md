@@ -753,6 +753,16 @@ onto this engine. See [the API, bounds, validation, and implementation record](p
 
 ---
 
+## Stdio decision bundles
+
+Stdio captures now write decision journals by default alongside their session
+logs. `glassport bundle --log-dir DIR -o OUT` discovers matching stdio journals;
+`glassport bundle verify OUT` can exit `0` when analysis and delivery linkage
+hold. The stdio gate retains its existing authority. Replay does not re-judge
+its schema, PII, taint, retry, attestation or quarantine checks; their reason
+codes appear in `stdio_gate_reasons_not_replayed`. Old captures without epochs
+or journals still verify `2`. See [verification scope](bundle.md#stdio-verification-scope).
+
 ## Known boundaries
 
 Stated here so nobody discovers them the hard way:

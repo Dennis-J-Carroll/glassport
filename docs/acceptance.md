@@ -22,8 +22,8 @@ capture-specific values before RFC 8785 serialization and SHA-256:
 - UTC ISO timestamps in all string fields, including wire header `started_at`,
   journal profile times, and `bundler.created_at`, become
   `2000-01-01T00:00:00+00:00`.
-- Opaque HTTP epoch IDs become `epoch-0001`, `epoch-0002`, etc., in evidence,
-  profile-map keys, delivery rows, and finding records. Stdio remains `stdio`.
+- Opaque HTTP and new stdio epoch IDs become `epoch-0001`, `epoch-0002`, etc., in evidence,
+  profile-map keys, delivery rows, and finding records. Legacy no-epoch stdio remains `stdio`.
 - Hex digests of 24–64 characters become stable `digest-0001` tokens, assigned
   by first occurrence. These include artifact hashes derived from timestamped
   wire/journal bytes and finding IDs. Repeated original digests share a token.
@@ -47,7 +47,7 @@ on a fresh machine.
 To re-record after an intended manifest change, run
 `GLASSPORT_ACCEPTANCE_RECORD=1 PYTHONPATH=src python -m unittest tests.test_acceptance -v`
 and copy each printed `ACCEPTANCE_ROW name test-id exit reason sha256` into the
-table below. `GLASSPORT_ACCEPTANCE_DUMP=DIR` writes each normalized manifest
+table below. `GLASSPORT_ACCEPTANCE_DUMP=DIR` (an existing directory) writes each normalized manifest
 as JSON for diffing.
 
 ## Matrix
@@ -99,24 +99,33 @@ as JSON for diffing.
 | `acceptance.observe.public-canary` | `PYTHONPATH=src python -m unittest tests.test_acceptance.TestHTTPAcceptance.test_observe_public_canary` | `2: public_gate_tool_hashed` | `c3b594a6e973d94afd4cb42f53a068a45f34b1483cd668973e17ecd7a9553291` |
 | `acceptance.observe.signed-rewrite` | `PYTHONPATH=src python -m unittest tests.test_acceptance.TestHTTPBundleMutationAcceptance.test_observe_signed_rewrite` | `1: signature_invalid` | `f95dac0c8aba047f01838850e2b14fcf49e08b7fe515b23a8a13a2c98a317dd6` |
 | `acceptance.observe.stale-surface` | `PYTHONPATH=src python -m unittest tests.test_acceptance.TestHTTPAcceptance.test_observe_stale_surface` | `0: default_profile` | `fb2870704833b2217e9f94fa8a97dd57e9b29f36cb60c0b85e4d63d3dbc83763` |
-| `acceptance.stdio-gate.concurrent-correlation` | `PYTHONPATH=src python -m unittest tests.test_acceptance.TestStdioAcceptance.test_concurrent_correlation` | `2: no_journal_for_path` | `ac0487c1b710b73b06634910c4ceb7c9db289e3a643860416ec2d24428908746` |
-| `acceptance.stdio-gate.detector-fault` | `PYTHONPATH=src python -m unittest tests.test_acceptance.TestStdioAcceptance.test_detector_fault` | `2: no_journal_for_path` | `dcc68c2316ed9bf2f028b8d170abae887810854613890596c69ac886db09cde0` |
-| `acceptance.stdio-gate.failed-wire-write` | `PYTHONPATH=src python -m unittest tests.test_acceptance.TestStdioAcceptance.test_failed_wire_write` | `2: no_journal_for_path` | `67d2b3a5fe9916c02ea157d3570b21a881c29536f45201a613b3a114e686f002` |
-| `acceptance.stdio-gate.malformed-body` | `PYTHONPATH=src python -m unittest tests.test_acceptance.TestStdioAcceptance.test_malformed_body` | `2: no_journal_for_path` | `0194012cb34a0333b56a245b0a62798c38124cb748f20af4a86916b0ff5050ca` |
-| `acceptance.stdio-gate.malformed-bundle` | `PYTHONPATH=src python -m unittest tests.test_acceptance.TestStdioBundleMutationAcceptance.test_malformed_bundle` | `1: bundle_unreadable` | `1c31e6319bbd843cdb16a3c56fcde1f6781295b17194b757bcf4c496e866a9ad` |
-| `acceptance.stdio-gate.missing-declaration` | `PYTHONPATH=src python -m unittest tests.test_acceptance.TestStdioAcceptance.test_missing_declaration` | `2: no_journal_for_path` | `1c31e6319bbd843cdb16a3c56fcde1f6781295b17194b757bcf4c496e866a9ad` |
-| `acceptance.stdio-gate.no-event-observation` | `PYTHONPATH=src python -m unittest tests.test_acceptance.TestStdioAcceptance.test_no_event_observation` | `2: no_journal_for_path` | `a8ee5bd6d45286604da76f7cd19d9cb76f14f32a642af7e710eaf36e65cff4a4` |
-| `acceptance.stdio-gate.no-list-client` | `PYTHONPATH=src python -m unittest tests.test_acceptance.TestStdioAcceptance.test_no_list_client` | `2: no_journal_for_path` | `1c31e6319bbd843cdb16a3c56fcde1f6781295b17194b757bcf4c496e866a9ad` |
-| `acceptance.stdio-gate.public-canary` | `PYTHONPATH=src python -m unittest tests.test_acceptance.TestStdioAcceptance.test_public_canary` | `2: public_gate_tool_hashed` | `3cde2bfae0feeb28479979c363a0cac113dc887755c6d23c76dfe31da7e30b29` |
-| `acceptance.stdio-gate.signed-rewrite` | `PYTHONPATH=src python -m unittest tests.test_acceptance.TestStdioBundleMutationAcceptance.test_signed_rewrite` | `1: signature_invalid` | `b0978027f0822f70b09f8dc95d027a395b2b05c3d0c9ad0d9fa9d02b21e2df87` |
-| `acceptance.stdio-gate.stale-surface` | `PYTHONPATH=src python -m unittest tests.test_acceptance.TestStdioAcceptance.test_stale_surface` | `2: no_journal_for_path` | `6e7ad1d85c863e992f79f27b280a32c027c82096d805ca4caa2b75a502c24bc4` |
+| `acceptance.stdio-gate.concurrent-correlation` | `PYTHONPATH=src python -m unittest tests.test_acceptance.TestStdioAcceptance.test_concurrent_correlation` | `0: default_profile` | `7c4a6fbf3d4b46805f7821abf507875fdf446b2a61a560181e7b29d1ccddf931` |
+| `acceptance.stdio-gate.detector-fault` | `PYTHONPATH=src python -m unittest tests.test_acceptance.TestStdioAcceptance.test_detector_fault` | `0: stdio_gate_reasons_not_replayed` | `4079871e08a5957dbe1d9594638ab32952d1445edab091dc4c5177ced1e01fab` |
+| `acceptance.stdio-gate.failed-wire-write` | `PYTHONPATH=src python -m unittest tests.test_acceptance.TestStdioAcceptance.test_failed_wire_write` | `2: missing_wire_evidence` | `8095db9973c4a4b9cdb83afa298592dd5d89b700237a147da9b4fc50deaa3170` |
+| `acceptance.stdio-gate.malformed-body` | `PYTHONPATH=src python -m unittest tests.test_acceptance.TestStdioAcceptance.test_malformed_body` | `0: stdio_gate_reasons_not_replayed` | `7cd6f58b234677f15c055e99536aff5256f390999a95e247db6ec817170653a9` |
+| `acceptance.stdio-gate.malformed-bundle` | `PYTHONPATH=src python -m unittest tests.test_acceptance.TestStdioBundleMutationAcceptance.test_malformed_bundle` | `1: bundle_unreadable` | `5ef89bafa6092890aec23660c0e17c942581171edd49b98297033e8eff090810` |
+| `acceptance.stdio-gate.missing-declaration` | `PYTHONPATH=src python -m unittest tests.test_acceptance.TestStdioAcceptance.test_missing_declaration` | `0: stdio_gate_reasons_not_replayed` | `5ef89bafa6092890aec23660c0e17c942581171edd49b98297033e8eff090810` |
+| `acceptance.stdio-gate.no-event-observation` | `PYTHONPATH=src python -m unittest tests.test_acceptance.TestStdioAcceptance.test_no_event_observation` | `0: default_profile` | `31d17200ff22a059c4f1f710dafa3badb8872e237f7d8296fdcf4d57422c5aa4` |
+| `acceptance.stdio-gate.no-list-client` | `PYTHONPATH=src python -m unittest tests.test_acceptance.TestStdioAcceptance.test_no_list_client` | `0: stdio_gate_reasons_not_replayed` | `5ef89bafa6092890aec23660c0e17c942581171edd49b98297033e8eff090810` |
+| `acceptance.stdio-gate.public-canary` | `PYTHONPATH=src python -m unittest tests.test_acceptance.TestStdioAcceptance.test_public_canary` | `2: public_gate_tool_hashed` | `277d10095fab618aa06ed3c88f643eb660ca3f1083634407763224ed44e17194` |
+| `acceptance.stdio-gate.signed-rewrite` | `PYTHONPATH=src python -m unittest tests.test_acceptance.TestStdioBundleMutationAcceptance.test_signed_rewrite` | `1: signature_invalid` | `cdfc0fda49827ce7c8702094381b2a09095c5d1b5563f3e980b9399397fdc61f` |
+| `acceptance.stdio-gate.stale-surface` | `PYTHONPATH=src python -m unittest tests.test_acceptance.TestStdioAcceptance.test_stale_surface` | `0: default_profile` | `982de78386952f3fff1e5153ca2aa983bbf2bfdd5e5b53593f51de3515a41a27` |
 
 ## Path applicability
 
-Anonymous modern scope and `--public-surface` are HTTP-only. Stdio has one
-wire epoch and no decision journal, so epoch mismatch between wire and journal
-and multi-epoch stable-ID collision have no stdio equivalent. Untampered stdio
-rows assert exit `2` with `no_journal_for_path`. A malformed stdio bundle and
-a re-signed stdio bundle correctly take exit `1` for integrity failure, while
-still lacking a replayable journal. Public verify likewise exits `2` because
-redacted records cannot replay as raw evidence.
+Anonymous modern scope and `--public-surface` are HTTP-only. Stdio now has
+one distinct header epoch and one decision journal per capture; new regression
+tests cover multiple stdio epochs and wire/journal tampering.
+
+The seven intact raw stdio rows formerly reported `2: no_journal_for_path`;
+they now report `0`. The gate-fault row injects a **gate** exception, which is
+recorded as `gate_skipped/gate_check_error`, not an analysis-engine fault.
+Malformed input is an admission block; missing-declaration/no-list forwards
+carry `gate_skipped/no_surface_timeout`. Those four rows name the unreplayed
+gate-reasons limit. Concurrent correlation, blank lines (folded as MESSAGE),
+and stale-surface exclusion now replay and link successfully.
+
+Failed wire persistence remains `2`, now with `missing_wire_evidence`.
+Malformed-bundle and signed-rewrite rows remain `1`. Public verify remains `2`
+because redacted evidence cannot reproduce raw analysis. All HTTP verdicts
+and normalized fingerprints are unchanged by stdio journaling.

@@ -24,7 +24,7 @@ glassport probe -- npx -y @modelcontextprotocol/server-filesystem /tmp
 
 - **Real sessions:** `glassport wrap -- <server command>` in your MCP client config, then `glassport report <session.jsonl>`.
 - **Enforcement:** `glassport gate -- <server command>` blocks selected stdio calls; HTTP gate has a narrower default rule set, with opt-in `--strict` for missing evidence. See the [per-path enforcement contract](docs/enforcement-contract.md).
-- **Decision bundles:** `glassport bundle` packages wire logs, journals, SARIF, limits, and optional signatures. See [bundle format and verification](docs/bundle.md).
+- **Decision bundles:** `glassport bundle` packages wire logs, journals, SARIF, limits, and optional signatures. Clean HTTP and stdio captures can verify analysis and delivery linkage. Stdio-only gate checks carry an explicit replay limit. See [bundle format and verification](docs/bundle.md).
 - **CI:** `glassport audit <path> --sarif` reads server source without running it and uploads to the GitHub Security tab.
 
 **[Deeper docs →](https://github.com/Dennis-J-Carroll/glassport/blob/main/docs/guide.md)** · MIT · Python 3.10+ · runs in Termux

@@ -24,10 +24,10 @@ Three invariants hold every record honest:
 The candidate action is **mode-independent**: it is always computed with the
 blocking rule armed (``policy.decide(..., block_fabricated=True)``), in observe
 mode exactly as in gate mode, so "what would have been blocked" is visible
-without enforcing anything. Only :meth:`DecisionJournal.evaluate` — and through
-it ``Intent.enforce``, ``enforced`` and the ``blocked`` delivery outcome — reads
-the mode. ``evaluate`` narrows the candidate further: a candidate BLOCK that
-rests on a faulted, limited or unavailable analysis pass is never enforced.
+without enforcing anything. HTTP uses :meth:`DecisionJournal.evaluate` to
+narrow the candidate: a candidate BLOCK resting on faulted, limited or
+unavailable analysis is never enforced by default. Stdio supplies its separate
+Gate verdict explicitly; recording never evaluates or changes that verdict.
 
 Bounds (all configurable through :class:`JournalLimits`, all documented in
 ``docs/http-decision-journal.md``): tracked epochs, records per epoch, listed
@@ -70,11 +70,12 @@ MODE_OBSERVE = "observe"
 MODE_GATE = "gate"
 MODES = frozenset({MODE_OBSERVE, MODE_GATE})
 
-# Delivery outcome vocabulary. "sent" is a completed local send that upstream
-# answered — never evidence that a remote tool ran.
+# Delivery outcome vocabulary. HTTP "sent" includes an upstream status;
+# stdio "sent" means bytes written to the pipe, with no response implied.
+# Neither proves that a remote tool ran.
 OUTCOME_NOT_ATTEMPTED = "not_attempted"   # no upstream request was ever begun
 OUTCOME_NOT_SENT = "not_sent"             # begun, provably zero bytes on the wire
-OUTCOME_SENT = "sent"                     # complete request sent, status received
+OUTCOME_SENT = "sent"                     # completed local send; see transport code
 OUTCOME_FAILED = "failed"                 # status received, transfer failed after
 OUTCOME_UNKNOWN = "unknown"               # indeterminate: partial send or no status
 # Distinct from every outcome above, which all describe a real upstream
@@ -305,7 +306,7 @@ class Intent:
     """Handle linking a later delivery record back to its decision record.
 
     `enforce` is the *enforcement* verdict, not the candidate one: True only in
-    gate mode, for a proved candidate BLOCK or a strict evidence-gap refusal.
+    gate mode, from HTTP's evaluated candidate or the stdio Gate's verdict.
     It is computed before any record is written, so a
     journal write failure can never turn a proved block into a forward.
     """
@@ -486,7 +487,9 @@ class DecisionJournal:
             "kind": "profile", "schema": JOURNAL_SCHEMA, "epoch": epoch,
             "n": next(self._counter), "ts": _now_iso(), "mode": self.mode,
             "policy_version": POLICY_VERSION, "strict": self.strict,
-            "transport": self.transport,
+            # Missing transport has always meant HTTP. Keep its profile bytes
+            # stable; stdio opts into its marker-based evidence semantics.
+            **({"transport": "stdio"} if self.transport == "stdio" else {}),
             "authorization": {"status": "not_evaluated"},
             "detector_engine": DETECTOR_ENGINE_VERSION,
             "pattern_digest": profile.digest,
@@ -561,12 +564,11 @@ class DecisionJournal:
         never got a context, or a closed journal) — unavailable evidence stays
         fail-open, exactly as the surrounding observation path does.
 
-        `enforce` is the already-computed enforcement verdict. A transport that
-        acts on a block MUST compute it with :meth:`evaluate` *before* calling
-        this method and pass it in, so that no failure inside recording can
-        change what the transport does. None (the default) recomputes it here,
-        for callers that only record. A failed record cannot revoke a strict
-        verdict already supplied by the transport.
+        `enforce` is the already-computed enforcement verdict: HTTP uses
+        :meth:`evaluate`; stdio MUST pass its own Gate verdict and never call
+        evaluate. A recording failure cannot change what the transport does.
+        None (the default) recomputes the HTTP verdict for recording-only
+        callers; a stdio call without an explicit verdict records nothing.
         """
         if self._closed or not isinstance(epoch, str) or not epoch:
             return None
@@ -669,9 +671,9 @@ class DecisionJournal:
                         reason=None, gate=None) -> bool:
         """Record the terminal delivery outcome for one recorded intent.
 
-        A "sent" outcome means the complete request left the local socket and
-        upstream answered. It is not evidence that a remote tool executed. A
-        "blocked" outcome means no upstream request was ever begun.
+        HTTP "sent" means a complete request send with an upstream status;
+        stdio "sent" means bytes written to the pipe, with no response implied.
+        Neither proves remote execution. "blocked" means no upstream send.
         """
         if self._closed or not isinstance(intent, Intent):
             return False

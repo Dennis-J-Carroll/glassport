@@ -19,7 +19,12 @@ is never overwritten. Journal pairing uses the `epoch` inside the profile
 record, then checks that every record belongs to that epoch. Source file names
 are not trusted for pairing. `--wire` can be repeated. `--log-dir` collects
 `*.jsonl` files in that directory. HTTP writes one wire log and one journal per
-session epoch. Stdio writes one wire log and has no journal.
+session epoch. Stdio writes one wire log per capture, with a random 32-character
+lowercase hexadecimal `epoch` in its header and a journal at
+`<log_dir>/decisions/<epoch>.jsonl`. With no explicit `--journal-dir`, stdio
+journals are discovered beside their wire logs. Multiple stdio captures can
+share a bundle. An old stdio log without a header epoch retains the literal
+`stdio` identity and, without a journal, verifies exit `2`.
 
 ## Manifest schema: `glassport.bundle/1`
 
@@ -39,8 +44,8 @@ future schemas change the `schema` value rather than silently redefining one.
 | `evidence.epochs[].wire.path`, `sha256` | Bundle-relative path and SHA-256 of the entire copied wire file. |
 | `evidence.epochs[].wire.trailer_log_sha256` | Digest claimed by the `glassport.metrics` trailer over all bytes before that trailer; null when absent. Verification recomputes it. |
 | `evidence.epochs[].wire.entries`, `seq_range` | Number of wire entries and inclusive first/last sequence; empty range is `[1,0]`. |
-| `evidence.epochs[].journal` | Null for stdio; otherwise `path`, whole-file `sha256`, `records`, and `final_record_sha256`. The last two fields expose tail deletion. |
-| `evidence.epochs[].replay_argv` | Exact relative `glassport replay-decisions` command; null for stdio. |
+| `evidence.epochs[].journal` | Null when unavailable; otherwise `path`, whole-file `sha256`, `records`, and `final_record_sha256`. The last two fields expose tail deletion. |
+| `evidence.epochs[].replay_argv` | Exact relative `glassport replay-decisions` command; null without a journal. |
 | `evidence.audit` | Null unless `--audit` was given; otherwise copied audit JSON path and SHA-256. |
 | `evidence.sarif` | Path and whole-file SHA-256 of `index/findings.sarif.json`. |
 | `profile.header` | Verbatim first `glassport.header` record, including hashed remote URL path. |
@@ -77,6 +82,47 @@ rows and profile to copied records, and check whole-file hashes. A digest can
 expose accidental or unilateral changes to a copied file. Someone able to
 rewrite an unsigned bundle can recompute the hashes; use a trusted signature
 for resistance to that rewrite.
+
+## Stdio verification scope
+
+A clean stdio capture can verify exit `0`: detector analysis and policy
+candidates reproduce, and every client line has one intent plus one linked
+delivery. `Gate.check_c2s` remains the only blocking authority. The journal
+receives its actual verdict as `enforce`; it never calls HTTP `evaluate()` or
+uses HTTP `strict_reason()` to classify stdio evidence.
+
+Replay re-judges undeclared-tool candidates. A stdio `blocked` delivery with
+`reason: gate_blocked` requires `candidate_block: true`; otherwise verification
+is contradicted, exit `1`, with `stdio_undeclared_block_unproven`.
+
+Replay does **not** re-judge schema, PII, taint, depth, size, retries,
+attestation, batch/admission refusals, strict faults, skipped/disabled checks,
+or server-to-client quarantine actions. When present, the limit
+`stdio_gate_reasons_not_replayed` lists their sorted distinct fixed reason codes
+(and skipped, disabled, or quarantine action codes). An undeclared-tool refusal
+alone does not add this limit. A PII block can verify `0` with
+`reasons: ["pii_exfiltration"]`: the recorded decision and linkage hold, but
+replay did not re-run the gate's PII check. Verification checks this limit against
+the wire markers, preventing its silent omission or alteration.
+
+`stdio_written` means bytes written to the server's stdin, with no response
+implied. `stdio_write_failed` means delivery is unknown. Stdio intent and
+delivery evidence levels come from `evidence.gate_level` on the recorded gate
+marker, so an unmarked frame stays `observed`; use its delivery code for the
+pipe-write outcome. Neither exit `0` nor a successful pipe write proves remote
+execution, authorization, or that every stdio refusal was justified.
+
+Missing intents produce `stdio_intent_missing` and exit `2`. Recorded observer
+faults also prevent equivalence. Existing chain, exact-wire-digest, record-count
+and final-record checks still reject unilateral tampering and tail deletion.
+A deleted final delivery in an unbundled journal is detected through missing
+intent/delivery linkage when bundled; the hash chain alone cannot detect an
+unanchored final deletion.
+
+The journal schema stays `/3`, policy `/2`, engine `/3`. Stdio profiles explicitly
+record `transport: stdio`; missing transport continues to mean HTTP, preserving
+existing HTTP `/3` profiles and acceptance fingerprints. Lossless stdio logging
+remains out of scope: `stdio_decoded_text_no_raw_bytes` still applies.
 
 ## Signing and public copy
 

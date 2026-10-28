@@ -6,7 +6,18 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versions follow 
 
 ## [Unreleased]
 
+### Added
+- verify stdio journal linkage and disclose unreplayed gate reasons
+- record stdio analysis and gate outcomes without deciding transport
+- give stdio captures unique epochs and wire digest receipts
+
+### Internal
+- publish stdio journal acceptance docs and CI bundle tier
+
+## [0.9.0] - 2026-10-27
+
 ### Changed
+- 0.9.0 — live detector honesty (#125)
 - Fix concurrent replay order and harden live detector limits (#124)
 - Detect live surface mutation, declaration poisoning, and encoded secrets (#123)
 

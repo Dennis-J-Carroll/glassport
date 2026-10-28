@@ -19,6 +19,7 @@ import urllib.request
 from unittest import mock
 
 from glassport import bundle, decision_journal as dj, detectors, tap
+from glassport.stdio_sessions import StdioObserver
 from tests.acceptance_matrix import manifest_hash, normalized_manifest, published_rows
 from tests.test_http_gate import GateCase, Upstream
 from tests.test_http_gate_correlation import SlowUpstream
@@ -247,6 +248,8 @@ class TestStdioAcceptance(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             log = tap.open_session_log(root / "wire.jsonl", transport="stdio", mode="gate")
+            observer = StdioObserver(log)
+            journal = dj.DecisionJournal(root / "decisions", observer, mode="gate")
             upstream = _Sink()
             downstream = _Sink()
             gate = tap.Gate(hold_timeout=1.0 if scenario == "concurrent-correlation"
@@ -254,7 +257,8 @@ class TestStdioAcceptance(unittest.TestCase):
 
             def send(direction: str, raw: bytes):
                 tap.pump(io.BytesIO(raw), upstream if direction == "c2s" else downstream,
-                         log, direction, gate=gate, client_write=downstream.write)
+                         log, direction, gate=gate, client_write=downstream.write,
+                         observer=observer, journal=journal)
 
             if scenario not in ("missing-declaration", "no-list-client",
                                 "no-event-observation", "concurrent-correlation"):
@@ -327,6 +331,7 @@ class TestStdioAcceptance(unittest.TestCase):
             self.assertEqual(received, int(forwarded), scenario)
             log.write_metrics()
             log.close()
+            journal.close()
             out = root / "bundle"
             manifest = bundle.build_bundle([root / "wire.jsonl"], None, None, out,
                                            redact=scenario == "public-canary")
@@ -346,10 +351,17 @@ class TestStdioAcceptance(unittest.TestCase):
                             verdict, 2, "public_gate_tool_hashed")
             else:
                 verdict = bundle.verify_bundle(out)
-                self.assertEqual(verdict["analysis_reproduced"]["status"], "unsupported")
-                self.assertEqual(verdict["delivery_evidence_present"]["status"], "incomplete")
+                failed = scenario == "failed-wire-write"
+                self.assertEqual(verdict["analysis_reproduced"]["status"],
+                                 "incomplete" if failed else "equivalent")
+                self.assertEqual(verdict["delivery_evidence_present"]["status"],
+                                 "incomplete" if failed else "present")
+                reason = ("missing_wire_evidence" if failed else
+                          "stdio_gate_reasons_not_replayed" if scenario in (
+                              "detector-fault", "malformed-body", "missing-declaration", "no-list-client")
+                          else "default_profile")
                 _assert_row(self, f"acceptance.stdio-gate.{scenario}", manifest, verdict,
-                            2, "no_journal_for_path")
+                            2 if failed else 0, reason)
 
 
 for _scenario in ("malformed-body", "missing-declaration", "stale-surface",
@@ -556,14 +568,18 @@ class TestStdioBundleMutationAcceptance(unittest.TestCase):
             root = Path(tmp)
             log_path = root / "wire.jsonl"
             log = tap.open_session_log(log_path, transport="stdio", mode="gate")
+            observer = StdioObserver(log)
+            journal = dj.DecisionJournal(root / "decisions", observer, mode="gate")
             upstream = _Sink()
             tap.pump(io.BytesIO(_line({"jsonrpc": "2.0", "id": 4,
                                        "method": "tools/call",
                                        "params": {"name": "search", "arguments": {}}})),
-                     upstream, log, "c2s", gate=tap.Gate(hold_timeout=0.01))
+                     upstream, log, "c2s", gate=tap.Gate(hold_timeout=0.01),
+                     observer=observer, journal=journal)
             self.assertEqual(upstream.getvalue().count(b'"tools/call"'), 1)
             log.write_metrics()
             log.close()
+            journal.close()
             out = root / "bundle"
             if scenario == "signed-rewrite":
                 if not importlib.util.find_spec("cryptography"):
@@ -585,15 +601,15 @@ class TestStdioBundleMutationAcceptance(unittest.TestCase):
                 second_key, second_pub = key_files("rewrite")
                 bundle.build_bundle([log_path], None, None, out, sign_key=first_key)
                 self.assertEqual(bundle.verify_exit_code(
-                    bundle.verify_bundle(out, first_pub)), 2)
+                    bundle.verify_bundle(out, first_pub)), 0)
                 rewritten = root / "rewritten"
                 manifest = bundle.build_bundle([log_path], None, None, rewritten,
                                                sign_key=second_key)
                 self.assertEqual(bundle.verify_exit_code(
-                    bundle.verify_bundle(rewritten, second_pub)), 2)
+                    bundle.verify_bundle(rewritten, second_pub)), 0)
                 verdict = bundle.verify_bundle(rewritten, first_pub)
-                self.assertEqual(verdict["analysis_reproduced"]["status"], "unsupported")
-                self.assertEqual(verdict["delivery_evidence_present"]["status"], "incomplete")
+                self.assertEqual(verdict["analysis_reproduced"]["status"], "equivalent")
+                self.assertEqual(verdict["delivery_evidence_present"]["status"], "present")
                 reason = "signature_invalid"
             elif scenario == "malformed-bundle":
                 manifest = bundle.build_bundle([log_path], None, None, out)

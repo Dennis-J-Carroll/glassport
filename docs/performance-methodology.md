@@ -117,3 +117,33 @@ already contain its dependency. CI retains its existing installation path.
 Verified local full run: **784 tests passed in 38.731 seconds**, **93% core
 line coverage**; the unchanged 85% gate passed. The traced CI probe reported
 `SysMonitor`. Existing HTTP socket ResourceWarnings remained visible.
+
+## Stdio observer and journal (Handoff 07)
+
+Run `python3 scripts/bench_stdio_relay.py --root CHECKOUT` against baseline and
+candidate, without concurrent tests/benchmarks. Each case uses seven fresh
+interpreters and 500 sequential request/result pairs through the real `pump`,
+private SessionLog, and (when available) default observer/journal. Mode `gate`
+also runs the unchanged stdio Gate. Serialization, analysis, logging, and close
+are timed; startup, network, real pipe syscalls, and fsync are excluded. The
+sink count asserts that all benchmark calls reached upstream. The 2,000-pair
+maximum keeps journal recording below its 4,096-record cap.
+
+Measured non-root (UID 1000), CPython 3.13.5, Linux x86_64, baseline `0047731`:
+
+| Path | Baseline median / p95 µs per frame | With journal median / p95 | Median change |
+| --- | ---: | ---: | ---: |
+| Wrap pump | 13.45 / 14.26 | 144.25 / 252.98 | +972.7% (+130.80 µs) |
+| Gate pump | 114.15 / 151.75 | 227.66 / 236.41 | +99.4% (+113.51 µs) |
+
+These measurements expose substantial relative processing overhead, especially
+on the previously passive path. They do not establish unchanged latency or
+real-pipe throughput. Seven-sample p95 is the maximum; wrap samples show host
+variance. Failure isolation and unchanged transport bytes do not mean analysis
+is free. Session/detector and journal limits remain active.
+
+The existing append-only benchmark measured plain `10.23 → 10.01 µs` and
+marker `15.88 → 11.48 µs` medians. That benchmark excludes the new observer and
+journal, so it cannot substantiate the cost of default stdio captures. The 2%
+figure above belonged to the earlier Phase 3a append-only change, not this new
+analysis path.
