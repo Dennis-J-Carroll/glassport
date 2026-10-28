@@ -123,7 +123,9 @@ line coverage**; the unchanged 85% gate passed. The traced CI probe reported
 Run `python3 scripts/bench_stdio_relay.py --root CHECKOUT` against baseline and
 candidate, without concurrent tests/benchmarks. Each case uses seven fresh
 interpreters and 500 sequential request/result pairs through the real `pump`,
-private SessionLog, and (when available) default observer/journal. Mode `gate`
+private SessionLog, and optional observer/journal (`wrap-journal` or `gate`).
+Plain `wrap` now measures the restored passive path. The historical table below
+compares the original passive baseline with the pre-review journal-enabled PR. Mode `gate`
 also runs the unchanged stdio Gate. Serialization, analysis, logging, and close
 are timed; startup, network, real pipe syscalls, and fsync are excluded. The
 sink count asserts that all benchmark calls reached upstream. The 2,000-pair
@@ -147,3 +149,39 @@ marker `15.88 → 11.48 µs` medians. That benchmark excludes the new observer a
 journal, so it cannot substantiate the cost of default stdio captures. The 2%
 figure above belonged to the earlier Phase 3a append-only change, not this new
 analysis path.
+
+
+## Large stdio results (owner review)
+
+Plain wrap and internal probe captures perform no live detector analysis.
+`wrap --journal` opts into synchronous observation; gate keeps its default
+journal. Both analyzed modes can stall both pumps while a result is scanned
+under the observer lock. Moving analysis off the relay path is deferred.
+
+Reproduce against `0047731` and the revised checkout using the revised driver:
+
+```bash
+python3 scripts/bench_stdio_relay.py --root CHECKOUT \
+  --result-bytes 1000000 --iterations 5 --samples 7
+```
+
+Each fresh interpreter sends five valid `tools/call` requests and correlated
+results containing 1,000,000 ASCII `x` text bytes (plus JSON framing). Measure
+from entry to the s2c pump until its first downstream `write`, excluding JSON
+input construction, startup, gate c2s checks, teardown, network and real pipe
+syscalls. Baseline uses v0.9.0 with no observer; the baseline `wrap-journal`
+label is only a passive comparison because that checkout lacks the feature.
+Samples are per-process means; median/p95 below summarize seven processes
+(p95 is their maximum). UID 1000, CPython 3.13.5, Linux x86_64; runs sequential,
+without concurrent tests. Payload and host scheduling affect these values.
+
+| Mode | v0.9.0 median / p95 ms | Revised median / p95 ms | Added median latency |
+| --- | ---: | ---: | ---: |
+| Plain wrap | 0.049 / 0.093 | 0.048 / 0.068 | approximately unchanged |
+| Wrap --journal | 0.049 / 0.093 (passive wrap) | 832.376 / 980.249 | +832.327 ms |
+| Gate | 2.146 / 2.263 | 1119.598 / 1481.125 | +1117.452 ms |
+
+These are relay-start latencies, not end-to-end execution times. Passive wrap
+logs after the downstream write, as v0.9.0 did; journal-enabled captures record
+and analyze before it. The large-frame cost is why journal analysis is opt-in
+for wrap. Small-frame averages above must not be extrapolated to large results.

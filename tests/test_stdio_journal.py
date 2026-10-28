@@ -450,20 +450,73 @@ class TestStdioReplay(unittest.TestCase):
 
 
 class TestStdioRunTap(unittest.TestCase):
-    def test_wrap_creates_journal_by_default_and_relays_exact_bytes(self):
+    def test_wrap_passive_probe_passive_and_explicit_journal(self):
         import os
         import subprocess
         import sys
-        with tempfile.TemporaryDirectory() as tmp, ExitStack() as cleanup:
-            root = Path(tmp)
-            payload = b'{"jsonrpc":"2.0","id":1,"method":"ping"}\n\n'
-            code = "from glassport.tap import run_tap; from pathlib import Path; import sys; run_tap([sys.executable, '-c', 'import sys; sys.stdout.buffer.write(sys.stdin.buffer.read()); sys.stdout.buffer.flush()'], Path(sys.argv[1]))"
-            result = subprocess.run([sys.executable, '-c', code, str(root)], input=payload,
-                                    capture_output=True, timeout=15,
-                                    env=dict(os.environ, PYTHONPATH=str(Path(tap.__file__).parents[1])))
-            self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual(result.stdout, payload)
-            self.assertEqual(len(list((root / 'decisions').glob('*.jsonl'))), 1)
-            bundle.build_bundle(list(root.glob('*.jsonl')), None, None, root / 'bundle')
-            verdict = bundle.verify_bundle(root / 'bundle')
-            self.assertEqual(bundle.verify_exit_code(verdict), 0, verdict)
+        for mode in ('wrap', 'probe', 'wrap-journal', 'gate'):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                payload = b'{"jsonrpc":"2.0","id":1,"method":"ping"}\n\n'
+                code = """
+from pathlib import Path
+import sys
+from unittest.mock import patch
+from glassport import tap
+from glassport.incremental import DetectorEngine
+mode, directory = sys.argv[1:]
+argv = ['gate' if mode == 'gate' else 'wrap', '--log-dir', directory]
+if mode == 'wrap-journal':
+    argv += ['--journal']
+argv += ['--', sys.executable, '-c',
+         'import sys; sys.stdout.buffer.write(sys.stdin.buffer.read()); sys.stdout.buffer.flush()']
+with patch.object(DetectorEngine, 'on_event', autospec=True,
+                  side_effect=DetectorEngine.on_event) as detector:
+    rc = tap.main(argv)
+    assert (detector.call_count > 0) == (mode in ('gate', 'wrap-journal')), detector.call_count
+sys.exit(rc)
+"""
+                env = dict(os.environ, PYTHONPATH=str(Path(tap.__file__).parents[1]))
+                env.pop('GLASSPORT_INTERNAL_PROBE', None)
+                if mode == 'probe':
+                    env['GLASSPORT_INTERNAL_PROBE'] = '1'
+                result = subprocess.run([sys.executable, '-c', code, mode, str(root)],
+                                        input=payload, capture_output=True, timeout=15, env=env)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout, payload)
+                enabled = mode in ('gate', 'wrap-journal')
+                self.assertEqual(len(list((root / 'decisions').glob('*.jsonl'))), int(enabled))
+                if not enabled:
+                    self.assertFalse((root / 'decisions').exists())
+                bundle.build_bundle(list(root.glob('*.jsonl')), None, None, root / 'bundle')
+                verdict = bundle.verify_bundle(root / 'bundle')
+                self.assertEqual(bundle.verify_exit_code(verdict), 0 if enabled else 2, verdict)
+                if not enabled:
+                    self.assertIn('no_journal_for_path', verdict['analysis_reproduced']['epochs'][0]['reasons'])
+
+    def test_passive_wrap_logs_only_after_successful_write(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            log = tap.open_session_log(Path(tmp) / 'wire.jsonl')
+            try:
+                for direction in ('c2s', 's2c'):
+                    sink = Sink()
+                    sink.write = lambda raw: (_ for _ in ()).throw(BrokenPipeError())
+                    with patch.object(log, 'record', wraps=log.record) as record:
+                        tap.pump(io.BytesIO(b'hello\n'), sink, log, direction)
+                        record.assert_not_called()
+            finally:
+                log.close()
+
+    def test_journal_flag_parsing(self):
+        for flags in (['--journal', '--log-dir', 'capture'],
+                      ['--log-dir', 'capture', '--journal']):
+            with patch.object(tap, 'run_tap', return_value=0) as run, \
+                 patch.object(tap.shutil, 'which', return_value='/server'):
+                self.assertEqual(tap.main(['wrap'] + flags + ['--', 'server']), 0)
+                self.assertTrue(run.call_args.kwargs['journal_enabled'])
+        for argv in (['wrap', '--journal', '--journal', '--', 'server'],
+                     ['gate', '--journal', '--', 'server'],
+                     ['wrap', '--journal', '--transport', 'http', '--url', 'https://example.test']):
+            with patch.object(tap, 'run_tap') as run:
+                self.assertEqual(tap.main(argv), 2)
+                run.assert_not_called()

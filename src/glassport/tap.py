@@ -1263,7 +1263,7 @@ def pump(src, dst, log: SessionLog | None, direction: str,
             if observer is not None:
                 return observer.record(direction, raw, marker)
             if log is not None:
-                log.record_with_digest(direction, raw, gate=marker)
+                log.record(direction, raw, gate=marker)
         except Exception:
             pass  # optional evidence never changes transport control flow
         return None
@@ -1349,7 +1349,9 @@ def pump(src, dst, log: SessionLog | None, direction: str,
                         gate_info = {**(s2c_info or {}), "action": "quarantine_replacement"}
                     elif s2c_info is not None:
                         gate_info = s2c_info
-                observation = record(direction, line, gate_info)
+                # Passive wrap keeps the original post-write capture path.
+                observation = (record(direction, line, gate_info)
+                               if observer is not None or gate is not None else None)
             handle = intent(observation, False) if direction == "c2s" else None
             try:
                 if dst_lock is not None:
@@ -1363,6 +1365,8 @@ def pump(src, dst, log: SessionLog | None, direction: str,
                 if direction == "c2s":
                     delivery(handle, "unknown", "stdio_write_failed", gate_info)
                 raise
+            if observer is None and gate is None:
+                record(direction, line, gate_info)
             if direction == "c2s":
                 delivery(handle, "sent", "stdio_written", gate_info)
     except (BrokenPipeError, ValueError, OSError):
@@ -1389,7 +1393,7 @@ def pump_stderr(src, dst) -> None:
 # ─────────────────────────────────────────────────────────────────
 def run_tap(server_cmd: list[str], log_dir: Path,
             gate: Gate | None = None,
-            gate_controllable: bool = False) -> int:
+            gate_controllable: bool = False, *, journal_enabled: bool = False) -> int:
     session_start = time.time()
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     safe_name = "".join(c if c.isalnum() else "_" for c in server_cmd[0])[:32]
@@ -1405,7 +1409,7 @@ def run_tap(server_cmd: list[str], log_dir: Path,
                            strict=bool(gate is not None and gate.strict))
 
     observer = journal = None
-    if log is not None:
+    if log is not None and (gate is not None or (journal_enabled and not probe_capture)):
         try:
             from glassport.stdio_sessions import StdioObserver
             from glassport.decision_journal import DecisionJournal
@@ -1824,7 +1828,9 @@ usage: glassport <command> [options]   (`glassport help <command>`, `glassport -
                    (be the client: handshake + tools/list through the tap,
                     then write the HTML report. List-only unless --call.
                     exit 0 clean, 1 findings, 3 handshake incomplete)
-  wrap (default):  glassport [wrap] [--log-dir DIR] -- <server command...>
+  wrap (default):  glassport [wrap] [--journal] [--log-dir DIR] -- <server command...>
+                   (passive stdio by default; --journal opts into synchronous
+                    detector analysis and decision evidence, adding relay latency)
                    glassport wrap --transport http --url <remote-mcp-url> [--port N]
                         (passive MITM over MCP Streamable-HTTP; logs both
                          directions to the same JSONL as the stdio tap.
@@ -2063,9 +2069,20 @@ def main(argv: list[str]) -> int:
         return health_mod.main(argv[1:])
 
     log_dir = DEFAULT_LOG_DIR
-    if argv[0] == "--log-dir":
-        log_dir = Path(argv[1])
-        argv = argv[2:]
+    journal_enabled = False
+    while argv and argv[0] in ("--log-dir", "--journal"):
+        if argv[0] == "--journal":
+            if gate is not None or journal_enabled:
+                print("glassport: --journal is a wrap-only flag, given at most once", file=sys.stderr)
+                return 2
+            journal_enabled = True
+            argv = argv[1:]
+        else:
+            if len(argv) < 2:
+                print("glassport: --log-dir requires a directory", file=sys.stderr)
+                return 2
+            log_dir = Path(argv[1])
+            argv = argv[2:]
     # H2.01: passive tap over MCP's Streamable-HTTP transport. Default stays
     # stdio (spawn + relay a child). `--transport http --url <remote>` runs a
     # local MITM proxy instead. Gate (active enforcement) now covers both
@@ -2081,6 +2098,9 @@ def main(argv: list[str]) -> int:
         argv = argv[2:]
     endpoint_era = "auto"
     if transport == "http":
+        if journal_enabled:
+            print("glassport: --journal requires stdio wrap", file=sys.stderr)
+            return 2
         # Nothing after --url may be silently ignored: a mistyped enforcement
         # option would otherwise run with a weaker posture than was asked for.
         scope_headers: list[str] = []
@@ -2195,7 +2215,7 @@ def main(argv: list[str]) -> int:
         print(msg, file=sys.stderr)
         return 127
     return run_tap(argv, log_dir, gate=gate,
-                   gate_controllable=gate_controllable)
+                   gate_controllable=gate_controllable, journal_enabled=journal_enabled)
 
 
 def cli() -> None:

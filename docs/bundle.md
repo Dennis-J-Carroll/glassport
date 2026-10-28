@@ -85,11 +85,13 @@ for resistance to that rewrite.
 
 ## Stdio verification scope
 
-A clean stdio capture can verify exit `0`: detector analysis and policy
+A clean stdio `gate` or `wrap --journal` capture can verify exit `0`: detector analysis and policy
 candidates reproduce, and every client line has one intent plus one linked
 delivery. `Gate.check_c2s` remains the only blocking authority. The journal
 receives its actual verdict as `enforce`; it never calls HTTP `evaluate()` or
-uses HTTP `strict_reason()` to classify stdio evidence.
+uses HTTP `strict_reason()` to classify stdio evidence. Plain wrap and internal
+probe captures have no journal or live analysis and verify `2`
+(`no_journal_for_path`), while retaining their unique header epochs.
 
 Replay re-judges undeclared-tool candidates. A stdio `blocked` delivery with
 `reason: gate_blocked` requires `candidate_block: true`; otherwise verification

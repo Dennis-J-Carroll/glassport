@@ -276,8 +276,10 @@ append succeeds. Neither journal nor replay proves authorization.
 ## Stdio journals
 
 The existing document path is retained for incoming links. `run_tap` now creates
-an observer and journal whenever its session log works. Wrap/probe captures use
-journal `mode: observe`; gate captures use `mode: gate` and retain the gate's
+an observer and journal for gate captures and explicit `wrap --journal`, when
+the session log works. Plain wrap and internal probe remain passive with no
+live analysis or journal. Opted-in wrap uses journal `mode: observe`; gate
+captures use `mode: gate` and retain the gate's
 strict flag. Each stdio header carries an opaque epoch; the matching journal
 lives in `decisions/<epoch>.jsonl` beside the wire log.
 
