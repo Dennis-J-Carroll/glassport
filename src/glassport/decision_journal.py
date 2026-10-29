@@ -15,8 +15,9 @@ Three invariants hold every record honest:
   are *never* copied here. Only fixed vocabularies (annotation kind, sanitized
   subcategory, integer severity, decision action/reason, delivery outcome code)
   and digests of canonical semantic content reach disk.
-* **Intent is not delivery.** A candidate action is recorded before the upstream
-  request begins; the terminal delivery outcome is recorded after it resolves.
+* **Intent is not delivery.** HTTP records its candidate before sending.
+  Stdio persists the wire entry before relay, then its worker records analysis
+  and delivery asynchronously, always intent before the matching delivery.
   In observation mode a candidate BLOCK would still forward — which is exactly
   why the two records are distinct. A completed local send is never treated as
   proof that a remote tool executed.

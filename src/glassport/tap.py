@@ -1836,8 +1836,8 @@ usage: glassport <command> [options]   (`glassport help <command>`, `glassport -
                     then write the HTML report. List-only unless --call.
                     exit 0 clean, 1 findings, 3 handshake incomplete)
   wrap (default):  glassport [wrap] [--journal] [--log-dir DIR] -- <server command...>
-                   (passive stdio by default; --journal opts into synchronous
-                    detector analysis and decision evidence, adding relay latency)
+                   (passive stdio by default; --journal opts into asynchronous,
+                    bounded analysis; queue overflow makes evidence incomplete)
                    glassport wrap --transport http --url <remote-mcp-url> [--port N]
                         (passive MITM over MCP Streamable-HTTP; logs both
                          directions to the same JSONL as the stdio tap.

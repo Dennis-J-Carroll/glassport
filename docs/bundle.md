@@ -95,6 +95,17 @@ uses HTTP `strict_reason()` to classify stdio evidence. Plain wrap and internal
 probe captures have no journal or live analysis and verify `2`
 (`no_journal_for_path`), while retaining their unique header epochs.
 
+Stdio analysis runs on one ordered background worker. The wire entry and its
+digest precede relay; the journal intent may follow relay, but always precedes
+its linked delivery record. HTTP keeps synchronous pre-forward intents.
+The 64 MiB queue bound counts queued input-line bytes. Overflow preserves
+compact real linkage and records a sticky analysis fault; later intents stay
+faulted and verification is incomplete (`2`). A final fault without a later
+intent, worker death, or a 10-second drain timeout produces `truncated`, giving
+`journal_truncated` and exit `2`. An intent lacking a delivery in an explicitly
+truncated stdio journal reports `delivery_missing_truncated`; duplicate
+or orphaned deliveries, or an unmarked deleted delivery, still fail (`1`).
+
 Replay re-judges undeclared-tool candidates. A stdio `blocked` delivery with
 `reason: gate_blocked` requires `candidate_block: true`, or a wire gate marker
 whose `tool` is absent from its `declared` list and whose declared name set

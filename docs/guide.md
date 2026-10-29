@@ -761,8 +761,11 @@ Stdio `gate` writes decision journals by default alongside its session log.
 Plain `wrap` and internal probe captures remain passive: no live detector
 analysis or journal, and bundles verify `2` (`no_journal_for_path`). Use
 `glassport wrap --journal [--log-dir DIR] -- <server command...>` to opt into
-synchronous analysis and an observe-mode journal. Large results add relay
-latency in both directions; see [measurements](performance-methodology.md#large-stdio-results-owner-review). `glassport bundle --log-dir DIR -o OUT` discovers matching stdio journals;
+asynchronous analysis and an observe-mode journal. One worker processes wire
+entries in order, with a 64 MiB queued-line byte bound. Overflow drops analysis,
+records a sticky fault, and makes verification incomplete (`2`); it never waits
+for queue capacity. Shutdown drains for at most 10 seconds, then marks unfinished
+evidence truncated. See [measurements](performance-methodology.md#background-stdio-analysis-handoff-08). `glassport bundle --log-dir DIR -o OUT` discovers matching stdio journals;
 `glassport bundle verify OUT` can exit `0` when analysis and delivery linkage
 hold. The stdio gate retains its existing authority. Replay does not re-judge
 its schema, PII, taint, retry, attestation or quarantine checks; their reason
