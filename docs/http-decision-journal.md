@@ -283,14 +283,36 @@ captures use `mode: gate` and retain the gate's
 strict flag. Each stdio header carries an opaque epoch; the matching journal
 lives in `decisions/<epoch>.jsonl` beside the wire log.
 
-Both pump threads append and fold the same entry under one observer lock.
-Patterns are pinned at observer construction. On the server path, gate surface
-publication and observer folding share that lock, so a newly released client
-call cannot overtake the declaration in the wire log. The lock never spans the
-gate's client declaration wait or a pipe write. Client gate logic itself is
-unchanged. Intents precede forwarding or injected replies. Every client line,
-including blank lines and batches, gets one intent and one terminal delivery
-while recording works; server lines get wire markers, not intents.
+Both pumps assign sequence numbers, append the wire entry and digest, and
+queue work under one observer lock. One worker folds entries in that order,
+runs detectors with pinned patterns, and writes all normal journal records.
+It never takes the observer lock while analyzing. Existing server-side gate
+publication and wire receipt retain their shared ordering, so a newly released
+client call cannot overtake its declaration in the log. The lock never spans
+the client declaration wait or a pipe write. Gate behavior is unchanged.
+
+For stdio, **the wire entry is the pre-forward evidence**. The worker writes
+an intent after analysis, possibly after forwarding or an injected reply, then
+writes its matching delivery. A pump queues the delivery only after the
+transport outcome is known. Every recorded client line, including blanks and
+batches, has one intent and one terminal delivery while recording works;
+server lines have wire markers, not intents. HTTP retains its synchronous
+pre-forward intent and analysis contract.
+
+Queued line bytes are capped at 64 MiB (`MAX_QUEUED_LINE_BYTES`, no CLI flag).
+Overflow queues a small ordered fault marker instead of the payload. For a
+client line it retains the actual sequence, digest and gate facts, so the
+worker can record a faulted intent and its real delivery without inventing
+an analyzed event. The fault poisons later analysis; bundles verify `2`.
+Control records are separately bounded at twice the journal record cap;
+exhausting that backlog abandons analysis and marks it truncated.
+
+Shutdown stops intake and drains for up to 10 seconds
+(`DRAIN_TIMEOUT_SECONDS`) before files close. A timeout or worker death writes
+the existing hash-chained `truncated` record; replay reports `journal_truncated`
+and exit `2`. This includes a fault on a final server line with no later client
+intent to carry it. The shutdown thread may write this emergency marker after
+the worker times out; normal journal writes belong to the worker.
 
 | Delivery code | Outcome | Meaning |
 | --- | --- | --- |

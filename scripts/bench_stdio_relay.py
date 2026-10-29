@@ -37,7 +37,8 @@ def worker(case, iterations, result_bytes=0):
         gate = tap.Gate(idempotency_max_repeats=iterations + 1) if case == 'gate' else None
         log = tap.open_session_log(root / 'wire.jsonl', mode='gate' if gate else 'wrap')
         options = {}
-        journal = None
+        journal = observer = None
+        analysis_ns = analysis_bytes = 0
         try:
             from glassport.stdio_sessions import StdioObserver
         except ModuleNotFoundError:
@@ -47,6 +48,24 @@ def worker(case, iterations, result_bytes=0):
             if case != 'wrap':
                 observer = StdioObserver(log)
                 journal = DecisionJournal(root / 'decisions', observer, mode='gate' if gate else 'observe')
+                if hasattr(observer, 'start'):
+                    observer.start(journal)
+                    process = observer.worker._process
+
+                    def measured(item):
+                        nonlocal analysis_ns, analysis_bytes
+                        # Worker-only service time for the large result entries;
+                        # excludes queue wait, relay work and shutdown waiting.
+                        is_result = (item[0] == 'entry' and item[4] == 's2c'
+                                     and 'content' in item[1].get('frame', {}).get('result', {}))
+                        begin = time.perf_counter_ns()
+                        try:
+                            return process(item)
+                        finally:
+                            if is_result:
+                                analysis_ns += time.perf_counter_ns() - begin
+                                analysis_bytes += result_bytes
+                    observer.worker._process = measured
                 options = {'observer': observer, 'journal': journal}
         upstream, downstream = Sink(), Sink()
 
@@ -66,14 +85,20 @@ def worker(case, iterations, result_bytes=0):
                          'params': {'name': 'search', 'arguments': {'q': 'hello'}}})
             content = [{'type': 'text', 'text': 'x' * result_bytes}] if result_bytes else []
             result_elapsed += send('s2c', {'id': index + 2, 'result': {'content': content}})
+        relay_elapsed = time.perf_counter_ns() - start
+        if observer is not None and hasattr(observer, 'finish'):
+            if not observer.finish():
+                raise RuntimeError('analysis drain failed')
         log.write_metrics()
         log.close()
         if journal:
             journal.close()
         if upstream.getvalue().count(b'"tools/call"') != iterations:
             raise RuntimeError('benchmark calls did not reach upstream')
-        return (result_elapsed / iterations if result_bytes else
-                (time.perf_counter_ns() - start) / (2 * iterations))
+        return {'relay_ns_per_frame': (result_elapsed / iterations if result_bytes else
+                                      relay_elapsed / (2 * iterations)),
+                'analysis_mb_s': (analysis_bytes / 1_000_000 / (analysis_ns / 1e9)
+                                  if analysis_ns and analysis_bytes else None)}
 
 
 def main():
@@ -90,7 +115,7 @@ def main():
     if not 0 <= args.result_bytes <= 1_000_000:
         parser.error('result bytes must be 0..1000000')
     if args.worker:
-        print(worker(args.worker, args.iterations, args.result_bytes))
+        print(json.dumps(worker(args.worker, args.iterations, args.result_bytes)))
         return
     report = {'python': platform.python_version(), 'platform': platform.platform(),
               'uid': os.getuid() if hasattr(os, 'getuid') else None,
@@ -99,16 +124,23 @@ def main():
               'timed': 's2c pump entry to downstream write' if args.result_bytes else 'request/result pair', 'cases': {}}
     for case in ('wrap', 'wrap-journal', 'gate'):
         values = []
+        throughput = []
         for _ in range(args.samples):
             result = subprocess.run(
                 [sys.executable, str(Path(__file__).resolve()), '--worker', case,
                  '--iterations', str(args.iterations), '--result-bytes', str(args.result_bytes)], cwd=args.root,
                 env=dict(os.environ, PYTHONPATH=str(args.root.resolve() / 'src')),
                 capture_output=True, text=True, check=True, timeout=60)
-            values.append(float(result.stdout.strip()))
+            sample = json.loads(result.stdout)
+            values.append(sample['relay_ns_per_frame'])
+            if sample['analysis_mb_s'] is not None:
+                throughput.append(sample['analysis_mb_s'])
         report['cases'][case] = {'ns_per_frame': values,
                                 'median_ns': statistics.median(values),
                                 'p95_ns': sorted(values)[math.ceil(.95 * len(values)) - 1]}
+        if throughput:
+            report['cases'][case]['analysis_mb_s'] = {
+                'samples': throughput, 'median': statistics.median(throughput)}
     print(json.dumps(report, indent=2))
 
 

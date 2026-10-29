@@ -7,12 +7,11 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versions follow 
 ## [Unreleased]
 
 ### Added
-- verify stdio journal linkage and disclose unreplayed gate reasons
-- record stdio analysis and gate outcomes without deciding transport
-- give stdio captures unique epochs and wire digest receipts
+- add bounded ordered stdio analysis worker
 
-### Internal
-- publish stdio journal acceptance docs and CI bundle tier
+### Changed
+- move stdio analysis and journal writes off the pumps
+- Add stdio decision journals and replayable bundle evidence (#126)
 
 ## [0.9.0] - 2026-10-27
 

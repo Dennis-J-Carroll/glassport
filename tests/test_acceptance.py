@@ -250,6 +250,7 @@ class TestStdioAcceptance(unittest.TestCase):
             log = tap.open_session_log(root / "wire.jsonl", transport="stdio", mode="gate")
             observer = StdioObserver(log)
             journal = dj.DecisionJournal(root / "decisions", observer, mode="gate")
+            observer.start(journal)
             upstream = _Sink()
             downstream = _Sink()
             gate = tap.Gate(hold_timeout=1.0 if scenario == "concurrent-correlation"
@@ -329,6 +330,7 @@ class TestStdioAcceptance(unittest.TestCase):
                 forwarded = scenario in ("missing-declaration", "no-list-client")
             received = upstream.getvalue().count(b'"tools/call"') - before
             self.assertEqual(received, int(forwarded), scenario)
+            observer.finish()
             log.write_metrics()
             log.close()
             journal.close()
@@ -570,6 +572,7 @@ class TestStdioBundleMutationAcceptance(unittest.TestCase):
             log = tap.open_session_log(log_path, transport="stdio", mode="gate")
             observer = StdioObserver(log)
             journal = dj.DecisionJournal(root / "decisions", observer, mode="gate")
+            observer.start(journal)
             upstream = _Sink()
             tap.pump(io.BytesIO(_line({"jsonrpc": "2.0", "id": 4,
                                        "method": "tools/call",
@@ -577,6 +580,7 @@ class TestStdioBundleMutationAcceptance(unittest.TestCase):
                      upstream, log, "c2s", gate=tap.Gate(hold_timeout=0.01),
                      observer=observer, journal=journal)
             self.assertEqual(upstream.getvalue().count(b'"tools/call"'), 1)
+            observer.finish()
             log.write_metrics()
             log.close()
             journal.close()

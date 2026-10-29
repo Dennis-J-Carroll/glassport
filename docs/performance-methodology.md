@@ -153,10 +153,10 @@ analysis path.
 
 ## Large stdio results (owner review)
 
-Plain wrap and internal probe captures perform no live detector analysis.
-`wrap --journal` opts into synchronous observation; gate keeps its default
-journal. Both analyzed modes can stall both pumps while a result is scanned
-under the observer lock. Moving analysis off the relay path is deferred.
+This historical measurement describes #126 before background analysis.
+Plain wrap and internal probe performed no live detector analysis;
+`wrap --journal` and gate scanned synchronously under the observer lock.
+Current behavior and measurements follow below.
 
 Reproduce against `0047731` and the revised checkout using the revised driver:
 
@@ -185,3 +185,62 @@ These are relay-start latencies, not end-to-end execution times. Passive wrap
 logs after the downstream write, as v0.9.0 did; journal-enabled captures record
 and analyze before it. The large-frame cost is why journal analysis is opt-in
 for wrap. Small-frame averages above must not be extrapolated to large results.
+
+
+## Background stdio analysis (Handoff 08)
+
+One ordered worker per analyzed stdio session now owns folding, detectors and
+normal journal writes. The relay persists its wire receipt and enqueues work;
+it never waits for detector completion or queue capacity. The existing Gate
+still performs its own synchronous checks. CPU scheduling, file writes and
+pipe backpressure remain costs; this is not a universal latency ceiling.
+
+The default queue bound is **64 MiB of queued input-line bytes**, excluding
+one item already being analyzed and Python object overhead. Overflow replaces
+the payload with a compact ordered marker and poisons subsequent analysis.
+Client sequence/digest/gate facts and deliveries remain linked; verification
+returns `2`. Control records have an additional bound of twice the journal's
+record cap, preventing small overflow markers from growing without limit.
+Exceeding that cap abandons analysis and writes a truncation marker.
+Shutdown waits at most **10 seconds** for drain; unfinished work is explicitly
+truncated, never silently certified over a prefix. These are module constants,
+not CLI flags. Normal drains preserve exit-`0` bundles.
+
+Same host, UID 1000, CPython 3.13.5, Linux x86_64. Seven fresh processes per
+case, five 1,000,000-byte ASCII results per process, using the command above.
+No concurrent benchmark or test load. Both tables report per-process means,
+then median / nearest-rank p95 across processes; with seven samples p95 is
+only their maximum. Receive-to-write timing remains entry to the real s2c
+`pump` through its first downstream sink write, excluding input serialization,
+startup, real pipe syscalls, network and shutdown drain.
+
+| Mode | Main `12cfd03` median / p95 ms | Background worker median / p95 ms |
+| --- | ---: | ---: |
+| Passive wrap | 0.042 / 0.068 | 0.054 / 0.098 |
+| Wrap --journal | 811.178 / 1113.054 | 8.094 / 20.567 |
+| Gate | 950.314 / 1365.227 | 10.803 / 32.021 |
+
+Both **median** targets pass: gate 10.803 ms is below the pre-#126 gate
+baseline plus 25 ms (2.146 + 25 = 27.146 ms; also below 27.1 ms using the
+handoff's rounded baseline). Journal wrap 8.094 ms is below passive wrap plus
+25 ms (25.054 ms). Gate p95 is higher than that median budget and is reported
+without claiming a tail guarantee. An earlier branch run measured gate
+10.707 / 19.046 ms and journal wrap 9.253 / 14.089 ms.
+
+Small-frame medians, 500 request/result pairs per process: passive wrap
+19.216 → 16.447 µs/frame; journal wrap 148.908 → 32.494 µs/frame; gate
+429.433 → 157.394 µs/frame. The old driver included final close in these means;
+the updated driver stops relay timing before draining and closing. It must not
+charge asynchronous shutdown work as relay latency.
+
+Worker service throughput is reported separately by the updated driver:
+**1.241 MB/s** in journal wrap and **1.044 MB/s** in gate, median across seven
+processes. MB means 1,000,000 payload bytes. Timing wraps worker processing of
+the five large result entries (fold and detector pass); queue wait and drain
+waiting are excluded. The worker still analyzes every result in this scenario;
+no overflow or truncation occurred. Moving work off the relay does not make
+analysis faster, and sustained input faster than service can exhaust the bound.
+
+Raw before/after reports on the measurement host:
+`/tmp/h08-{large,small}-baseline.json` and
+`/tmp/h08-{large,small}-final.json`. Benchmark results are host/payload specific.

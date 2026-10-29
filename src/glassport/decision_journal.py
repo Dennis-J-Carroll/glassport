@@ -15,8 +15,9 @@ Three invariants hold every record honest:
   are *never* copied here. Only fixed vocabularies (annotation kind, sanitized
   subcategory, integer severity, decision action/reason, delivery outcome code)
   and digests of canonical semantic content reach disk.
-* **Intent is not delivery.** A candidate action is recorded before the upstream
-  request begins; the terminal delivery outcome is recorded after it resolves.
+* **Intent is not delivery.** HTTP records its candidate before sending.
+  Stdio persists the wire entry before relay, then its worker records analysis
+  and delivery asynchronously, always intent before the matching delivery.
   In observation mode a candidate BLOCK would still forward — which is exactly
   why the two records are distinct. A completed local send is never treated as
   proof that a remote tool executed.
@@ -394,6 +395,23 @@ class DecisionJournal:
             entries, self._epochs = list(self._epochs.values()), OrderedDict()
         for entry in entries:
             self._close(entry)
+
+    def truncate(self, epoch) -> None:
+        """Mark an abandoned stdio analysis stream using the existing format.
+
+        Normally called by its worker; shutdown may call it after a bounded
+        drain times out. The journal lock serializes the marker with any last
+        append, without acquiring an observer or detector lock.
+        """
+        with self._lock:
+            if self._closed or self.transport != "stdio":
+                return
+            entry = self._open(epoch)
+            if not entry.truncated:
+                entry.truncated = True
+                self._emit(entry, {"kind": "truncated", "epoch": entry.epoch,
+                                   "n": next(self._counter), "ts": _now_iso(),
+                                   "limit": self.limits.max_records})
 
     @staticmethod
     def _close(entry) -> None:
