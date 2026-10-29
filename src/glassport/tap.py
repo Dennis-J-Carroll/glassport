@@ -1267,18 +1267,10 @@ def pump(src, dst, log: SessionLog | None, direction: str,
             pass  # optional evidence never changes transport control flow
         return None
 
-    def intent(observation, blocked):
+    def delivery(seq, outcome, code, marker):
         try:
-            if journal is not None and observation is not None:
-                return journal.record_intent(observer.epoch, observation, enforce=blocked)
-        except Exception:
-            pass
-        return None
-
-    def delivery(handle, outcome, code, marker):
-        try:
-            if journal is not None:
-                journal.record_delivery(handle, outcome, code=code, gate=marker)
+            if observer is not None:
+                observer.delivery(seq, outcome, code, marker)
         except Exception:
             pass
 
@@ -1300,7 +1292,7 @@ def pump(src, dst, log: SessionLog | None, direction: str,
                             "forward", None,
                             {"action": "gate_skipped", "reason": "gate_check_error"})
                 if action == "block" and info is not None:
-                    handle = intent(record(direction, line, info), True)
+                    handle = record(direction, line, info)
                     # A refusal is already terminal even if the client pipe fails.
                     code = ("stdio_gate_strict_blocked"
                             if gate_level(info) == "blocked_evidence_gap"
@@ -1314,7 +1306,7 @@ def pump(src, dst, log: SessionLog | None, direction: str,
                 gate_info = info   # e.g. gate_skipped fail-open
                 # Before the write: the reply must find its request folded.
                 gate.observe_c2s(line)
-            # Gate publication on s2c and observer folding share this order.
+            # Gate publication on s2c and wire enqueueing share this order.
             # c2s gate checks above remain outside the observer lock.
             with (observer.lock if observer is not None and direction == "s2c"
                   else nullcontext()):
@@ -1351,7 +1343,7 @@ def pump(src, dst, log: SessionLog | None, direction: str,
                 # Passive wrap keeps the original post-write capture path.
                 observation = (record(direction, line, gate_info)
                                if observer is not None or gate is not None else None)
-            handle = intent(observation, False) if direction == "c2s" else None
+            handle = observation if direction == "c2s" else None
             try:
                 if dst_lock is not None:
                     with dst_lock:
@@ -1416,6 +1408,7 @@ def run_tap(server_cmd: list[str], log_dir: Path,
             journal = DecisionJournal(log_dir / "decisions", observer,
                                       mode="gate" if gate else "observe",
                                       strict=gate.strict if gate else False)
+            observer.start(journal)
         except Exception:
             pass  # capture/analysis setup cannot prevent the child from running
 
@@ -1439,6 +1432,12 @@ def run_tap(server_cmd: list[str], log_dir: Path,
             bufsize=0,  # unbuffered — frames must not sit in a buffer
         )
     except FileNotFoundError:
+        if observer is not None:
+            observer.finish()
+        if journal is not None:
+            journal.close()
+        if log is not None:
+            log.close()
         print(f"[glassport] command not found: {server_cmd[0]}", file=sys.stderr)
         return 127
 
@@ -1479,7 +1478,16 @@ def run_tap(server_cmd: list[str], log_dir: Path,
         signal.signal(s, _forward)
 
     rc = child.wait()
-    time.sleep(0.1)  # let pumps drain their last lines
+    time.sleep(0.1)  # allow a final c2s write; stdin can remain blocked forever
+    if observer is not None:
+        from glassport.stdio_sessions import DRAIN_TIMEOUT_SECONDS
+        deadline = time.monotonic() + DRAIN_TIMEOUT_SECONDS
+        # stdout/stderr reach EOF when the child exits; stdin need not. Never
+        # wait indefinitely for a client keeping its input pipe open.
+        for thread in threads[1:]:
+            thread.join(max(0, deadline - time.monotonic()))
+        observer.finish(max(0, deadline - time.monotonic()),
+                        pumps_complete=not threads[1].is_alive())
     if log is not None:
         log.write_metrics(
             frames_blocked=gate.blocked_count if gate is not None else 0,

@@ -196,11 +196,11 @@ class StdioAnalysisWorker:
 
 
 class StdioObserver:
-    """One ordered write/fold stream shared by both pumps, with frozen patterns.
+    """Persist and enqueue wire entries in one sequence shared by both pumps.
 
-    A failed fold poisons subsequent analysis, never the relay. Recording that
-    fault prevents a later successful prefix from masquerading as equivalence.
-    The lock never spans a pipe write or the gate's declaration wait.
+    The worker never takes this lock. No detector or journal write runs here.
+    The existing s2c gate publication and wire receipt share this order too;
+    pipe writes and c2s gate declaration waits remain outside it.
     """
     transport = 'stdio'
     limits = None
@@ -211,10 +211,17 @@ class StdioObserver:
         self.lock = threading.RLock()
         self.session_limits = SessionLimits()
         self.patterns = detectors.snapshot_pii_patterns()
-        self.builder = MCPTraceBuilder(retain_events=False, limits=self.session_limits)
-        self.engine = DetectorEngine(default_detectors(self.patterns))
         self.seq = log._seq
-        self._fault = None
+        self.worker = None
+        self._sealed = False
+        self._pending = set()
+
+    @property
+    def builder(self):
+        return self.worker.builder
+
+    def start(self, journal):
+        self.worker = StdioAnalysisWorker(self, journal)
 
     def pattern_snapshot(self, epoch):
         return self.patterns if epoch == self.epoch else None
@@ -222,24 +229,40 @@ class StdioObserver:
     def record(self, direction, line, gate=None):
         try:
             with self.lock:
+                if self._sealed:
+                    return None
                 self.seq += 1
                 entry, text = build_session_entry(direction, line, gate=gate, seq=self.seq)
                 digest = self.log.write_entry(entry, text)
-                event, annotations = None, ()
-                if self._fault is None:
-                    try:
-                        event = self.builder.feed(entry)
-                        if event is not None:
-                            annotations = tuple(self.engine.on_event(event, self.builder.state))
-                    except Exception as exc:
-                        self._fault = type(exc).__name__
-                return StdioObservation(
-                    self.epoch, self.seq, event, annotations, bool(digest),
-                    'stdio_analysis_failed' if self._fault else None,
-                    digest, None if digest else 'stdio_log_failed',
-                    gate, self._fault)
+                if self.worker is not None:
+                    self.worker.entry(entry, digest, gate, direction, len(line))
+                if direction == 'c2s':
+                    self._pending.add(self.seq)
+                return self.seq
         except Exception:
-            # Includes construction/serialization and injected recorder faults.
-            # No intent is preferable to inventing linkage for unwritten bytes.
-            self._fault = 'record_failed'
+            if self.worker is not None:
+                self.worker.fault()
             return None
+
+    def delivery(self, seq, outcome, code, gate=None):
+        try:
+            with self.lock:
+                if self._sealed:
+                    return
+                if self.worker is not None and seq is not None:
+                    self.worker.delivery(seq, outcome, code, gate)
+                self._pending.discard(seq)
+        except Exception:
+            if self.worker is not None:
+                self.worker.fault()
+
+    def finish(self, timeout=None, *, pumps_complete=True):
+        with self.lock:
+            self._sealed = True
+            incomplete = bool(self._pending) or not pumps_complete
+        if self.worker is None:
+            return False
+        complete = self.worker.finish(timeout)
+        if incomplete:
+            self.worker._truncate()
+        return complete and not incomplete

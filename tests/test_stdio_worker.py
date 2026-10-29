@@ -8,6 +8,7 @@ from unittest.mock import patch
 from glassport import bundle, stdio_sessions, tap
 from glassport.decision_journal import DecisionJournal
 from tests.test_stdio_journal import line
+from tests.test_stdio_journal import Capture
 
 
 class WorkerCapture:
@@ -122,6 +123,85 @@ class TestStdioWorker(unittest.TestCase):
             self.assertFalse(capture.worker._queue)
             capture.close()
             self.assertEqual(bundle.verify_exit_code(capture.verify()), 2)
+
+
+class TestStdioWorkerRelay(unittest.TestCase):
+    def verify(self, capture):
+        out = capture.root / 'bundle'
+        bundle.build_bundle([capture.path], None, None, out)
+        return bundle.verify_bundle(out)
+
+    def test_both_pumps_relay_while_analysis_is_stalled(self):
+        for mode in ('observe', 'gate'):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as tmp:
+                capture = Capture(Path(tmp), tap.Gate() if mode == 'gate' else None)
+                self.addCleanup(capture.close)
+                entered, release = threading.Event(), threading.Event()
+                engine = capture.observer.worker.engine
+                analyze = engine.on_event
+
+                def stall(*args):
+                    entered.set()
+                    self.assertTrue(release.wait(5))
+                    return analyze(*args)
+
+                with patch.object(engine, 'on_event', side_effect=stall):
+                    capture.send('c2s', {'id': 1, 'method': 'ping'})
+                    self.assertTrue(entered.wait(2))
+                    frames = [('c2s', line({'id': 2, 'method': 'ping'})),
+                              ('s2c', line({'id': 1, 'result': {}}))]
+                    threads = [threading.Thread(target=capture.send, args=item, daemon=True)
+                               for item in frames]
+                    try:
+                        for thread in threads:
+                            thread.start()
+                        for thread in threads:
+                            thread.join(1)
+                        self.assertTrue(all(not thread.is_alive() for thread in threads))
+                        self.assertEqual(capture.upstream.getvalue(),
+                                         line({'id': 1, 'method': 'ping'}) + frames[0][1])
+                        self.assertEqual(capture.downstream.getvalue(), frames[1][1])
+                    finally:
+                        release.set()
+                    capture.close()
+                self.assertEqual(bundle.verify_exit_code(self.verify(capture)), 0)
+
+    def test_overflow_keeps_gate_blocks_and_relay_bytes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            capture = Capture(Path(tmp), tap.Gate())
+            self.addCleanup(capture.close)
+            capture.declare()
+            self.assertTrue(capture.observer.worker.wait_idle())
+            before = capture.upstream.getvalue()
+            with patch.object(stdio_sessions, 'MAX_QUEUED_LINE_BYTES', 1):
+                capture.call('ghost')
+                capture.call('search', rid=3)
+            raw = line({'jsonrpc': '2.0', 'id': 3, 'method': 'tools/call',
+                        'params': {'name': 'search', 'arguments': {}}})
+            self.assertEqual(capture.upstream.getvalue(), before + raw)
+            capture.close()
+            result = self.verify(capture)
+            self.assertEqual(bundle.verify_exit_code(result), 2, result)
+            self.assertEqual(result['delivery_evidence_present']['status'], 'present')
+            records = capture.records()
+            self.assertEqual([r['code'] for r in records if r['kind'] == 'delivery'][-2:],
+                             ['stdio_gate_blocked', 'stdio_written'])
+
+    def test_worker_death_keeps_both_directions_byte_identical(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            capture = Capture(Path(tmp))
+            self.addCleanup(capture.close)
+            first = line({'id': 1, 'method': 'ping'})
+            with patch.object(capture.observer.worker, '_process', side_effect=SystemExit):
+                capture.send('c2s', first)
+                capture.observer.worker.thread.join(2)
+            self.assertTrue(capture.observer.worker.dead.is_set())
+            capture.send('c2s', first)
+            capture.send('s2c', first)
+            self.assertEqual(capture.upstream.getvalue(), first * 2)
+            self.assertEqual(capture.downstream.getvalue(), first)
+            capture.close()
+            self.assertEqual(bundle.verify_exit_code(self.verify(capture)), 2)
 
     def test_exception_does_not_kill_worker(self):
         with tempfile.TemporaryDirectory() as tmp:

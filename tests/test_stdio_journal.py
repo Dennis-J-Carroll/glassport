@@ -83,6 +83,7 @@ class Capture:
         self.journal = DecisionJournal(journal_dir or root / 'decisions', self.observer,
                                        mode='gate' if gate else 'observe',
                                        strict=bool(gate and gate.strict))
+        self.observer.start(self.journal)
         self.upstream, self.downstream = Sink(), Sink()
 
     def send(self, direction, frame):
@@ -102,9 +103,11 @@ class Capture:
                           'params': {'name': name, 'arguments': arguments or {}}})
 
     def records(self):
+        self.observer.worker.wait_idle()
         return [json.loads(raw) for raw in self.journal.path_for(self.observer.epoch).read_bytes().splitlines()]
 
     def close(self):
+        self.observer.finish()
         self.log.write_metrics()
         self.log.close()
         self.journal.close()
@@ -175,6 +178,7 @@ class TestStdioObserver(unittest.TestCase):
                             capture.send('c2s', frame)
                     else:
                         capture.send('c2s', frame)
+                    self.assertTrue(capture.observer.worker.wait_idle())
                 records = capture.records()
                 intents = [r for r in records if r['kind'] == 'intent']
                 deliveries = [r for r in records if r['kind'] == 'delivery']
@@ -195,7 +199,7 @@ class TestStdioObserver(unittest.TestCase):
                     self.assertTrue(intent['candidate_block'])
                 self.assertEqual(records[0]['transport'], 'stdio')
 
-    def test_intent_precedes_pipe_write_and_injected_reply(self):
+    def test_wire_precedes_pipe_write_and_injected_reply(self):
         with tempfile.TemporaryDirectory() as tmp, ExitStack() as cleanup:
             capture = Capture(Path(tmp), tap.Gate())
             cleanup.callback(capture.close)
@@ -204,8 +208,8 @@ class TestStdioObserver(unittest.TestCase):
 
             class InspectSink(Sink):
                 def write(inner, data):
-                    records = capture.records()
-                    self.assertEqual(records[-1]['kind'], 'intent')
+                    records = [json.loads(raw) for raw in capture.path.read_bytes().splitlines()]
+                    self.assertEqual(records[-1]['dir'], 'c2s')
                     seen.append('write')
                     return super().write(data)
 
@@ -215,11 +219,17 @@ class TestStdioObserver(unittest.TestCase):
             original = capture.downstream.write
 
             def injected(data):
-                records = capture.records()
-                self.assertTrue(next(r for r in reversed(records) if r['kind'] == 'intent')['enforce'])
+                records = [json.loads(raw) for raw in capture.path.read_bytes().splitlines()]
+                self.assertEqual(records[-1]['gate']['action'], 'blocked')
                 return original(data)
             capture.downstream.write = injected
             capture.call('ghost')
+            records = capture.records()
+            intents = {r['n']: r for r in records if r['kind'] == 'intent'}
+            for record in records:
+                if record['kind'] == 'delivery':
+                    self.assertIn(record['intent'], intents)
+                    self.assertLess(record['intent'], record['n'])
 
     def test_failed_pipe_has_one_unknown_delivery(self):
         with tempfile.TemporaryDirectory() as tmp, ExitStack() as cleanup:
@@ -257,6 +267,7 @@ class TestStdioObserver(unittest.TestCase):
             before = capture.upstream.getvalue()
             with patch.object(capture.observer.builder, 'feed', side_effect=RuntimeError('fault')):
                 capture.call('ghost')
+                self.assertTrue(capture.observer.worker.wait_idle())
             self.assertEqual(capture.upstream.getvalue(), before)
             intent = next(r for r in reversed(capture.records()) if r['kind'] == 'intent')
             self.assertTrue(intent['enforce'])
@@ -415,12 +426,15 @@ class TestStdioReplay(unittest.TestCase):
                 root = Path(tmp)
                 capture = Capture(root)
                 capture.declare()
+                self.assertTrue(capture.observer.worker.wait_idle())
                 if scenario == 'missing':
                     with patch.object(capture.journal, 'record_intent', return_value=None):
                         capture.call()
+                        self.assertTrue(capture.observer.worker.wait_idle())
                 else:
                     with patch.object(capture.observer.builder, 'feed', side_effect=RuntimeError('fault')):
                         capture.call()
+                        self.assertTrue(capture.observer.worker.wait_idle())
                 capture.close()
                 result = verify_journal(capture.journal.path_for(capture.observer.epoch), capture.path)
                 self.assertEqual(result.status, 'incomplete', result.as_dict())
@@ -559,8 +573,12 @@ argv += ['--', sys.executable, '-c',
          'import sys; sys.stdout.buffer.write(sys.stdin.buffer.read()); sys.stdout.buffer.flush()']
 with patch.object(DetectorEngine, 'on_event', autospec=True,
                   side_effect=DetectorEngine.on_event) as detector:
-    rc = tap.main(argv)
-    assert (detector.call_count > 0) == (mode in ('gate', 'wrap-journal')), detector.call_count
+    original_exit = tap.os._exit
+    def checked_exit(rc):
+        assert (detector.call_count > 0) == (mode in ('gate', 'wrap-journal')), detector.call_count
+        original_exit(rc)
+    with patch.object(tap.os, '_exit', side_effect=checked_exit):
+        rc = tap.main(argv)
 sys.exit(rc)
 """
                 env = dict(os.environ, PYTHONPATH=str(Path(tap.__file__).parents[1]))
