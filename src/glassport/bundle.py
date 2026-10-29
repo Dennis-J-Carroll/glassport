@@ -667,9 +667,17 @@ def _verify_bundle_impl(root: Path, trusted_key: Path | None = None) -> dict:
             by_intent: dict[int, list[dict]] = {}
             for record in deliveries:
                 by_intent.setdefault(record.get("intent"), []).append(record)
+            truncated_stdio = (recorded_profile
+                and recorded_profile.get("transport") == "stdio"
+                and any(r.get("kind") == "truncated" for r in journal))
             for n in intents:
-                if len(by_intent.get(n, [])) != 1:
-                    delivery_reasons.append("delivery_missing_or_duplicate")
+                count = len(by_intent.get(n, []))
+                if count != 1:
+                    # A bounded stdio drain can stop between an intent and its
+                    # delivery. Explicit truncation is missing evidence, not a
+                    # contradiction. Duplicates and unmarked deletion still fail.
+                    delivery_reasons.append("delivery_missing_truncated"
+                        if count == 0 and truncated_stdio else "delivery_missing_or_duplicate")
             seq_hashes = {r["seq"]: _digest(raw) for r, raw in zip(wire, raw_lines)
                           if type(r.get("seq")) is int}
             historical_exclusions = (
