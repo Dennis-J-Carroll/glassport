@@ -15,7 +15,7 @@ import sys
 
 from glassport import __version__, audit, decision_replay, detectors, evidence, sarif
 from glassport.adapters.mcp_session import from_mcp_session_file
-from glassport.limits import compute_limits
+from glassport.limits import compute_limits, stdio_gate_reasons, STDIO_GATE_LIMIT
 
 
 SCHEMA = "glassport.bundle/1"
@@ -101,7 +101,11 @@ def _wire_facts(records: list[dict], lines: list[bytes]):
               if isinstance(obs, dict) and isinstance(obs.get("epoch"), str)}
     if len(epochs) > 1:
         raise ValueError("wire_epoch_mismatch: multiple epochs in one log")
-    epoch = next(iter(epochs)) if epochs else "stdio"
+    header_epoch = header.get("epoch") if header and header.get("transport") == "stdio" else None
+    if header_epoch is not None and (not isinstance(header_epoch, str) or
+            len(header_epoch) != 32 or any(c not in "0123456789abcdef" for c in header_epoch)):
+        raise ValueError("invalid_stdio_epoch")
+    epoch = next(iter(epochs)) if epochs else header_epoch or "stdio"
     return header, trailer, entries, seqs, pretrailer, epoch
 
 
@@ -252,6 +256,8 @@ def _public_tier(root: Path, manifest: dict, key=None) -> None:
     remote_hashed = isinstance(original_header.get("remote"), dict)
     if remote_hashed:
         public_header["remote"] = _public_remote(original_header["remote"])
+    if "epoch" in public_header:
+        public_header["epoch"] = "epoch-0001"
     raw_hashes: dict[str, str] = {}
     raw_bytes_removed = 0
     for index, epoch in enumerate(redacted["evidence"]["epochs"], 1):
@@ -269,6 +275,8 @@ def _public_tier(root: Path, manifest: dict, key=None) -> None:
                 record = _redact_value(original_record)
                 records[position] = record
                 if kind == "wire":
+                    if original_record.get("type") == "glassport.header" and "epoch" in record:
+                        record["epoch"] = alias
                     if (original_record.get("type") == "glassport.header" and
                             isinstance(original_record.get("remote"), dict)):
                         record["remote"] = _public_remote(original_record["remote"])
@@ -415,6 +423,11 @@ def build_bundle(wire_paths: list[Path], journal_dir: Path | None,
         records, lines = _read_jsonl(source)
         header, trailer, entries, seqs, _pretrailer, epoch = _wire_facts(records, lines)
         journal_source = journal_by_epoch.get(epoch)
+        if (journal_source is None and journal_dir is None and header and
+                header.get("transport") == "stdio" and epoch != "stdio"):
+            candidate = source.parent / "decisions" / f"{epoch}.jsonl"
+            if candidate.is_file():
+                journal_source = candidate
         if header and header.get("transport") == "http" and epoch == "stdio":
             raise ValueError(f"wire_epoch_missing: {source}")
         if epoch in seen_epochs:
@@ -537,6 +550,45 @@ def build_bundle(wire_paths: list[Path], journal_dir: Path | None,
     return manifest
 
 
+def _stdio_historical_exclusions(entries, profile) -> set[int]:
+    """Prove gate-marker exclusions against earlier completed wire declarations.
+
+    Gate decisions can precede an observer fold of a newer tools/list reply.
+    Reuse the adapter's correlation, pagination and limits instead of treating
+    arbitrary tools/list-shaped JSON as a declaration. This is verification
+    only: it does not replay the gate or alter a transport decision.
+    """
+    from glassport.adapters.mcp_session import MCPTraceBuilder
+
+    limits = decision_replay._session_limits(profile)
+    if limits is None:
+        return set()
+    builder = MCPTraceBuilder(retain_events=False, limits=limits)
+    completed: set[frozenset[str]] = set()
+    proven: set[int] = set()
+    for entry in entries:
+        seq = entry.get("seq")
+        marker = entry.get("gate")
+        if (type(seq) is int and entry.get("dir") == "c2s"
+                and isinstance(marker, dict) and marker.get("action") == "blocked"):
+            tool, declared = marker.get("tool"), marker.get("declared")
+            if (isinstance(tool, str) and isinstance(declared, list)
+                    and all(isinstance(name, str) for name in declared)
+                    and tool not in declared and frozenset(declared) in completed):
+                proven.add(seq)
+        try:
+            event = builder.feed(entry)
+        except Exception:
+            return set()  # an unfoldable log proves no historical exemption
+        state = builder.state
+        if (event is not None and state.surface is not None
+                and state.surface_event_id == event.id):
+            # Add only after this entry: a future, orphaned or partial listing
+            # cannot justify an earlier block. Empty completed sets are valid.
+            completed.add(state.surface)
+    return proven
+
+
 def _verify_bundle_impl(root: Path, trusted_key: Path | None = None) -> dict:
     """Derive replay, delivery, and integrity verdicts from copied artifacts."""
     raw_manifest = (root / "manifest.json").read_bytes()
@@ -553,6 +605,7 @@ def _verify_bundle_impl(root: Path, trusted_key: Path | None = None) -> dict:
         integrity.append("public_redaction_not_replay_equivalent")
     epochs_out: list[dict] = []
     all_delivery: list[dict] = []
+    expected_stdio_limits = []
     for item in manifest.get("evidence", {}).get("epochs", []):
         epoch = item.get("epoch")
         wire_meta = item.get("wire") or {}
@@ -581,6 +634,10 @@ def _verify_bundle_impl(root: Path, trusted_key: Path | None = None) -> dict:
             delivery_reasons.append("trailer_not_last")
         if sum(r.get("type") == "glassport.metrics" for r in wire) > 1:
             delivery_reasons.append("trailer_multiple")
+        if header and header.get("transport") == "stdio":
+            reasons = stdio_gate_reasons(entries)
+            if reasons:
+                expected_stdio_limits.append({"code": STDIO_GATE_LIMIT, "reasons": reasons})
         journal_meta = item.get("journal")
         replay = {"status": "unsupported", "reasons": ["no_journal_for_path"]}
         if journal_meta is None:
@@ -615,12 +672,22 @@ def _verify_bundle_impl(root: Path, trusted_key: Path | None = None) -> dict:
                     delivery_reasons.append("delivery_missing_or_duplicate")
             seq_hashes = {r["seq"]: _digest(raw) for r, raw in zip(wire, raw_lines)
                           if type(r.get("seq")) is int}
+            historical_exclusions = (
+                _stdio_historical_exclusions(entries, recorded_profile)
+                if recorded_profile and recorded_profile.get("transport") == "stdio"
+                else set())
             actual_delivery = []
             for record in deliveries:
                 intent = intents.get(record.get("intent"))
                 if intent is None:
                     delivery_reasons.append("delivery_orphaned")
                     continue
+                if (recorded_profile and recorded_profile.get("transport") == "stdio"
+                        and record.get("outcome") == "blocked"
+                        and record.get("reason") == "gate_blocked"
+                        and intent.get("candidate_block") is not True
+                        and intent.get("wire_seq") not in historical_exclusions):
+                    epoch_integrity.append("stdio_undeclared_block_unproven")
                 seq = intent.get("wire_seq")
                 digest = intent.get("wire_entry_sha256")
                 if digest is None:
@@ -645,6 +712,9 @@ def _verify_bundle_impl(root: Path, trusted_key: Path | None = None) -> dict:
                                         "reasons": sorted(set(delivery_reasons))},
                            "integrity_reasons": sorted(set(epoch_integrity))})
         integrity.extend(epoch_integrity)
+    if expected_stdio_limits != [limit for limit in manifest.get("limits", [])
+                                if limit.get("code") == STDIO_GATE_LIMIT]:
+        integrity.append("stdio_gate_limit_mismatch")
     if len(all_delivery) != len(manifest.get("delivery", [])):
         integrity.append("manifest_delivery_mismatch")
     if manifest.get("profile", {}).get("header") != (

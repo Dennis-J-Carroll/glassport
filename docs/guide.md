@@ -753,6 +753,22 @@ onto this engine. See [the API, bounds, validation, and implementation record](p
 
 ---
 
+## Stdio decision bundles
+
+For journal-enabled stdio captures, the wire log records what the tap received before relay, so an s2c entry does not prove the client received it; passive wrap retains post-write logging.
+
+Stdio `gate` writes decision journals by default alongside its session log.
+Plain `wrap` and internal probe captures remain passive: no live detector
+analysis or journal, and bundles verify `2` (`no_journal_for_path`). Use
+`glassport wrap --journal [--log-dir DIR] -- <server command...>` to opt into
+synchronous analysis and an observe-mode journal. Large results add relay
+latency in both directions; see [measurements](performance-methodology.md#large-stdio-results-owner-review). `glassport bundle --log-dir DIR -o OUT` discovers matching stdio journals;
+`glassport bundle verify OUT` can exit `0` when analysis and delivery linkage
+hold. The stdio gate retains its existing authority. Replay does not re-judge
+its schema, PII, taint, retry, attestation or quarantine checks; their reason
+codes appear in `stdio_gate_reasons_not_replayed`. Old captures without epochs
+or journals still verify `2`. See [verification scope](bundle.md#stdio-verification-scope).
+
 ## Known boundaries
 
 Stated here so nobody discovers them the hard way:

@@ -115,6 +115,7 @@ def _read_records(path):
 def _profile_core(record) -> tuple:
     """The identity of a configuration profile, ignoring per-write fields."""
     return (record.get("schema"), record.get("mode"), record.get("strict"),
+            record.get("transport", "http"),
             json.dumps(record.get("authorization"), sort_keys=True),
             record.get("policy_version"), record.get("detector_engine"),
             record.get("pattern_digest"), record.get("pattern_status"),
@@ -152,6 +153,9 @@ def verify_journal(journal_path, wire_path, *, patterns=None) -> ReplayResult:
     profile = profiles[0]
     epoch = profile.get("epoch")
     recorded_engine = profile.get("detector_engine")
+    transport = profile.get("transport", "http")
+    if transport not in ("stdio", "http"):
+        return _unsupported("profile_invalid_transport", epoch, recorded_engine)
 
     current = dj.pattern_profile(
         detectors.snapshot_pii_patterns() if patterns is None else patterns)
@@ -200,6 +204,11 @@ def verify_journal(journal_path, wire_path, *, patterns=None) -> ReplayResult:
     if err:
         return _unsupported(f"wire_{err}", epoch)
 
+    if transport == "stdio":
+        header = next((r for r in wire if r.get("type") == "glassport.header"), {})
+        if header.get("transport") != "stdio" or header.get("epoch") != epoch:
+            return _unsupported("wire_epoch_mismatch", epoch, recorded_engine)
+
     by_seq, last = {}, None
     wire_hashes = {}
     limits = _session_limits(profile)
@@ -245,6 +254,21 @@ def verify_journal(journal_path, wire_path, *, patterns=None) -> ReplayResult:
                                       "replayed_action": None})
             return result
 
+    # Stdio promises one intent per client line, including blank/batch frames.
+    # A failed observer may omit one; that must not certify the surviving prefix.
+    if transport == "stdio":
+        client_seqs = {r["seq"] for r in wire if r.get("dir") == "c2s"
+                       and type(r.get("seq")) is int}
+        intent_seqs = [r.get("wire_seq") for r in intents]
+        if len(intent_seqs) != len(set(intent_seqs)):
+            return _unsupported("journal_duplicate_intent", epoch, recorded_engine)
+        if client_seqs - set(intent_seqs):
+            result.status = STATUS_INCOMPLETE
+            result.reasons.append("stdio_intent_missing")
+        if set(intent_seqs) - client_seqs:
+            result.status = STATUS_INCOMPLETE
+            result.reasons.append("missing_wire_evidence")
+
     comparable = []
     for record in intents:
         seq = record.get("event_seq")
@@ -287,6 +311,12 @@ def verify_journal(journal_path, wire_path, *, patterns=None) -> ReplayResult:
             problems.append("unrecorded_fault")
         if decision.action.value != record.get("action"):
             problems.append("action_mismatch")
+        # Stdio historical-surface proof may accept a false candidate. Keep
+        # that redundant flag bound to the recomputed policy action, so the
+        # fallback cannot hide a rewritten candidate on an ordinary block.
+        if (transport == "stdio" and record.get("candidate_block") is not
+                (decision.action is policy.Action.BLOCK)):
+            problems.append("candidate_block_mismatch")
         if dj.findings_digest(findings) != record.get("findings_digest"):
             problems.append("findings_mismatch")
         result.compared += 1
@@ -303,7 +333,8 @@ def verify_journal(journal_path, wire_path, *, patterns=None) -> ReplayResult:
         return result
     if result.missing_evidence:
         result.status = STATUS_INCOMPLETE
-        result.reasons.append("missing_wire_evidence")
+        if "missing_wire_evidence" not in result.reasons:
+            result.reasons.append("missing_wire_evidence")
     if missing_digests:
         result.status = STATUS_INCOMPLETE
         result.reasons.append("wire_digest_missing")

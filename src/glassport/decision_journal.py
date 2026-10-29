@@ -24,10 +24,10 @@ Three invariants hold every record honest:
 The candidate action is **mode-independent**: it is always computed with the
 blocking rule armed (``policy.decide(..., block_fabricated=True)``), in observe
 mode exactly as in gate mode, so "what would have been blocked" is visible
-without enforcing anything. Only :meth:`DecisionJournal.evaluate` — and through
-it ``Intent.enforce``, ``enforced`` and the ``blocked`` delivery outcome — reads
-the mode. ``evaluate`` narrows the candidate further: a candidate BLOCK that
-rests on a faulted, limited or unavailable analysis pass is never enforced.
+without enforcing anything. HTTP uses :meth:`DecisionJournal.evaluate` to
+narrow the candidate: a candidate BLOCK resting on faulted, limited or
+unavailable analysis is never enforced by default. Stdio supplies its separate
+Gate verdict explicitly; recording never evaluates or changes that verdict.
 
 Bounds (all configurable through :class:`JournalLimits`, all documented in
 ``docs/http-decision-journal.md``): tracked epochs, records per epoch, listed
@@ -70,11 +70,12 @@ MODE_OBSERVE = "observe"
 MODE_GATE = "gate"
 MODES = frozenset({MODE_OBSERVE, MODE_GATE})
 
-# Delivery outcome vocabulary. "sent" is a completed local send that upstream
-# answered — never evidence that a remote tool ran.
+# Delivery outcome vocabulary. HTTP "sent" includes an upstream status;
+# stdio "sent" means bytes written to the pipe, with no response implied.
+# Neither proves that a remote tool ran.
 OUTCOME_NOT_ATTEMPTED = "not_attempted"   # no upstream request was ever begun
 OUTCOME_NOT_SENT = "not_sent"             # begun, provably zero bytes on the wire
-OUTCOME_SENT = "sent"                     # complete request sent, status received
+OUTCOME_SENT = "sent"                     # completed local send; see transport code
 OUTCOME_FAILED = "failed"                 # status received, transfer failed after
 OUTCOME_UNKNOWN = "unknown"               # indeterminate: partial send or no status
 # Distinct from every outcome above, which all describe a real upstream
@@ -91,7 +92,8 @@ DELIVERY_CODES = frozenset({
     "not_begun", "framing_rejected", "connect_failed", "send_indeterminate",
     "response_indeterminate", "upstream_response", "body_transfer_failed",
     "handler_aborted", "http_gate_blocked", "http_gate_strict_blocked",
-    "invalid_mcp_request", "unspecified"})
+    "invalid_mcp_request", "unspecified", "stdio_written", "stdio_write_failed",
+    "stdio_gate_blocked", "stdio_gate_strict_blocked"})
 
 # A candidate BLOCK computed alongside any of these is never enforced: each one
 # says the analysis pass that produced it was itself incomplete, so the
@@ -304,7 +306,7 @@ class Intent:
     """Handle linking a later delivery record back to its decision record.
 
     `enforce` is the *enforcement* verdict, not the candidate one: True only in
-    gate mode, for a proved candidate BLOCK or a strict evidence-gap refusal.
+    gate mode, from HTTP's evaluated candidate or the stdio Gate's verdict.
     It is computed before any record is written, so a
     journal write failure can never turn a proved block into a forward.
     """
@@ -368,6 +370,9 @@ class DecisionJournal:
             raise ValueError(f"unknown journal mode {mode!r}")
         if type(strict) is not bool or (strict and mode != MODE_GATE):
             raise ValueError("strict requires gate mode and a boolean value")
+        self.transport = getattr(observer, "transport", "http")
+        if self.transport not in ("stdio", "http"):
+            raise ValueError("unknown journal transport")
         self.mode = mode
         self.strict = strict
         self._lock = threading.Lock()
@@ -482,6 +487,9 @@ class DecisionJournal:
             "kind": "profile", "schema": JOURNAL_SCHEMA, "epoch": epoch,
             "n": next(self._counter), "ts": _now_iso(), "mode": self.mode,
             "policy_version": POLICY_VERSION, "strict": self.strict,
+            # Missing transport has always meant HTTP. Keep its profile bytes
+            # stable; stdio opts into its marker-based evidence semantics.
+            **({"transport": "stdio"} if self.transport == "stdio" else {}),
             "authorization": {"status": "not_evaluated"},
             "detector_engine": DETECTOR_ENGINE_VERSION,
             "pattern_digest": profile.digest,
@@ -556,15 +564,16 @@ class DecisionJournal:
         never got a context, or a closed journal) — unavailable evidence stays
         fail-open, exactly as the surrounding observation path does.
 
-        `enforce` is the already-computed enforcement verdict. A transport that
-        acts on a block MUST compute it with :meth:`evaluate` *before* calling
-        this method and pass it in, so that no failure inside recording can
-        change what the transport does. None (the default) recomputes it here,
-        for callers that only record. A failed record cannot revoke a strict
-        verdict already supplied by the transport.
+        `enforce` is the already-computed enforcement verdict: HTTP uses
+        :meth:`evaluate`; stdio MUST pass its own Gate verdict and never call
+        evaluate. A recording failure cannot change what the transport does.
+        None (the default) recomputes the HTTP verdict for recording-only
+        callers; a stdio call without an explicit verdict records nothing.
         """
         if self._closed or not isinstance(epoch, str) or not epoch:
             return None
+        if self.transport == "stdio" and enforce is None:
+            return None  # Only Gate.check_c2s can supply the stdio verdict.
         enforce = bool(self.evaluate(observation)) if enforce is None else bool(enforce)
         # Epoch ids are locally generated hex today, so this is a no-op for
         # every real caller — and a guarantee that no future one can route an
@@ -606,6 +615,9 @@ class DecisionJournal:
             # "nothing to attribute the decision to" case used above —
             # unavailable evidence stays fail-open.
             return None
+        if self.transport == "stdio" and getattr(observation, "analysis_fault", None):
+            faults.append({"detector": "stdio_observer", "error_type":
+                           _safe_token(observation.analysis_fault)})
         wire_seq = getattr(observation, "seq", None)
         if isinstance(wire_seq, bool) or not isinstance(wire_seq, int):
             wire_seq = None
@@ -626,9 +638,10 @@ class DecisionJournal:
             # deliberately separate so the gap between them stays auditable.
             "candidate_block": action == policy.Action.BLOCK.value,
             "enforce": enforce,
-            "evidence_level": evidence.intent_level(
+            "evidence_level": (evidence.gate_level(getattr(observation, "gate", None) or {})
+                if self.transport == "stdio" else evidence.intent_level(
                 analyzed=analyzed, candidate_block=action == policy.Action.BLOCK.value,
-                enforce=enforce, strict_gap=bool(self.strict_reason(observation))),
+                enforce=enforce, strict_gap=bool(self.strict_reason(observation)))),
             "wire_seq": wire_seq,
             "wire_entry_sha256": (getattr(observation, "wire_entry_sha256", None)
                                   if getattr(observation, "persisted", False) else None),
@@ -655,12 +668,12 @@ class DecisionJournal:
                       analyzed)
 
     def record_delivery(self, intent, outcome, *, code=None, status=None,
-                        reason=None) -> bool:
+                        reason=None, gate=None) -> bool:
         """Record the terminal delivery outcome for one recorded intent.
 
-        A "sent" outcome means the complete request left the local socket and
-        upstream answered. It is not evidence that a remote tool executed. A
-        "blocked" outcome means no upstream request was ever begun.
+        HTTP "sent" means a complete request send with an upstream status;
+        stdio "sent" means bytes written to the pipe, with no response implied.
+        Neither proves remote execution. "blocked" means no upstream send.
         """
         if self._closed or not isinstance(intent, Intent):
             return False
@@ -687,6 +700,18 @@ class DecisionJournal:
                 outcome=outcome, code=code, candidate_action=intent.action,
                 analyzed=intent.analyzed),
         }
+        if self.transport == "stdio":
+            marker = gate if isinstance(gate, dict) else {}
+            record["evidence_level"] = evidence.gate_level(marker)
+            action = marker.get("action")
+            if isinstance(action, str) and action in evidence.GATE_ACTIONS:
+                record["gate_action"] = action
+            if marker:
+                reason = marker.get("reason")
+                if reason is None and action == "blocked" and "declared" in marker:
+                    reason = "gate_blocked"
+                record["reason"] = (reason if isinstance(reason, str)
+                                    and reason in evidence.GATE_REASONS else "redacted")
         if code == "http_gate_strict_blocked":
             record["reason"] = _safe_token(reason, default="evidence_unavailable")
         with self._lock:

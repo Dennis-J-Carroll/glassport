@@ -17,6 +17,16 @@ jobs:
         run: PYTHONPATH=src python scripts/build_ci_bundle.py --out ci-bundle
       - name: Verify bundle before upload
         run: PYTHONPATH=src python -c 'from glassport.tap import main; import sys; sys.exit(main(["bundle", "verify", "ci-bundle", "--json"]))'
+      - name: Build fresh stdio gate bundle
+        run: PYTHONPATH=src python scripts/build_ci_bundle.py --transport stdio --out ci-bundle-stdio
+      - name: Verify stdio bundle before upload
+        run: PYTHONPATH=src python -c 'from glassport.tap import main; import sys; sys.exit(main(["bundle", "verify", "ci-bundle-stdio", "--json"]))'
+      - name: Upload verified stdio bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: glassport-stdio-bundle-${{ github.sha }}
+          path: ci-bundle-stdio/
+          if-no-files-found: error
       - name: Upload verified bundle
         uses: actions/upload-artifact@v4
         with:

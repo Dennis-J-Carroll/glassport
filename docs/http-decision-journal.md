@@ -1,4 +1,4 @@
-# HTTP decision and delivery records
+# HTTP and stdio decision and delivery records
 
 The HTTP observer records what analysis concluded and what transport did.
 `observe` records candidate blocks but forwards. `gate --transport http`
@@ -127,7 +127,7 @@ The pattern set is **frozen when the epoch is created**, not read per scan. The
 PII registry is process-global and mutable (`register_pii_pattern`, the
 `GLASSPORT_PII_PATTERNS` autoload); re-reading it on every scan would let a
 mid-session change silently alter what a recorded decision was computed from.
-Ordinary callers — the stdio tap, `summarize`, `advise`, `audit` — still read
+Ordinary callers — the stdio gate checks, `summarize`, `advise`, `audit` — still read
 the live registry, unchanged: `detectors._scan_pii()` and friends take an
 optional pattern set whose default is `None`.
 
@@ -271,3 +271,50 @@ is not attributed to a guessed epoch.
 Delivery records describe what transport did. A strict refusal records
 `http_gate_strict_blocked` and its fixed evidence-gap reason when the journal
 append succeeds. Neither journal nor replay proves authorization.
+
+
+## Stdio journals
+
+The existing document path is retained for incoming links. `run_tap` now creates
+an observer and journal for gate captures and explicit `wrap --journal`, when
+the session log works. Plain wrap and internal probe remain passive with no
+live analysis or journal. Opted-in wrap uses journal `mode: observe`; gate
+captures use `mode: gate` and retain the gate's
+strict flag. Each stdio header carries an opaque epoch; the matching journal
+lives in `decisions/<epoch>.jsonl` beside the wire log.
+
+Both pump threads append and fold the same entry under one observer lock.
+Patterns are pinned at observer construction. On the server path, gate surface
+publication and observer folding share that lock, so a newly released client
+call cannot overtake the declaration in the wire log. The lock never spans the
+gate's client declaration wait or a pipe write. Client gate logic itself is
+unchanged. Intents precede forwarding or injected replies. Every client line,
+including blank lines and batches, gets one intent and one terminal delivery
+while recording works; server lines get wire markers, not intents.
+
+| Delivery code | Outcome | Meaning |
+| --- | --- | --- |
+| `stdio_written` | `sent` | bytes written to the server stdin pipe; no response implied |
+| `stdio_write_failed` | `unknown` | pipe write or flush failed; partial delivery possible |
+| `stdio_gate_blocked` | `blocked` | the stdio gate withheld the line |
+| `stdio_gate_strict_blocked` | `blocked` | the stdio gate withheld the line because a check could not complete |
+
+The delivery's `reason` uses `evidence.GATE_REASONS`, `gate_blocked` for an
+undeclared tool, or `redacted` for an unknown/missing reason. A skipped/disabled
+forward also includes fixed `gate_action`. Stdio intent and delivery levels use
+`gate_level(marker)` rather than HTTP `strict_reason`; an unmarked line remains
+`observed` even after a successful `stdio_written` outcome.
+
+The observer never calls `DecisionJournal.evaluate`. `Gate.check_c2s` supplies
+`enforce`, independently of the analysis candidate. Journal failures cannot
+change the chosen block or forward. A fold fault is recorded and poisons later
+analysis in that epoch; replay reports incomplete rather than certifying a
+partial analysis. A missing intent is also incomplete. Work remains bounded by
+session/detector limits and the existing journal record cap.
+
+Stdio replay checks detector analysis and linkage, not the gate's schema, PII,
+taint, attestation, timing, override-file or quarantine logic. See the
+[`stdio_gate_reasons_not_replayed` limit and consistency check](bundle.md#stdio-verification-scope).
+A clean raw bundle can verify `0` with that limit. Public verification remains
+`2` because redacted records cannot reproduce raw analysis. Old no-epoch logs
+without journals continue to verify `2`.
