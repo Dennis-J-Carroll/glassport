@@ -757,6 +757,8 @@ onto this engine. See [the API, bounds, validation, and implementation record](p
 
 For journal-enabled stdio captures, the wire log records what the tap received before relay, so an s2c entry does not prove the client received it; passive wrap retains post-write logging.
 
+When the server exits, every stdio capture waits for its last output to reach the client before exiting: up to 2 seconds for plain `wrap` and probe, and up to the 10-second drain below for journal captures. The wait ends early as soon as server output reaches end-of-file, so it adds no delay in the normal case.
+
 Stdio `gate` writes decision journals by default alongside its session log.
 Plain `wrap` and internal probe captures remain passive: no live detector
 analysis or journal, and bundles verify `2` (`no_journal_for_path`). Use
