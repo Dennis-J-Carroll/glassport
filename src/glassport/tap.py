@@ -1386,6 +1386,11 @@ def line_reader(raw):
     return io.BufferedReader(raw, buffer_size=LINE_READ_BUFFER)
 
 
+# Longest a passive capture waits, after the server exits, for its last output
+# to reach the client. Journal captures use stdio_sessions.DRAIN_TIMEOUT_SECONDS.
+PUMP_DRAIN_SECONDS = 2.0
+
+
 def pump_stderr(src, dst) -> None:
     """Pass the child's stderr through untouched (no framing assumed)."""
     try:
@@ -1501,11 +1506,17 @@ def run_tap(server_cmd: list[str], log_dir: Path,
     time.sleep(0.1)  # allow a final c2s write; stdin can remain blocked forever
     if observer is not None:
         from glassport.stdio_sessions import DRAIN_TIMEOUT_SECONDS
-        deadline = time.monotonic() + DRAIN_TIMEOUT_SECONDS
-        # stdout/stderr reach EOF when the child exits; stdin need not. Never
-        # wait indefinitely for a client keeping its input pipe open.
-        for thread in threads[1:]:
-            thread.join(max(0, deadline - time.monotonic()))
+        drain_seconds = DRAIN_TIMEOUT_SECONDS
+    else:
+        drain_seconds = PUMP_DRAIN_SECONDS
+    deadline = time.monotonic() + drain_seconds
+    # stdout/stderr reach EOF when the child exits; stdin need not. Never
+    # wait indefinitely for a client keeping its input pipe open. Without
+    # this join, os._exit below could drop server output a slow client had
+    # not yet received.
+    for thread in threads[1:]:
+        thread.join(max(0, deadline - time.monotonic()))
+    if observer is not None:
         observer.finish(max(0, deadline - time.monotonic()),
                         pumps_complete=not threads[1].is_alive())
     if log is not None:
