@@ -64,6 +64,7 @@ from glassport.detectors import (
 import difflib
 import hashlib
 import importlib.metadata
+import io
 import json
 import math
 import os
@@ -1369,6 +1370,22 @@ def pump(src, dst, log: SessionLog | None, direction: str,
             pass
 
 
+# Read size for the server's stdout. Large enough to take a whole typical
+# frame in a few syscalls, small enough to stay out of the way.
+LINE_READ_BUFFER = 64 * 1024
+
+
+def line_reader(raw):
+    """Buffer a raw pipe for readline without delaying any frame.
+
+    readline() on an unbuffered FileIO reads one byte per syscall: a 1 MB
+    line costs about a million read() calls. BufferedReader asks the pipe for
+    up to LINE_READ_BUFFER bytes and takes whatever is already there, so a
+    frame is returned as soon as its newline arrives, never held for more.
+    """
+    return io.BufferedReader(raw, buffer_size=LINE_READ_BUFFER)
+
+
 def pump_stderr(src, dst) -> None:
     """Pass the child's stderr through untouched (no framing assumed)."""
     try:
@@ -1429,7 +1446,10 @@ def run_tap(server_cmd: list[str], log_dir: Path,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            bufsize=0,  # unbuffered — frames must not sit in a buffer
+            # Unbuffered so a frame written to the child never sits in a
+            # buffer. Reads are buffered separately (line_reader), which
+            # never waits for more data than the pipe already holds.
+            bufsize=0,
         )
     except FileNotFoundError:
         if observer is not None:
@@ -1459,7 +1479,7 @@ def run_tap(server_cmd: list[str], log_dir: Path,
                          kwargs={"gate": gate, "client_write": client_write,
                                  "observer": observer, "journal": journal}),
         threading.Thread(target=pump, daemon=True,
-                         args=(child.stdout, stdout_b, log, "s2c"),
+                         args=(line_reader(child.stdout), stdout_b, log, "s2c"),
                          kwargs={"gate": gate, "dst_lock": out_lock,
                                  "observer": observer}),
         threading.Thread(target=pump_stderr, daemon=True,

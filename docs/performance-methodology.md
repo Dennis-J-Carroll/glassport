@@ -244,3 +244,28 @@ analysis faster, and sustained input faster than service can exhaust the bound.
 Raw before/after reports on the measurement host:
 `/tmp/h08-{large,small}-baseline.json` and
 `/tmp/h08-{large,small}-final.json`. Benchmark results are host/payload specific.
+
+## Server output reads (stdio s2c)
+
+`bench_stdio_relay.py` feeds `pump()` from an in-memory buffer, so it never
+measured reading the server's stdout. `run_tap` starts the server with
+`bufsize=0`, and `readline()` on that raw pipe made one `read()` syscall per
+byte. The s2c pump now reads through `tap.line_reader`, a 64 KiB
+`io.BufferedReader` that returns each line as soon as its newline arrives;
+writes to the server stay unbuffered.
+
+```
+python3 scripts/bench_stdio_pipe_read.py --samples 5
+```
+
+Pipe write to complete line returned, median of five, CPython 3.13, Linux:
+
+| Line size | Unbuffered (before) | `line_reader` (after) | read() calls before → after |
+| ---: | ---: | ---: | ---: |
+| 1 KB | 1.206 ms | 0.237 ms | 1,001 → 1 |
+| 100 KB | 80.346 ms | 0.468 ms | 100,001 → 2 |
+| 1 MB | 789.658 ms | 1.567 ms | 1,000,001 → 16 |
+
+End to end, `strace -f -c -e trace=read` on `glassport wrap` around a server
+that writes one 1 MB line counted 939,915 `read()` calls before and 314 after.
+This cost applied to every stdio mode, passive wrap included.
