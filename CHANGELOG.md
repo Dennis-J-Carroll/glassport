@@ -6,11 +6,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versions follow 
 
 ## [Unreleased]
 
-### Added
-- add bounded ordered stdio analysis worker
+### Fixed
+- wait for the server's last output before plain wrap exits (#129)
 
 ### Changed
-- move stdio analysis and journal writes off the pumps
+- buffer stdio server-output reads instead of one syscall per byte (#128)
+- Move stdio analysis off the relay path (#127)
 - Add stdio decision journals and replayable bundle evidence (#126)
 
 ## [0.9.0] - 2026-10-27
