@@ -804,6 +804,24 @@ _CONFUSABLES = str.maketrans({
 # information for CREDENTIAL PATTERN MATCHING specifically (unlike display,
 # where an Mc vowel sign is script-essential), so all three are scan-dropped.
 _MARK_CATEGORIES = frozenset({"Mn", "Mc", "Me"})
+_ASCII_RUN_RE = re.compile(r"[\x00-\x7f]+")
+
+
+def _append_non_ascii_normalized(text: str, start: int, end: int,
+                                 out: list[str], origin: list[int] | None) -> None:
+    """Apply the original per-character normalization to one non-ASCII run.
+
+    Keeping this body shared preserves redaction's origin map and scanning's
+    exact per-character NFKC semantics. `origin=None` avoids allocating a map
+    when the caller needs only scan text.
+    """
+    for i, ch in enumerate(text[start:end], start):
+        if _INVISIBLE_RE.match(ch) or unicodedata.category(ch) in _MARK_CATEGORIES:
+            continue
+        for nc in unicodedata.normalize("NFKC", ch.translate(_CONFUSABLES)):
+            out.append(nc)
+            if origin is not None:
+                origin.append(i)
 
 
 def _normalize_with_map(text: str) -> tuple[str, list[int]]:
@@ -827,18 +845,28 @@ def _normalize_with_map(text: str) -> tuple[str, list[int]]:
     fail-closed backstop in redact_secrets_strict proves any drift is safe."""
     out: list[str] = []
     origin: list[int] = []
-    for i, ch in enumerate(text):
-        if _INVISIBLE_RE.match(ch) or unicodedata.category(ch) in _MARK_CATEGORIES:
-            continue
-        for nc in unicodedata.normalize("NFKC", ch.translate(_CONFUSABLES)):
-            out.append(nc)
-            origin.append(i)
+    end = 0
+    for match in _ASCII_RUN_RE.finditer(text):
+        _append_non_ascii_normalized(text, end, match.start(), out, origin)
+        out.append(match.group())
+        origin.extend(range(match.start(), match.end()))
+        end = match.end()
+    _append_non_ascii_normalized(text, end, len(text), out, origin)
     return "".join(out), origin
 
 
 def _normalize_for_scan(text: str) -> str:
     """Defeat obfuscation before pattern-matching. See _normalize_with_map."""
-    return _normalize_with_map(text)[0]
+    if text.isascii():
+        return text
+    out: list[str] = []
+    end = 0
+    for match in _ASCII_RUN_RE.finditer(text):
+        _append_non_ascii_normalized(text, end, match.start(), out, None)
+        out.append(match.group())
+        end = match.end()
+    _append_non_ascii_normalized(text, end, len(text), out, None)
+    return "".join(out)
 
 
 # Look-alike / hidden characters html.escape leaves untouched. A hostile
