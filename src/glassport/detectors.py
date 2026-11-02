@@ -562,6 +562,29 @@ PII_PATTERNS: list[PIIPattern] = [
         None, "private IP address (RFC 1918)"),
 ]
 
+# Each literal below is necessary for its built-in regex to match. Apply by
+# object identity: custom patterns, even with the same category, keep their
+# full scan. Values are alternatives; at least one must occur in the text.
+_BUILTIN_REQUIRED_LITERALS: dict[int, tuple[str, ...]] = {
+    id(pat): literals for pat, literals in (
+        (PII_PATTERNS[0], ("-----BEGIN ",)),
+        (PII_PATTERNS[1], ("-----BEGIN PGP PRIVATE KEY BLOCK-----",)),
+        (PII_PATTERNS[2], ("sk-ant-api03-",)),
+        (PII_PATTERNS[3], ("sk-",)),
+        (PII_PATTERNS[4], ("AKIA",)),
+        (PII_PATTERNS[6], ("_",)),
+        (PII_PATTERNS[7], ("_",)),
+        (PII_PATTERNS[8], ("xox",)),
+        (PII_PATTERNS[9], ("://",)),
+        (PII_PATTERNS[10], ("eyJ",)),
+        (PII_PATTERNS[11], (":", "=")),
+        (PII_PATTERNS[12], ("-",)),
+        (PII_PATTERNS[15], ("@",)),
+        (PII_PATTERNS[16], ("10.", "172.", "192.168.")),
+    )
+}
+_BUILTIN_AWS_SECRET_ID = id(PII_PATTERNS[5])
+
 # Trusted clouds/CDNs: presence here only DOWNGRADES an egress finding.
 TRUSTED_HOSTS = {"localhost", "127.0.0.1", "::1", "0.0.0.0"}
 TRUSTED_DOMAINS = {
@@ -804,6 +827,24 @@ _CONFUSABLES = str.maketrans({
 # information for CREDENTIAL PATTERN MATCHING specifically (unlike display,
 # where an Mc vowel sign is script-essential), so all three are scan-dropped.
 _MARK_CATEGORIES = frozenset({"Mn", "Mc", "Me"})
+_ASCII_RUN_RE = re.compile(r"[\x00-\x7f]+")
+
+
+def _append_non_ascii_normalized(text: str, start: int, end: int,
+                                 out: list[str], origin: list[int] | None) -> None:
+    """Apply the original per-character normalization to one non-ASCII run.
+
+    Keeping this body shared preserves redaction's origin map and scanning's
+    exact per-character NFKC semantics. `origin=None` avoids allocating a map
+    when the caller needs only scan text.
+    """
+    for i, ch in enumerate(text[start:end], start):
+        if _INVISIBLE_RE.match(ch) or unicodedata.category(ch) in _MARK_CATEGORIES:
+            continue
+        for nc in unicodedata.normalize("NFKC", ch.translate(_CONFUSABLES)):
+            out.append(nc)
+            if origin is not None:
+                origin.append(i)
 
 
 def _normalize_with_map(text: str) -> tuple[str, list[int]]:
@@ -827,18 +868,28 @@ def _normalize_with_map(text: str) -> tuple[str, list[int]]:
     fail-closed backstop in redact_secrets_strict proves any drift is safe."""
     out: list[str] = []
     origin: list[int] = []
-    for i, ch in enumerate(text):
-        if _INVISIBLE_RE.match(ch) or unicodedata.category(ch) in _MARK_CATEGORIES:
-            continue
-        for nc in unicodedata.normalize("NFKC", ch.translate(_CONFUSABLES)):
-            out.append(nc)
-            origin.append(i)
+    end = 0
+    for match in _ASCII_RUN_RE.finditer(text):
+        _append_non_ascii_normalized(text, end, match.start(), out, origin)
+        out.append(match.group())
+        origin.extend(range(match.start(), match.end()))
+        end = match.end()
+    _append_non_ascii_normalized(text, end, len(text), out, origin)
     return "".join(out), origin
 
 
 def _normalize_for_scan(text: str) -> str:
     """Defeat obfuscation before pattern-matching. See _normalize_with_map."""
-    return _normalize_with_map(text)[0]
+    if text.isascii():
+        return text
+    out: list[str] = []
+    end = 0
+    for match in _ASCII_RUN_RE.finditer(text):
+        _append_non_ascii_normalized(text, end, match.start(), out, None)
+        out.append(match.group())
+        end = match.end()
+    _append_non_ascii_normalized(text, end, len(text), out, None)
+    return "".join(out)
 
 
 # Look-alike / hidden characters html.escape leaves untouched. A hostile
@@ -1269,6 +1320,14 @@ def _scan_normalized(text: str,
     raw: list[tuple[PIIPattern, str, int, int]] = []
     structural_spans: list[tuple[int, int]] = []
     for pat in (_active_patterns() if patterns is None else patterns):
+        required = _BUILTIN_REQUIRED_LITERALS.get(id(pat))
+        if required is not None and not any(literal in text for literal in required):
+            continue
+        # An uninterrupted alphanumeric text longer than 40 characters
+        # cannot contain an isolated exact-40-character AWS-secret match.
+        if (id(pat) == _BUILTIN_AWS_SECRET_ID and len(text) != 40
+                and text.isascii() and text.isalnum()):
+            continue
         for m in pat.pattern.finditer(text):
             value = m.group(m.lastindex) if m.lastindex else m.group(0)
             if pat.validator and not pat.validator(value):

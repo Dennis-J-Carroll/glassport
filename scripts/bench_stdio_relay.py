@@ -30,8 +30,9 @@ class Sink(io.BytesIO):
         pass
 
 
-def worker(case, iterations, result_bytes=0):
+def worker(case, iterations, result_bytes=0, payload_shape='x'):
     from glassport import tap
+    from bench_analysis_worker import payload
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
         gate = tap.Gate(idempotency_max_repeats=iterations + 1) if case == 'gate' else None
@@ -83,7 +84,7 @@ def worker(case, iterations, result_bytes=0):
         for index in range(iterations):
             send('c2s', {'id': index + 2, 'method': 'tools/call',
                          'params': {'name': 'search', 'arguments': {'q': 'hello'}}})
-            content = [{'type': 'text', 'text': 'x' * result_bytes}] if result_bytes else []
+            content = [{'type': 'text', 'text': payload(payload_shape, result_bytes)}] if result_bytes else []
             result_elapsed += send('s2c', {'id': index + 2, 'result': {'content': content}})
         relay_elapsed = time.perf_counter_ns() - start
         if observer is not None and hasattr(observer, 'finish'):
@@ -109,17 +110,21 @@ def main():
     parser.add_argument('--worker', choices=('wrap', 'wrap-journal', 'gate'))
     parser.add_argument('--result-bytes', type=int, default=0,
                         help='text bytes in each tool result; time s2c pump entry to downstream write when nonzero')
+    parser.add_argument('--payload-shape', choices=('ascii-prose', 'x', 'mixed', 'all-cjk',
+                                                    'pii-dense', 'adversarial'), default='x')
     args = parser.parse_args()
     if args.samples < 1 or not 1 <= args.iterations <= 2000:
         parser.error('positive samples and 1..2000 iterations required (journal record cap)')
     if not 0 <= args.result_bytes <= 1_000_000:
         parser.error('result bytes must be 0..1000000')
     if args.worker:
-        print(json.dumps(worker(args.worker, args.iterations, args.result_bytes)))
+        print(json.dumps(worker(args.worker, args.iterations, args.result_bytes,
+                                args.payload_shape)))
         return
     report = {'python': platform.python_version(), 'platform': platform.platform(),
               'uid': os.getuid() if hasattr(os, 'getuid') else None,
               'root': str(args.root.resolve()), 'samples': args.samples,
+              'payload_shape': args.payload_shape,
               'pairs_per_sample': args.iterations, 'result_bytes': args.result_bytes,
               'timed': 's2c pump entry to downstream write' if args.result_bytes else 'request/result pair', 'cases': {}}
     for case in ('wrap', 'wrap-journal', 'gate'):
@@ -128,7 +133,8 @@ def main():
         for _ in range(args.samples):
             result = subprocess.run(
                 [sys.executable, str(Path(__file__).resolve()), '--worker', case,
-                 '--iterations', str(args.iterations), '--result-bytes', str(args.result_bytes)], cwd=args.root,
+                 '--iterations', str(args.iterations), '--result-bytes', str(args.result_bytes),
+                 '--payload-shape', args.payload_shape], cwd=args.root,
                 env=dict(os.environ, PYTHONPATH=str(args.root.resolve() / 'src')),
                 capture_output=True, text=True, check=True, timeout=60)
             sample = json.loads(result.stdout)

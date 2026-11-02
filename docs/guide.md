@@ -767,7 +767,13 @@ asynchronous analysis and an observe-mode journal. One worker processes wire
 entries in order, with a 64 MiB queued-line byte bound. Overflow drops analysis,
 records a sticky fault, and makes verification incomplete (`2`); it never waits
 for queue capacity. Shutdown drains for at most 10 seconds, then marks unfinished
-evidence truncated. See [measurements](performance-methodology.md#background-stdio-analysis-handoff-08). `glassport bundle --log-dir DIR -o OUT` discovers matching stdio journals;
+evidence truncated. See [background-worker measurements](performance-methodology.md#background-stdio-analysis-handoff-08).
+On this host, the measured worker service floor across three 1 MB ASCII result
+shapes is 4.608 MB/s; sustained input above its shape-specific service rate
+can still fill the queue. All-CJK text still uses per-character normalization
+and analyzed at about 1.04 million text characters/s in the stage benchmark.
+See [the throughput profile](performance-methodology.md#analysis-worker-throughput-handoff-09).
+`glassport bundle --log-dir DIR -o OUT` discovers matching stdio journals;
 `glassport bundle verify OUT` can exit `0` when analysis and delivery linkage
 hold. The stdio gate retains its existing authority. Replay does not re-judge
 its schema, PII, taint, retry, attestation or quarantine checks; their reason
