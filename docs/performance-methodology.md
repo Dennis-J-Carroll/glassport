@@ -245,6 +245,66 @@ Raw before/after reports on the measurement host:
 `/tmp/h08-{large,small}-baseline.json` and
 `/tmp/h08-{large,small}-final.json`. Benchmark results are host/payload specific.
 
+## Analysis worker throughput (Handoff 09)
+
+Measured on UID 1000, CPython 3.13.5, Linux-7.1.1-76070101-generic-x86_64-with-glibc2.35, from `main`
+`2da02c7` to the normalization and regex fast paths. Each shape contains
+1,000,000 text characters in one correlated `tools/call` result. Seven fresh
+interpreters per shape; values are median / nearest-rank p95 milliseconds.
+Run `PYTHONPATH=src python3 scripts/bench_analysis_worker.py --root CHECKOUT`.
+The six shapes are seeded ASCII prose, one million `x` characters, 2% scattered
+non-ASCII, all-CJK, emails/AWS-key shapes/JWTs every 200 characters, and
+credentials decorated with confusables, invisible characters and marks.
+Stages are timed separately and should not be added; end-to-end times include
+the actual builder fold and the full detector pass. No network, disk I/O,
+relay, or queue wait is included.
+
+**Scan stages:** each cell is baseline median / p95 → final median / p95 (ms).
+
+| Shape | normalize | regex scan | builder | end to end |
+| --- | ---: | ---: | ---: | ---: |
+| ascii-prose | 801.474 / 1373.153 → 0.004 / 0.005 | 260.513 / 395.239 → 58.026 / 88.941 | 0.038 / 0.059 → 0.035 / 0.047 | 1104.395 / 1872.238 → 121.154 / 128.225 |
+| x | 852.466 / 1319.678 → 0.004 / 0.005 | 446.365 / 679.747 → 52.372 / 73.086 | 0.057 / 0.088 → 0.045 / 0.058 | 1256.160 / 2319.171 → 113.973 / 156.283 |
+| mixed | 758.641 / 1038.972 → 25.834 / 54.612 | 256.675 / 333.504 → 63.314 / 107.800 | 0.045 / 0.102 → 0.039 / 0.048 | 1122.037 / 1383.751 → 165.758 / 243.197 |
+| all-cjk | 876.138 / 2081.988 → 630.759 / 1259.075 | 291.667 / 678.530 → 70.378 / 155.424 | 0.049 / 0.070 → 0.034 / 0.064 | 1113.111 / 1974.389 → 957.690 / 1238.488 |
+| pii-dense | 642.827 / 1373.335 → 0.004 / 0.014 | 321.373 / 573.225 → 174.901 / 323.879 | 0.033 / 0.057 → 0.032 / 0.056 | 986.217 / 2480.278 → 271.235 / 409.858 |
+| adversarial | 468.791 / 703.312 → 328.249 / 452.565 | 98.631 / 128.034 → 40.624 / 65.655 | 0.036 / 0.103 → 0.031 / 0.045 | 532.212 / 1120.715 → 381.091 / 397.845 |
+
+**Each detector:** same units and before/after notation.
+
+| Shape | fabricated calls | context violations | gate actions | semantic taint | data exfiltration |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| ascii-prose | 0.001 / 0.002 → 0.001 / 0.001 | 0.022 / 0.057 → 0.018 / 0.034 | 0.001 / 0.001 → 0.001 / 0.001 | 0.000 / 0.001 → 0.000 / 0.001 | 1018.345 / 1555.594 → 116.459 / 125.630 |
+| x | 0.002 / 0.003 → 0.001 / 0.001 | 0.039 / 0.055 → 0.022 / 0.029 | 0.001 / 0.001 → 0.001 / 0.001 | 0.001 / 0.001 → 0.000 / 0.001 | 1792.793 / 1939.210 → 121.156 / 149.068 |
+| mixed | 0.001 / 0.002 → 0.001 / 0.003 | 0.019 / 0.055 → 0.025 / 0.048 | 0.001 / 0.001 → 0.001 / 0.001 | 0.000 / 0.001 → 0.000 / 0.001 | 909.608 / 1789.104 → 160.110 / 192.659 |
+| all-cjk | 0.001 / 0.002 → 0.001 / 0.001 | 0.023 / 0.040 → 0.023 / 0.045 | 0.001 / 0.002 → 0.001 / 0.001 | 0.000 / 0.001 → 0.000 / 0.001 | 1338.528 / 3403.729 → 875.649 / 1565.168 |
+| pii-dense | 0.001 / 0.001 → 0.001 / 0.001 | 0.019 / 0.030 → 0.017 / 0.033 | 0.001 / 0.001 → 0.001 / 0.001 | 0.000 / 0.001 → 0.000 / 0.001 | 1010.722 / 1419.131 → 250.577 / 398.612 |
+| adversarial | 0.001 / 0.001 → 0.001 / 0.001 | 0.021 / 0.028 → 0.020 / 0.026 | 0.001 / 0.001 → 0.001 / 0.001 | 0.000 / 0.001 → 0.000 / 0.001 | 526.367 / 1017.895 → 380.870 / 456.485 |
+
+Worker service uses the existing in-memory stdio relay driver with its new
+`--payload-shape` selector, `--result-bytes 1000000 --iterations 5 --samples 7`.
+Each sample has five result frames; the median below is over seven fresh
+processes. `analysis_mb_s` times only worker processing of result entries,
+including fold and detectors, excluding queue wait, relay and drain. MB is
+1,000,000 ASCII payload bytes. Shape generation and frame serialization are
+outside the service timer.
+
+| ASCII payload | Wrap --journal baseline → final MB/s | Gate baseline → final MB/s |
+| --- | ---: | ---: |
+| ASCII prose | 0.591 → 7.141 | 0.705 → 6.895 |
+| `x` × 1,000,000 | 0.915 → 10.991 | 0.941 → 10.926 |
+| PII dense | 0.807 → 4.608 | 0.767 → 4.624 |
+
+The slowest measured ASCII service rate is **4.608 MB/s**. For these three
+shapes, sustained arrival above each shape's service rate eventually fills
+the 64 MiB (67,108,864-byte) queue; an empty queue receiving at rate
+$r>s$ MB/s would fill in roughly $67.109/(r-s)$ seconds, ignoring
+frame granularity and other work. This is a measured capacity, not a rate
+guarantee for arbitrary traffic. All-CJK still follows the per-character
+normalization path and measured about **1.04 million text characters/s** in
+the end-to-end stage; adversarial non-ASCII can therefore still overflow the
+queue at rates far below the ASCII figures. No scan is sampled or skipped.
+
 ## Server output reads (stdio s2c)
 
 `bench_stdio_relay.py` feeds `pump()` from an in-memory buffer, so it never

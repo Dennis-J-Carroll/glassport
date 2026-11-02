@@ -105,6 +105,12 @@ intent, worker death, or a 10-second drain timeout produces `truncated`, giving
 `journal_truncated` and exit `2`. An intent lacking a delivery in an explicitly
 truncated stdio journal reports `delivery_missing_truncated`; duplicate
 or orphaned deliveries, or an unmarked deleted delivery, still fail (`1`).
+On the Handoff 09 measurement host, worker service across three ASCII 1 MB
+result shapes was at least 4.608 MB/s. A sustained arrival rate above the
+shape-specific service rate still fills the queue. All-CJK text retains the
+per-character normalization path and measured about 1.04 million text
+characters/s in the end-to-end stage. See the
+[throughput profile](performance-methodology.md#analysis-worker-throughput-handoff-09).
 
 Replay re-judges undeclared-tool candidates. A stdio `blocked` delivery with
 `reason: gate_blocked` requires `candidate_block: true`, or a wire gate marker
