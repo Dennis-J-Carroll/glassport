@@ -562,6 +562,29 @@ PII_PATTERNS: list[PIIPattern] = [
         None, "private IP address (RFC 1918)"),
 ]
 
+# Each literal below is necessary for its built-in regex to match. Apply by
+# object identity: custom patterns, even with the same category, keep their
+# full scan. Values are alternatives; at least one must occur in the text.
+_BUILTIN_REQUIRED_LITERALS: dict[int, tuple[str, ...]] = {
+    id(pat): literals for pat, literals in (
+        (PII_PATTERNS[0], ("-----BEGIN ",)),
+        (PII_PATTERNS[1], ("-----BEGIN PGP PRIVATE KEY BLOCK-----",)),
+        (PII_PATTERNS[2], ("sk-ant-api03-",)),
+        (PII_PATTERNS[3], ("sk-",)),
+        (PII_PATTERNS[4], ("AKIA",)),
+        (PII_PATTERNS[6], ("_",)),
+        (PII_PATTERNS[7], ("_",)),
+        (PII_PATTERNS[8], ("xox",)),
+        (PII_PATTERNS[9], ("://",)),
+        (PII_PATTERNS[10], ("eyJ",)),
+        (PII_PATTERNS[11], (":", "=")),
+        (PII_PATTERNS[12], ("-",)),
+        (PII_PATTERNS[15], ("@",)),
+        (PII_PATTERNS[16], ("10.", "172.", "192.168.")),
+    )
+}
+_BUILTIN_AWS_SECRET_ID = id(PII_PATTERNS[5])
+
 # Trusted clouds/CDNs: presence here only DOWNGRADES an egress finding.
 TRUSTED_HOSTS = {"localhost", "127.0.0.1", "::1", "0.0.0.0"}
 TRUSTED_DOMAINS = {
@@ -1297,6 +1320,14 @@ def _scan_normalized(text: str,
     raw: list[tuple[PIIPattern, str, int, int]] = []
     structural_spans: list[tuple[int, int]] = []
     for pat in (_active_patterns() if patterns is None else patterns):
+        required = _BUILTIN_REQUIRED_LITERALS.get(id(pat))
+        if required is not None and not any(literal in text for literal in required):
+            continue
+        # An uninterrupted alphanumeric text longer than 40 characters
+        # cannot contain an isolated exact-40-character AWS-secret match.
+        if (id(pat) == _BUILTIN_AWS_SECRET_ID and len(text) != 40
+                and text.isascii() and text.isalnum()):
+            continue
         for m in pat.pattern.finditer(text):
             value = m.group(m.lastindex) if m.lastindex else m.group(0)
             if pat.validator and not pat.validator(value):
