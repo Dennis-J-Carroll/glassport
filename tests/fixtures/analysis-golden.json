@@ -1,0 +1,1898 @@
+{
+  "cases": {
+    "acceptance:acceptance.http-default.anonymous-modern-private:epoch-1": [
+      {
+        "annotator": "glassport.detectors",
+        "category": null,
+        "event_id": 1,
+        "explanation": "HTTP session evidence is incomplete; reinitialize for a fresh observation epoch",
+        "kind": "anomaly",
+        "metadata": {
+          "seq": 1,
+          "stable_id": "2f7a253d40f1aca91a56ba9d"
+        },
+        "severity": 1,
+        "subcategory": "http_observation_unavailable"
+      },
+      {
+        "annotator": "glassport.detectors",
+        "category": null,
+        "event_id": 2,
+        "explanation": "HTTP session evidence is incomplete; reinitialize for a fresh observation epoch",
+        "kind": "anomaly",
+        "metadata": {
+          "seq": 2,
+          "stable_id": "118306da3e29ee7decd4d0c7"
+        },
+        "severity": 1,
+        "subcategory": "http_observation_unavailable"
+      },
+      {
+        "annotator": "glassport.detectors",
+        "category": null,
+        "event_id": 3,
+        "explanation": "HTTP session evidence is incomplete; reinitialize for a fresh observation epoch",
+        "kind": "anomaly",
+        "metadata": {
+          "seq": 3,
+          "stable_id": "0e194fbdb9a03c635487e390"
+        },
+        "severity": 1,
+        "subcategory": "http_observation_unavailable"
+      }
+    ],
+    "acceptance:acceptance.http-default.anonymous-modern-private:epoch-2": [
+      {
+        "annotator": "glassport.detectors",
+        "category": null,
+        "event_id": 1,
+        "explanation": "HTTP session evidence is incomplete; reinitialize for a fresh observation epoch",
+        "kind": "anomaly",
+        "metadata": {
+          "seq": 1,
+          "stable_id": "2f7a253d40f1aca91a56ba9d"
+        },
+        "severity": 1,
+        "subcategory": "http_observation_unavailable"
+      },
+      {
+        "annotator": "glassport.detectors",
+        "category": null,
+        "event_id": 2,
+        "explanation": "HTTP session evidence is incomplete; reinitialize for a fresh observation epoch",
+        "kind": "anomaly",
+        "metadata": {
+          "seq": 2,
+          "stable_id": "118306da3e29ee7decd4d0c7"
+        },
+        "severity": 1,
+        "subcategory": "http_observation_unavailable"
+      },
+      {
+        "annotator": "glassport.detectors",
+        "category": null,
+        "event_id": 3,
+        "explanation": "HTTP session evidence is incomplete; reinitialize for a fresh observation epoch",
+        "kind": "anomaly",
+        "metadata": {
+          "seq": 3,
+          "stable_id": "0e194fbdb9a03c635487e390"
+        },
+        "severity": 1,
+        "subcategory": "http_observation_unavailable"
+      }
+    ],
+    "acceptance:acceptance.http-default.anonymous-modern-public:epoch-1": [
+      {
+        "annotator": "glassport.detectors",
+        "category": "tool_use",
+        "event_id": 4,
+        "explanation": "tools/call 'ghost' is outside the declared surface",
+        "kind": "hallucination",
+        "metadata": {
+          "declaration_seq": 2,
+          "no_declaration_seen": false,
+          "seq": 4,
+          "stable_id": "d85f3513cf8383c5fc77a0e9",
+          "tool": "ghost"
+        },
+        "severity": 3,
+        "subcategory": "fabricated_tool_call"
+      },
+      {
+        "annotator": "glassport.detectors",
+        "category": null,
+        "event_id": 4,
+        "explanation": "tools/call 'ghost' before notifications/initialized",
+        "kind": "anomaly",
+        "metadata": {
+          "seq": 4,
+          "stable_id": "1905667a65d3d34e935fa15d"
+        },
+        "severity": 2,
+        "subcategory": "premature_call"
+      },
+      {
+        "annotator": "glassport.detectors",
+        "category": null,
+        "event_id": 5,
+        "explanation": "error response synthesized by the gate for blocked call 'ghost'; the server never sent this frame",
+        "kind": "info",
+        "metadata": {
+          "seq": 5,
+          "stable_id": "aae243a281b12dff64bc01a1",
+          "tool": "ghost"
+        },
+        "severity": 1,
+        "subcategory": "gate_injected_response"
+      }
+    ],
+    "acceptance:acceptance.http-default.concurrent-correlation:epoch-1": [
+      {
+        "annotator": "glassport.detectors",
+        "category": "tool_use",
+        "event_id": 7,
+        "explanation": "tools/call 'ghost' is outside the declared surface",
+        "kind": "hallucination",
+        "metadata": {
+          "declaration_seq": 5,
+          "no_declaration_seen": false,
+          "seq": 7,
+          "stable_id": "95fbaeff1c626b904c7a3835",
+          "tool": "ghost"
+        },
+        "severity": 3,
+        "subcategory": "fabricated_tool_call"
+      },
+      {
+        "annotator": "glassport.detectors",
+        "category": null,
+        "event_id": 7,
+        "explanation": "session state limit reached (request_correlation); analysis may be incomplete",
+        "kind": "anomaly",
+        "metadata": {
+          "limits": {
+            "max_name_chars": 1024,
+            "max_pending": 4096,
+            "max_state_bytes": 1000000,
+            "max_tools": 4096
+          },
+          "reason": "request_correlation",
+          "seq": 7,
+          "stable_id": "7823058419e007125be4846f"
+        },
+        "severity": 1,
+        "subcategory": "analysis_limit"
+      },
+      {
+        "annotator": "glassport.detectors",
+        "category": null,
+        "event_id": 8,
+        "explanation": "error response synthesized by the gate for blocked call 'ghost'; the server never sent this frame",
+        "kind": "info",
+        "metadata": {
+          "seq": 8,
+          "stable_id": "d1388ed4c01c3e08f8a25472",
+          "tool": "ghost"
+        },
+        "severity": 1,
+        "subcategory": "gate_injected_response"
+      }
+    ],
+    "acceptance:acceptance.http-default.detector-fault:epoch-1": [
+      {
+        "annotator": "glassport.detectors",
+        "category": "tool_use",
+        "event_id": 6,
+        "explanation": "tools/call 'ghost' is outside the declared surface",
+        "kind": "hallucination",
+        "metadata": {
+          "declaration_seq": 5,
+          "no_declaration_seen": false,
+          "seq": 6,
+          "stable_id": "13d378bd4aaea3e39649520f",
+          "tool": "ghost"
+        },
+        "severity": 3,
+        "subcategory": "fabricated_tool_call"
+      }
+    ],
+    "acceptance:acceptance.http-default.epoch-mismatch:epoch-1": [],
+    "acceptance:acceptance.http-default.failed-wire-write:epoch-1": [
+      {
+        "annotator": "glassport.detectors",
+        "category": null,
+        "event_id": 7,
+        "explanation": "response id=7 matched no request",
+        "kind": "anomaly",
+        "metadata": {
+          "seq": 7,
+          "stable_id": "1ceede01191193d267882c0e"
+        },
+        "severity": 1,
+        "subcategory": "orphaned_response"
+      }
+    ],
+    "acceptance:acceptance.http-default.malformed-body:epoch-1": [],
+    "acceptance:acceptance.http-default.malformed-bundle:epoch-1": [],
+    "acceptance:acceptance.http-default.missing-declaration:epoch-1": [
+      {
+        "annotator": "glassport.detectors",
+        "category": null,
+        "event_id": 4,
+        "explanation": "tools/call 'search' and no tools/list request was ever sent",
+        "kind": "anomaly",
+        "metadata": {
+          "seq": 4,
+          "stable_id": "387638ca10bef8cdcee720c8"
+        },
+        "severity": 1,
+        "subcategory": "call_before_declaration"
+      }
+    ],
+    "acceptance:acceptance.http-default.multi-epoch-stable-id-collision:epoch-1": [
+      {
+        "annotator": "glassport.detectors",
+        "category": "tool_use",
+        "event_id": 4,
+        "explanation": "tools/call 'ghost' is outside the declared surface",
+        "kind": "hallucination",
+        "metadata": {
+          "declaration_seq": 2,
+          "no_declaration_seen": false,
+          "seq": 4,
+          "stable_id": "d85f3513cf8383c5fc77a0e9",
+          "tool": "ghost"
+        },
+        "severity": 3,
+        "subcategory": "fabricated_tool_call"
+      },
+      {
+        "annotator": "glassport.detectors",
+        "category": null,
+        "event_id": 4,
+        "explanation": "tools/call 'ghost' before notifications/initialized",
+        "kind": "anomaly",
+        "metadata": {
+          "seq": 4,
+          "stable_id": "1905667a65d3d34e935fa15d"
+        },
+        "severity": 2,
+        "subcategory": "premature_call"
+      },
+      {
+        "annotator": "glassport.detectors",
+        "category": null,
+        "event_id": 5,
+        "explanation": "error response synthesized by the gate for blocked call 'ghost'; the server never sent this frame",
+        "kind": "info",
+        "metadata": {
+          "seq": 5,
+          "stable_id": "aae243a281b12dff64bc01a1",
+          "tool": "ghost"
+        },
+        "severity": 1,
+        "subcategory": "gate_injected_response"
+      }
+    ],
+    "acceptance:acceptance.http-default.multi-epoch-stable-id-collision:epoch-2": [
+      {
+        "annotator": "glassport.detectors",
+        "category": "tool_use",
+        "event_id": 4,
+        "explanation": "tools/call 'ghost' is outside the declared surface",
+        "kind": "hallucination",
+        "metadata": {
+          "declaration_seq": 2,
+          "no_declaration_seen": false,
+          "seq": 4,
+          "stable_id": "d85f3513cf8383c5fc77a0e9",
+          "tool": "ghost"
+        },
+        "severity": 3,
+        "subcategory": "fabricated_tool_call"
+      },
+      {
+        "annotator": "glassport.detectors",
+        "category": null,
+        "event_id": 4,
+        "explanation": "tools/call 'ghost' before notifications/initialized",
+        "kind": "anomaly",
+        "metadata": {
+          "seq": 4,
+          "stable_id": "1905667a65d3d34e935fa15d"
+        },
+        "severity": 2,
+        "subcategory": "premature_call"
+      },
+      {
+        "annotator": "glassport.detectors",
+        "category": null,
+        "event_id": 5,
+        "explanation": "error response synthesized by the gate for blocked call 'ghost'; the server never sent this frame",
+        "kind": "info",
+        "metadata": {
+          "seq": 5,
+          "stable_id": "aae243a281b12dff64bc01a1",
+          "tool": "ghost"
+        },
+        "severity": 1,
+        "subcategory": "gate_injected_response"
+      }
+    ],
+    "acceptance:acceptance.http-default.no-event-observation:epoch-1": [],
+    "acceptance:acceptance.http-default.no-list-client:epoch-1": [
+      {
+        "annotator": "glassport.detectors",
+        "category": null,
+        "event_id": 1,
+        "explanation": "tools/call 'search' before notifications/initialized",
+        "kind": "anomaly",
+        "metadata": {
+          "seq": 1,
+          "stable_id": "9869fe2a13c2aa6f07fd74a5"
+        },
+        "severity": 2,
+        "subcategory": "premature_call"
+      },
+      {
+        "annotator": "glassport.detectors",
+        "category": null,
+        "event_id": 1,
+        "explanation": "tools/call 'search' cannot be checked against an available complete declaration",
+        "kind": "anomaly",
+        "metadata": {
+          "seq": 1,
+          "stable_id": "5e59cc8a4d0d65d10374d3df"
+        },
+        "severity": 1,
+        "subcategory": "declaration_unavailable"
+      }
+    ],
+    "acceptance:acceptance.http-default.public-canary:epoch-1": [
+      {
+        "annotator": "glassport.detectors",
+        "category": "tool_use",
+        "event_id": 6,
+        "explanation": "tools/call 'search' argument contains OpenAI API key: [openai_key redacted \u00b7 43 chars]",
+        "kind": "divergence",
+        "metadata": {
+          "pii_category": "openai_key",
+          "seq": 6,
+          "stable_id": "6955799074159db39e471503",
+          "tool": "search"
+        },
+        "severity": 3,
+        "subcategory": "pii_openai_key"
+      }
+    ],
+    "acceptance:acceptance.http-default.signed-rewrite:epoch-1": [],
+    "acceptance:acceptance.http-default.stale-surface:epoch-1": [
+      {
+        "annotator": "glassport.detectors",
+        "category": null,
+        "event_id": 7,
+        "explanation": "tools/list surface changed mid-session; delta: ['fetch', 'search']",
+        "kind": "divergence",
+        "metadata": {
+          "delta": [
+            "fetch",
+            "search"
+          ],
+          "seq": 7,
+          "stable_id": "8a5f53e4076cb3b9544e6f9e"
+        },
+        "severity": 2,
+        "subcategory": "surface_change"
+      },
+      {
+        "annotator": "glassport.detectors",
+        "category": "tool_use",
+        "event_id": 8,
+        "explanation": "tools/call 'search' is outside the declared surface",
+        "kind": "hallucination",
+        "metadata": {
+          "declaration_seq": 7,
+          "no_declaration_seen": false,
+          "seq": 8,
+          "stable_id": "5e9f4cde99b97e927e27c36e",
+          "tool": "search"
+        },
+        "severity": 3,
+        "subcategory": "fabricated_tool_call"
+      },
+      {
+        "annotator": "glassport.detectors",
+        "category": null,
+        "event_id": 9,
+        "explanation": "error response synthesized by the gate for blocked call 'search'; the server never sent this frame",
+        "kind": "info",
+        "metadata": {
+          "seq": 9,
+          "stable_id": "5b047d74c1ae4c56642f0913",
+          "tool": "search"
+        },
+        "severity": 1,
+        "subcategory": "gate_injected_response"
+      }
+    ],
+    "acceptance:acceptance.http-strict.anonymous-modern-private:epoch-1": [
+      {
+        "annotator": "glassport.detectors",
+        "category": null,
+        "event_id": 1,
+        "explanation": "HTTP session evidence is incomplete; reinitialize for a fresh observation epoch",
+        "kind": "anomaly",
+        "metadata": {
+          "seq": 1,
+          "stable_id": "2f7a253d40f1aca91a56ba9d"
+        },
+        "severity": 1,
+        "subcategory": "http_observation_unavailable"
+      },
+      {
+        "annotator": "glassport.detectors",
+        "category": null,
+        "event_id": 2,
+        "explanation": "HTTP session evidence is incomplete; reinitialize for a fresh observation epoch",
+        "kind": "anomaly",
+        "metadata": {
+          "seq": 2,
+          "stable_id": "118306da3e29ee7decd4d0c7"
+        },
+        "severity": 1,
+        "subcategory": "http_observation_unavailable"
+      },
+      {
+        "annotator": "glassport.detectors",
+        "category": null,
+        "event_id": 3,
+        "explanation": "HTTP session evidence is incomplete; reinitialize for a fresh observation epoch",
+        "kind": "anomaly",
+        "metadata": {
+          "seq": 3,
+          "stable_id": "0e194fbdb9a03c635487e390"
+        },
+        "severity": 1,
+        "subcategory": "http_observation_unavailable"
+      }
+    ],
+    "acceptance:acceptance.http-strict.anonymous-modern-private:epoch-2": [
+      {
+        "annotator": "glassport.detectors",
+        "category": null,
+        "event_id": 1,
+        "explanation": "HTTP session evidence is incomplete; reinitialize for a fresh observation epoch",
+        "kind": "anomaly",
+        "metadata": {
+          "seq": 1,
+          "stable_id": "2f7a253d40f1aca91a56ba9d"
+        },
+        "severity": 1,
+        "subcategory": "http_observation_unavailable"
+      },
+      {
+        "annotator": "glassport.detectors",
+        "category": null,
+        "event_id": 2,
+        "explanation": "HTTP session evidence is incomplete; reinitialize for a fresh observation epoch",
+        "kind": "anomaly",
+        "metadata": {
+          "seq": 2,
+          "stable_id": "118306da3e29ee7decd4d0c7"
+        },
+        "severity": 1,
+        "subcategory": "http_observation_unavailable"
+      },
+      {
+        "annotator": "glassport.detectors",
+        "category": null,
+        "event_id": 3,
+        "explanation": "error response synthesized by the gate for a blocked client frame; the server never sent this frame",
+        "kind": "info",
+        "metadata": {
+          "seq": 3,
+          "stable_id": "b8c3f6189498aedf50e0c6a1",
+          "tool": null
+        },
+        "severity": 1,
+        "subcategory": "gate_injected_response"
+      }
+    ],
+    "acceptance:acceptance.http-strict.anonymous-modern-public:epoch-1": [
+      {
+        "annotator": "glassport.detectors",
+        "category": "tool_use",
+        "event_id": 4,
+        "explanation": "tools/call 'ghost' is outside the declared surface",
+        "kind": "hallucination",
+        "metadata": {
+          "declaration_seq": 2,
+          "no_declaration_seen": false,
+          "seq": 4,
+          "stable_id": "d85f3513cf8383c5fc77a0e9",
+          "tool": "ghost"
+        },
+        "severity": 3,
+        "subcategory": "fabricated_tool_call"
+      },
+      {
+        "annotator": "glassport.detectors",
+        "category": null,
+        "event_id": 4,
+        "explanation": "tools/call 'ghost' before notifications/initialized",
+        "kind": "anomaly",
+        "metadata": {
+          "seq": 4,
+          "stable_id": "1905667a65d3d34e935fa15d"
+        },
+        "severity": 2,
+        "subcategory": "premature_call"
+      },
+      {
+        "annotator": "glassport.detectors",
+        "category": null,
+        "event_id": 5,
+        "explanation": "error response synthesized by the gate for blocked call 'ghost'; the server never sent this frame",
+        "kind": "info",
+        "metadata": {
+          "seq": 5,
+          "stable_id": "aae243a281b12dff64bc01a1",
+          "tool": "ghost"
+        },
+        "severity": 1,
+        "subcategory": "gate_injected_response"
+      }
+    ],
+    "acceptance:acceptance.http-strict.concurrent-correlation:epoch-1": [
+      {
+        "annotator": "glassport.detectors",
+        "category": "tool_use",
+        "event_id": 7,
+        "explanation": "tools/call 'ghost' is outside the declared surface",
+        "kind": "hallucination",
+        "metadata": {
+          "declaration_seq": 5,
+          "no_declaration_seen": false,
+          "seq": 7,
+          "stable_id": "95fbaeff1c626b904c7a3835",
+          "tool": "ghost"
+        },
+        "severity": 3,
+        "subcategory": "fabricated_tool_call"
+      },
+      {
+        "annotator": "glassport.detectors",
+        "category": null,
+        "event_id": 7,
+        "explanation": "session state limit reached (request_correlation); analysis may be incomplete",
+        "kind": "anomaly",
+        "metadata": {
+          "limits": {
+            "max_name_chars": 1024,
+            "max_pending": 4096,
+            "max_state_bytes": 1000000,
+            "max_tools": 4096
+          },
+          "reason": "request_correlation",
+          "seq": 7,
+          "stable_id": "7823058419e007125be4846f"
+        },
+        "severity": 1,
+        "subcategory": "analysis_limit"
+      },
+      {
+        "annotator": "glassport.detectors",
+        "category": null,
+        "event_id": 8,
+        "explanation": "error response synthesized by the gate for blocked call 'ghost'; the server never sent this frame",
+        "kind": "info",
+        "metadata": {
+          "seq": 8,
+          "stable_id": "d1388ed4c01c3e08f8a25472",
+          "tool": "ghost"
+        },
+        "severity": 1,
+        "subcategory": "gate_injected_response"
+      }
+    ],
+    "acceptance:acceptance.http-strict.detector-fault:epoch-1": [
+      {
+        "annotator": "glassport.detectors",
+        "category": "tool_use",
+        "event_id": 6,
+        "explanation": "tools/call 'ghost' is outside the declared surface",
+        "kind": "hallucination",
+        "metadata": {
+          "declaration_seq": 5,
+          "no_declaration_seen": false,
+          "seq": 6,
+          "stable_id": "13d378bd4aaea3e39649520f",
+          "tool": "ghost"
+        },
+        "severity": 3,
+        "subcategory": "fabricated_tool_call"
+      },
+      {
+        "annotator": "glassport.detectors",
+        "category": null,
+        "event_id": 7,
+        "explanation": "error response synthesized by the gate for blocked call 'ghost'; the server never sent this frame",
+        "kind": "info",
+        "metadata": {
+          "seq": 7,
+          "stable_id": "0a9e799e154c073b42a40e0c",
+          "tool": "ghost"
+        },
+        "severity": 1,
+        "subcategory": "gate_injected_response"
+      }
+    ],
+    "acceptance:acceptance.http-strict.epoch-mismatch:epoch-1": [],
+    "acceptance:acceptance.http-strict.failed-wire-write:epoch-1": [
+      {
+        "annotator": "glassport.detectors",
+        "category": null,
+        "event_id": 7,
+        "explanation": "error response synthesized by the gate for blocked call 'ghost'; the server never sent this frame",
+        "kind": "info",
+        "metadata": {
+          "seq": 7,
+          "stable_id": "0a9e799e154c073b42a40e0c",
+          "tool": "ghost"
+        },
+        "severity": 1,
+        "subcategory": "gate_injected_response"
+      }
+    ],
+    "acceptance:acceptance.http-strict.malformed-body:epoch-1": [],
+    "acceptance:acceptance.http-strict.malformed-bundle:epoch-1": [],
+    "acceptance:acceptance.http-strict.missing-declaration:epoch-1": [
+      {
+        "annotator": "glassport.detectors",
+        "category": null,
+        "event_id": 4,
+        "explanation": "tools/call 'search' and no tools/list request was ever sent",
+        "kind": "anomaly",
+        "metadata": {
+          "seq": 4,
+          "stable_id": "387638ca10bef8cdcee720c8"
+        },
+        "severity": 1,
+        "subcategory": "call_before_declaration"
+      },
+      {
+        "annotator": "glassport.detectors",
+        "category": null,
+        "event_id": 5,
+        "explanation": "error response synthesized by the gate for blocked call 'search'; the server never sent this frame",
+        "kind": "info",
+        "metadata": {
+          "seq": 5,
+          "stable_id": "aae243a281b12dff64bc01a1",
+          "tool": "search"
+        },
+        "severity": 1,
+        "subcategory": "gate_injected_response"
+      }
+    ],
+    "acceptance:acceptance.http-strict.multi-epoch-stable-id-collision:epoch-1": [
+      {
+        "annotator": "glassport.detectors",
+        "category": "tool_use",
+        "event_id": 4,
+        "explanation": "tools/call 'ghost' is outside the declared surface",
+        "kind": "hallucination",
+        "metadata": {
+          "declaration_seq": 2,
+          "no_declaration_seen": false,
+          "seq": 4,
+          "stable_id": "d85f3513cf8383c5fc77a0e9",
+          "tool": "ghost"
+        },
+        "severity": 3,
+        "subcategory": "fabricated_tool_call"
+      },
+      {
+        "annotator": "glassport.detectors",
+        "category": null,
+        "event_id": 4,
+        "explanation": "tools/call 'ghost' before notifications/initialized",
+        "kind": "anomaly",
+        "metadata": {
+          "seq": 4,
+          "stable_id": "1905667a65d3d34e935fa15d"
+        },
+        "severity": 2,
+        "subcategory": "premature_call"
+      },
+      {
+        "annotator": "glassport.detectors",
+        "category": null,
+        "event_id": 5,
+        "explanation": "error response synthesized by the gate for blocked call 'ghost'; the server never sent this frame",
+        "kind": "info",
+        "metadata": {
+          "seq": 5,
+          "stable_id": "aae243a281b12dff64bc01a1",
+          "tool": "ghost"
+        },
+        "severity": 1,
+        "subcategory": "gate_injected_response"
+      }
+    ],
+    "acceptance:acceptance.http-strict.multi-epoch-stable-id-collision:epoch-2": [
+      {
+        "annotator": "glassport.detectors",
+        "category": "tool_use",
+        "event_id": 4,
+        "explanation": "tools/call 'ghost' is outside the declared surface",
+        "kind": "hallucination",
+        "metadata": {
+          "declaration_seq": 2,
+          "no_declaration_seen": false,
+          "seq": 4,
+          "stable_id": "d85f3513cf8383c5fc77a0e9",
+          "tool": "ghost"
+        },
+        "severity": 3,
+        "subcategory": "fabricated_tool_call"
+      },
+      {
+        "annotator": "glassport.detectors",
+        "category": null,
+        "event_id": 4,
+        "explanation": "tools/call 'ghost' before notifications/initialized",
+        "kind": "anomaly",
+        "metadata": {
+          "seq": 4,
+          "stable_id": "1905667a65d3d34e935fa15d"
+        },
+        "severity": 2,
+        "subcategory": "premature_call"
+      },
+      {
+        "annotator": "glassport.detectors",
+        "category": null,
+        "event_id": 5,
+        "explanation": "error response synthesized by the gate for blocked call 'ghost'; the server never sent this frame",
+        "kind": "info",
+        "metadata": {
+          "seq": 5,
+          "stable_id": "aae243a281b12dff64bc01a1",
+          "tool": "ghost"
+        },
+        "severity": 1,
+        "subcategory": "gate_injected_response"
+      }
+    ],
+    "acceptance:acceptance.http-strict.no-event-observation:epoch-1": [],
+    "acceptance:acceptance.http-strict.no-list-client:epoch-1": [
+      {
+        "annotator": "glassport.detectors",
+        "category": null,
+        "event_id": 1,
+        "explanation": "tools/call 'search' before notifications/initialized",
+        "kind": "anomaly",
+        "metadata": {
+          "seq": 1,
+          "stable_id": "9869fe2a13c2aa6f07fd74a5"
+        },
+        "severity": 2,
+        "subcategory": "premature_call"
+      },
+      {
+        "annotator": "glassport.detectors",
+        "category": null,
+        "event_id": 1,
+        "explanation": "tools/call 'search' cannot be checked against an available complete declaration",
+        "kind": "anomaly",
+        "metadata": {
+          "seq": 1,
+          "stable_id": "5e59cc8a4d0d65d10374d3df"
+        },
+        "severity": 1,
+        "subcategory": "declaration_unavailable"
+      },
+      {
+        "annotator": "glassport.detectors",
+        "category": null,
+        "event_id": 2,
+        "explanation": "error response synthesized by the gate for blocked call 'search'; the server never sent this frame",
+        "kind": "info",
+        "metadata": {
+          "seq": 2,
+          "stable_id": "377a767fe944145ec7fbc665",
+          "tool": "search"
+        },
+        "severity": 1,
+        "subcategory": "gate_injected_response"
+      }
+    ],
+    "acceptance:acceptance.http-strict.public-canary:epoch-1": [
+      {
+        "annotator": "glassport.detectors",
+        "category": "tool_use",
+        "event_id": 6,
+        "explanation": "tools/call 'search' argument contains OpenAI API key: [openai_key redacted \u00b7 43 chars]",
+        "kind": "divergence",
+        "metadata": {
+          "pii_category": "openai_key",
+          "seq": 6,
+          "stable_id": "6955799074159db39e471503",
+          "tool": "search"
+        },
+        "severity": 3,
+        "subcategory": "pii_openai_key"
+      }
+    ],
+    "acceptance:acceptance.http-strict.signed-rewrite:epoch-1": [],
+    "acceptance:acceptance.http-strict.stale-surface:epoch-1": [
+      {
+        "annotator": "glassport.detectors",
+        "category": null,
+        "event_id": 7,
+        "explanation": "tools/list surface changed mid-session; delta: ['fetch', 'search']",
+        "kind": "divergence",
+        "metadata": {
+          "delta": [
+            "fetch",
+            "search"
+          ],
+          "seq": 7,
+          "stable_id": "8a5f53e4076cb3b9544e6f9e"
+        },
+        "severity": 2,
+        "subcategory": "surface_change"
+      },
+      {
+        "annotator": "glassport.detectors",
+        "category": "tool_use",
+        "event_id": 8,
+        "explanation": "tools/call 'search' is outside the declared surface",
+        "kind": "hallucination",
+        "metadata": {
+          "declaration_seq": 7,
+          "no_declaration_seen": false,
+          "seq": 8,
+          "stable_id": "5e9f4cde99b97e927e27c36e",
+          "tool": "search"
+        },
+        "severity": 3,
+        "subcategory": "fabricated_tool_call"
+      },
+      {
+        "annotator": "glassport.detectors",
+        "category": null,
+        "event_id": 9,
+        "explanation": "error response synthesized by the gate for blocked call 'search'; the server never sent this frame",
+        "kind": "info",
+        "metadata": {
+          "seq": 9,
+          "stable_id": "5b047d74c1ae4c56642f0913",
+          "tool": "search"
+        },
+        "severity": 1,
+        "subcategory": "gate_injected_response"
+      }
+    ],
+    "acceptance:acceptance.observe.anonymous-modern-private:epoch-1": [
+      {
+        "annotator": "glassport.detectors",
+        "category": null,
+        "event_id": 1,
+        "explanation": "HTTP session evidence is incomplete; reinitialize for a fresh observation epoch",
+        "kind": "anomaly",
+        "metadata": {
+          "seq": 1,
+          "stable_id": "2f7a253d40f1aca91a56ba9d"
+        },
+        "severity": 1,
+        "subcategory": "http_observation_unavailable"
+      },
+      {
+        "annotator": "glassport.detectors",
+        "category": null,
+        "event_id": 2,
+        "explanation": "HTTP session evidence is incomplete; reinitialize for a fresh observation epoch",
+        "kind": "anomaly",
+        "metadata": {
+          "seq": 2,
+          "stable_id": "118306da3e29ee7decd4d0c7"
+        },
+        "severity": 1,
+        "subcategory": "http_observation_unavailable"
+      },
+      {
+        "annotator": "glassport.detectors",
+        "category": null,
+        "event_id": 3,
+        "explanation": "HTTP session evidence is incomplete; reinitialize for a fresh observation epoch",
+        "kind": "anomaly",
+        "metadata": {
+          "seq": 3,
+          "stable_id": "0e194fbdb9a03c635487e390"
+        },
+        "severity": 1,
+        "subcategory": "http_observation_unavailable"
+      }
+    ],
+    "acceptance:acceptance.observe.anonymous-modern-private:epoch-2": [
+      {
+        "annotator": "glassport.detectors",
+        "category": null,
+        "event_id": 1,
+        "explanation": "HTTP session evidence is incomplete; reinitialize for a fresh observation epoch",
+        "kind": "anomaly",
+        "metadata": {
+          "seq": 1,
+          "stable_id": "2f7a253d40f1aca91a56ba9d"
+        },
+        "severity": 1,
+        "subcategory": "http_observation_unavailable"
+      },
+      {
+        "annotator": "glassport.detectors",
+        "category": null,
+        "event_id": 2,
+        "explanation": "HTTP session evidence is incomplete; reinitialize for a fresh observation epoch",
+        "kind": "anomaly",
+        "metadata": {
+          "seq": 2,
+          "stable_id": "118306da3e29ee7decd4d0c7"
+        },
+        "severity": 1,
+        "subcategory": "http_observation_unavailable"
+      },
+      {
+        "annotator": "glassport.detectors",
+        "category": null,
+        "event_id": 3,
+        "explanation": "HTTP session evidence is incomplete; reinitialize for a fresh observation epoch",
+        "kind": "anomaly",
+        "metadata": {
+          "seq": 3,
+          "stable_id": "0e194fbdb9a03c635487e390"
+        },
+        "severity": 1,
+        "subcategory": "http_observation_unavailable"
+      }
+    ],
+    "acceptance:acceptance.observe.anonymous-modern-public:epoch-1": [
+      {
+        "annotator": "glassport.detectors",
+        "category": "tool_use",
+        "event_id": 4,
+        "explanation": "tools/call 'ghost' is outside the declared surface",
+        "kind": "hallucination",
+        "metadata": {
+          "declaration_seq": 2,
+          "no_declaration_seen": false,
+          "seq": 4,
+          "stable_id": "d85f3513cf8383c5fc77a0e9",
+          "tool": "ghost"
+        },
+        "severity": 3,
+        "subcategory": "fabricated_tool_call"
+      },
+      {
+        "annotator": "glassport.detectors",
+        "category": null,
+        "event_id": 4,
+        "explanation": "tools/call 'ghost' before notifications/initialized",
+        "kind": "anomaly",
+        "metadata": {
+          "seq": 4,
+          "stable_id": "1905667a65d3d34e935fa15d"
+        },
+        "severity": 2,
+        "subcategory": "premature_call"
+      }
+    ],
+    "acceptance:acceptance.observe.concurrent-correlation:epoch-1": [
+      {
+        "annotator": "glassport.detectors",
+        "category": "tool_use",
+        "event_id": 7,
+        "explanation": "tools/call 'ghost' is outside the declared surface",
+        "kind": "hallucination",
+        "metadata": {
+          "declaration_seq": 5,
+          "no_declaration_seen": false,
+          "seq": 7,
+          "stable_id": "95fbaeff1c626b904c7a3835",
+          "tool": "ghost"
+        },
+        "severity": 3,
+        "subcategory": "fabricated_tool_call"
+      },
+      {
+        "annotator": "glassport.detectors",
+        "category": null,
+        "event_id": 7,
+        "explanation": "session state limit reached (request_correlation); analysis may be incomplete",
+        "kind": "anomaly",
+        "metadata": {
+          "limits": {
+            "max_name_chars": 1024,
+            "max_pending": 4096,
+            "max_state_bytes": 1000000,
+            "max_tools": 4096
+          },
+          "reason": "request_correlation",
+          "seq": 7,
+          "stable_id": "7823058419e007125be4846f"
+        },
+        "severity": 1,
+        "subcategory": "analysis_limit"
+      },
+      {
+        "annotator": "glassport.detectors",
+        "category": null,
+        "event_id": 8,
+        "explanation": "response id=7 matched no request",
+        "kind": "anomaly",
+        "metadata": {
+          "seq": 8,
+          "stable_id": "d80f52f9d859eb46fc766417"
+        },
+        "severity": 1,
+        "subcategory": "orphaned_response"
+      },
+      {
+        "annotator": "glassport.detectors",
+        "category": null,
+        "event_id": 9,
+        "explanation": "response id=7 matched no request",
+        "kind": "anomaly",
+        "metadata": {
+          "seq": 9,
+          "stable_id": "c49ccea0667fb92e21c1bc11"
+        },
+        "severity": 1,
+        "subcategory": "orphaned_response"
+      }
+    ],
+    "acceptance:acceptance.observe.detector-fault:epoch-1": [
+      {
+        "annotator": "glassport.detectors",
+        "category": "tool_use",
+        "event_id": 6,
+        "explanation": "tools/call 'ghost' is outside the declared surface",
+        "kind": "hallucination",
+        "metadata": {
+          "declaration_seq": 5,
+          "no_declaration_seen": false,
+          "seq": 6,
+          "stable_id": "13d378bd4aaea3e39649520f",
+          "tool": "ghost"
+        },
+        "severity": 3,
+        "subcategory": "fabricated_tool_call"
+      }
+    ],
+    "acceptance:acceptance.observe.epoch-mismatch:epoch-1": [],
+    "acceptance:acceptance.observe.failed-wire-write:epoch-1": [
+      {
+        "annotator": "glassport.detectors",
+        "category": null,
+        "event_id": 7,
+        "explanation": "response id=7 matched no request",
+        "kind": "anomaly",
+        "metadata": {
+          "seq": 7,
+          "stable_id": "1ceede01191193d267882c0e"
+        },
+        "severity": 1,
+        "subcategory": "orphaned_response"
+      }
+    ],
+    "acceptance:acceptance.observe.malformed-body:epoch-1": [
+      {
+        "annotator": "glassport.detectors",
+        "category": null,
+        "event_id": 6,
+        "explanation": "HTTP session evidence is incomplete; reinitialize for a fresh observation epoch",
+        "kind": "anomaly",
+        "metadata": {
+          "seq": 6,
+          "stable_id": "15dd5d64fbfdb84b302761c8"
+        },
+        "severity": 1,
+        "subcategory": "http_observation_unavailable"
+      },
+      {
+        "annotator": "glassport.detectors",
+        "category": null,
+        "event_id": 7,
+        "explanation": "HTTP session evidence is incomplete; reinitialize for a fresh observation epoch",
+        "kind": "anomaly",
+        "metadata": {
+          "seq": 7,
+          "stable_id": "98df0f1d533642d1d5c032c4"
+        },
+        "severity": 1,
+        "subcategory": "http_observation_unavailable"
+      }
+    ],
+    "acceptance:acceptance.observe.malformed-bundle:epoch-1": [],
+    "acceptance:acceptance.observe.missing-declaration:epoch-1": [
+      {
+        "annotator": "glassport.detectors",
+        "category": null,
+        "event_id": 4,
+        "explanation": "tools/call 'search' and no tools/list request was ever sent",
+        "kind": "anomaly",
+        "metadata": {
+          "seq": 4,
+          "stable_id": "387638ca10bef8cdcee720c8"
+        },
+        "severity": 1,
+        "subcategory": "call_before_declaration"
+      }
+    ],
+    "acceptance:acceptance.observe.multi-epoch-stable-id-collision:epoch-1": [
+      {
+        "annotator": "glassport.detectors",
+        "category": "tool_use",
+        "event_id": 4,
+        "explanation": "tools/call 'ghost' is outside the declared surface",
+        "kind": "hallucination",
+        "metadata": {
+          "declaration_seq": 2,
+          "no_declaration_seen": false,
+          "seq": 4,
+          "stable_id": "d85f3513cf8383c5fc77a0e9",
+          "tool": "ghost"
+        },
+        "severity": 3,
+        "subcategory": "fabricated_tool_call"
+      },
+      {
+        "annotator": "glassport.detectors",
+        "category": null,
+        "event_id": 4,
+        "explanation": "tools/call 'ghost' before notifications/initialized",
+        "kind": "anomaly",
+        "metadata": {
+          "seq": 4,
+          "stable_id": "1905667a65d3d34e935fa15d"
+        },
+        "severity": 2,
+        "subcategory": "premature_call"
+      }
+    ],
+    "acceptance:acceptance.observe.multi-epoch-stable-id-collision:epoch-2": [
+      {
+        "annotator": "glassport.detectors",
+        "category": "tool_use",
+        "event_id": 4,
+        "explanation": "tools/call 'ghost' is outside the declared surface",
+        "kind": "hallucination",
+        "metadata": {
+          "declaration_seq": 2,
+          "no_declaration_seen": false,
+          "seq": 4,
+          "stable_id": "d85f3513cf8383c5fc77a0e9",
+          "tool": "ghost"
+        },
+        "severity": 3,
+        "subcategory": "fabricated_tool_call"
+      },
+      {
+        "annotator": "glassport.detectors",
+        "category": null,
+        "event_id": 4,
+        "explanation": "tools/call 'ghost' before notifications/initialized",
+        "kind": "anomaly",
+        "metadata": {
+          "seq": 4,
+          "stable_id": "1905667a65d3d34e935fa15d"
+        },
+        "severity": 2,
+        "subcategory": "premature_call"
+      }
+    ],
+    "acceptance:acceptance.observe.no-event-observation:epoch-1": [],
+    "acceptance:acceptance.observe.no-list-client:epoch-1": [
+      {
+        "annotator": "glassport.detectors",
+        "category": null,
+        "event_id": 1,
+        "explanation": "tools/call 'search' before notifications/initialized",
+        "kind": "anomaly",
+        "metadata": {
+          "seq": 1,
+          "stable_id": "9869fe2a13c2aa6f07fd74a5"
+        },
+        "severity": 2,
+        "subcategory": "premature_call"
+      },
+      {
+        "annotator": "glassport.detectors",
+        "category": null,
+        "event_id": 1,
+        "explanation": "tools/call 'search' cannot be checked against an available complete declaration",
+        "kind": "anomaly",
+        "metadata": {
+          "seq": 1,
+          "stable_id": "5e59cc8a4d0d65d10374d3df"
+        },
+        "severity": 1,
+        "subcategory": "declaration_unavailable"
+      }
+    ],
+    "acceptance:acceptance.observe.public-canary:epoch-1": [
+      {
+        "annotator": "glassport.detectors",
+        "category": "tool_use",
+        "event_id": 6,
+        "explanation": "tools/call 'search' argument contains OpenAI API key: [openai_key redacted \u00b7 43 chars]",
+        "kind": "divergence",
+        "metadata": {
+          "pii_category": "openai_key",
+          "seq": 6,
+          "stable_id": "6955799074159db39e471503",
+          "tool": "search"
+        },
+        "severity": 3,
+        "subcategory": "pii_openai_key"
+      }
+    ],
+    "acceptance:acceptance.observe.signed-rewrite:epoch-1": [],
+    "acceptance:acceptance.observe.stale-surface:epoch-1": [
+      {
+        "annotator": "glassport.detectors",
+        "category": null,
+        "event_id": 7,
+        "explanation": "tools/list surface changed mid-session; delta: ['fetch', 'search']",
+        "kind": "divergence",
+        "metadata": {
+          "delta": [
+            "fetch",
+            "search"
+          ],
+          "seq": 7,
+          "stable_id": "8a5f53e4076cb3b9544e6f9e"
+        },
+        "severity": 2,
+        "subcategory": "surface_change"
+      },
+      {
+        "annotator": "glassport.detectors",
+        "category": "tool_use",
+        "event_id": 8,
+        "explanation": "tools/call 'search' is outside the declared surface",
+        "kind": "hallucination",
+        "metadata": {
+          "declaration_seq": 7,
+          "no_declaration_seen": false,
+          "seq": 8,
+          "stable_id": "5e9f4cde99b97e927e27c36e",
+          "tool": "search"
+        },
+        "severity": 3,
+        "subcategory": "fabricated_tool_call"
+      }
+    ],
+    "acceptance:acceptance.stdio-gate.concurrent-correlation:epoch-1": [
+      {
+        "annotator": "glassport.detectors",
+        "category": null,
+        "event_id": 3,
+        "explanation": "tools/call 'search' before notifications/initialized",
+        "kind": "anomaly",
+        "metadata": {
+          "seq": 3,
+          "stable_id": "b47f6d5d7ef38d857e01136c"
+        },
+        "severity": 2,
+        "subcategory": "premature_call"
+      }
+    ],
+    "acceptance:acceptance.stdio-gate.detector-fault:epoch-1": [
+      {
+        "annotator": "glassport.detectors",
+        "category": null,
+        "event_id": 3,
+        "explanation": "tools/call 'search' before notifications/initialized",
+        "kind": "anomaly",
+        "metadata": {
+          "seq": 3,
+          "stable_id": "b47f6d5d7ef38d857e01136c"
+        },
+        "severity": 2,
+        "subcategory": "premature_call"
+      },
+      {
+        "annotator": "glassport.detectors",
+        "category": null,
+        "event_id": 3,
+        "explanation": "gate failed open for tools/call 'None' \u2014 these checks could not run (gate_check_error), so it was forwarded without them",
+        "kind": "info",
+        "metadata": {
+          "also_skipped": [],
+          "reason": "gate_check_error",
+          "seq": 3,
+          "stable_id": "59f97d0c043ce058327b77a2",
+          "tool": null
+        },
+        "severity": 1,
+        "subcategory": "gate_skipped"
+      }
+    ],
+    "acceptance:acceptance.stdio-gate.failed-wire-write:epoch-1": [],
+    "acceptance:acceptance.stdio-gate.malformed-body:epoch-1": [
+      {
+        "annotator": "glassport.detectors",
+        "category": null,
+        "event_id": 3,
+        "explanation": "gate blocked a client frame \u2014 the gate could not parse it unambiguously; the server never saw this frame",
+        "kind": "info",
+        "metadata": {
+          "reason": "uninspectable_frame",
+          "seq": 3,
+          "stable_id": "65c818baf063e71342e8443c",
+          "tool": null
+        },
+        "severity": 1,
+        "subcategory": "gate_blocked"
+      }
+    ],
+    "acceptance:acceptance.stdio-gate.malformed-bundle:epoch-1": [
+      {
+        "annotator": "glassport.detectors",
+        "category": null,
+        "event_id": 1,
+        "explanation": "tools/call 'search' before notifications/initialized",
+        "kind": "anomaly",
+        "metadata": {
+          "seq": 1,
+          "stable_id": "9869fe2a13c2aa6f07fd74a5"
+        },
+        "severity": 2,
+        "subcategory": "premature_call"
+      },
+      {
+        "annotator": "glassport.detectors",
+        "category": null,
+        "event_id": 1,
+        "explanation": "tools/call 'search' cannot be checked against an available complete declaration",
+        "kind": "anomaly",
+        "metadata": {
+          "seq": 1,
+          "stable_id": "5e59cc8a4d0d65d10374d3df"
+        },
+        "severity": 1,
+        "subcategory": "declaration_unavailable"
+      },
+      {
+        "annotator": "glassport.detectors",
+        "category": null,
+        "event_id": 1,
+        "explanation": "gate failed open for tools/call 'search' \u2014 no current tools/list declaration (none arrived within the hold window, or the server retracted it or its ttlMs expired), so this call was forwarded unenforced",
+        "kind": "info",
+        "metadata": {
+          "also_skipped": [],
+          "reason": "no_surface_timeout",
+          "seq": 1,
+          "stable_id": "2ab92995f038dd4f93fd4b7c",
+          "tool": "search"
+        },
+        "severity": 1,
+        "subcategory": "gate_skipped"
+      }
+    ],
+    "acceptance:acceptance.stdio-gate.missing-declaration:epoch-1": [
+      {
+        "annotator": "glassport.detectors",
+        "category": null,
+        "event_id": 1,
+        "explanation": "tools/call 'search' before notifications/initialized",
+        "kind": "anomaly",
+        "metadata": {
+          "seq": 1,
+          "stable_id": "9869fe2a13c2aa6f07fd74a5"
+        },
+        "severity": 2,
+        "subcategory": "premature_call"
+      },
+      {
+        "annotator": "glassport.detectors",
+        "category": null,
+        "event_id": 1,
+        "explanation": "tools/call 'search' cannot be checked against an available complete declaration",
+        "kind": "anomaly",
+        "metadata": {
+          "seq": 1,
+          "stable_id": "5e59cc8a4d0d65d10374d3df"
+        },
+        "severity": 1,
+        "subcategory": "declaration_unavailable"
+      },
+      {
+        "annotator": "glassport.detectors",
+        "category": null,
+        "event_id": 1,
+        "explanation": "gate failed open for tools/call 'search' \u2014 no current tools/list declaration (none arrived within the hold window, or the server retracted it or its ttlMs expired), so this call was forwarded unenforced",
+        "kind": "info",
+        "metadata": {
+          "also_skipped": [],
+          "reason": "no_surface_timeout",
+          "seq": 1,
+          "stable_id": "2ab92995f038dd4f93fd4b7c",
+          "tool": "search"
+        },
+        "severity": 1,
+        "subcategory": "gate_skipped"
+      }
+    ],
+    "acceptance:acceptance.stdio-gate.no-event-observation:epoch-1": [],
+    "acceptance:acceptance.stdio-gate.no-list-client:epoch-1": [
+      {
+        "annotator": "glassport.detectors",
+        "category": null,
+        "event_id": 1,
+        "explanation": "tools/call 'search' before notifications/initialized",
+        "kind": "anomaly",
+        "metadata": {
+          "seq": 1,
+          "stable_id": "9869fe2a13c2aa6f07fd74a5"
+        },
+        "severity": 2,
+        "subcategory": "premature_call"
+      },
+      {
+        "annotator": "glassport.detectors",
+        "category": null,
+        "event_id": 1,
+        "explanation": "tools/call 'search' cannot be checked against an available complete declaration",
+        "kind": "anomaly",
+        "metadata": {
+          "seq": 1,
+          "stable_id": "5e59cc8a4d0d65d10374d3df"
+        },
+        "severity": 1,
+        "subcategory": "declaration_unavailable"
+      },
+      {
+        "annotator": "glassport.detectors",
+        "category": null,
+        "event_id": 1,
+        "explanation": "gate failed open for tools/call 'search' \u2014 no current tools/list declaration (none arrived within the hold window, or the server retracted it or its ttlMs expired), so this call was forwarded unenforced",
+        "kind": "info",
+        "metadata": {
+          "also_skipped": [],
+          "reason": "no_surface_timeout",
+          "seq": 1,
+          "stable_id": "2ab92995f038dd4f93fd4b7c",
+          "tool": "search"
+        },
+        "severity": 1,
+        "subcategory": "gate_skipped"
+      }
+    ],
+    "acceptance:acceptance.stdio-gate.public-canary:epoch-1": [
+      {
+        "annotator": "glassport.detectors",
+        "category": null,
+        "event_id": 3,
+        "explanation": "tools/call 'search' before notifications/initialized",
+        "kind": "anomaly",
+        "metadata": {
+          "seq": 3,
+          "stable_id": "b47f6d5d7ef38d857e01136c"
+        },
+        "severity": 2,
+        "subcategory": "premature_call"
+      },
+      {
+        "annotator": "glassport.detectors",
+        "category": null,
+        "event_id": 3,
+        "explanation": "gate blocked tools/call 'search' \u2014 its params carried a credential; the server never saw this frame",
+        "kind": "info",
+        "metadata": {
+          "reason": "pii_exfiltration",
+          "seq": 3,
+          "stable_id": "65c818baf063e71342e8443c",
+          "tool": "search"
+        },
+        "severity": 1,
+        "subcategory": "gate_blocked"
+      },
+      {
+        "annotator": "glassport.detectors",
+        "category": "tool_use",
+        "event_id": 3,
+        "explanation": "tools/call 'search' argument contains OpenAI API key: [openai_key redacted \u00b7 43 chars]",
+        "kind": "divergence",
+        "metadata": {
+          "pii_category": "openai_key",
+          "seq": 3,
+          "stable_id": "4220d933a6aa4713fa320420",
+          "tool": "search"
+        },
+        "severity": 3,
+        "subcategory": "pii_openai_key"
+      },
+      {
+        "annotator": "glassport.detectors",
+        "category": null,
+        "event_id": 4,
+        "explanation": "error response synthesized by the gate for blocked call 'search'; the server never sent this frame",
+        "kind": "info",
+        "metadata": {
+          "seq": 4,
+          "stable_id": "f26bfc447aff1246fb26125e",
+          "tool": "search"
+        },
+        "severity": 1,
+        "subcategory": "gate_injected_response"
+      }
+    ],
+    "acceptance:acceptance.stdio-gate.signed-rewrite:epoch-1": [
+      {
+        "annotator": "glassport.detectors",
+        "category": null,
+        "event_id": 1,
+        "explanation": "tools/call 'search' before notifications/initialized",
+        "kind": "anomaly",
+        "metadata": {
+          "seq": 1,
+          "stable_id": "9869fe2a13c2aa6f07fd74a5"
+        },
+        "severity": 2,
+        "subcategory": "premature_call"
+      },
+      {
+        "annotator": "glassport.detectors",
+        "category": null,
+        "event_id": 1,
+        "explanation": "tools/call 'search' cannot be checked against an available complete declaration",
+        "kind": "anomaly",
+        "metadata": {
+          "seq": 1,
+          "stable_id": "5e59cc8a4d0d65d10374d3df"
+        },
+        "severity": 1,
+        "subcategory": "declaration_unavailable"
+      },
+      {
+        "annotator": "glassport.detectors",
+        "category": null,
+        "event_id": 1,
+        "explanation": "gate failed open for tools/call 'search' \u2014 no current tools/list declaration (none arrived within the hold window, or the server retracted it or its ttlMs expired), so this call was forwarded unenforced",
+        "kind": "info",
+        "metadata": {
+          "also_skipped": [],
+          "reason": "no_surface_timeout",
+          "seq": 1,
+          "stable_id": "2ab92995f038dd4f93fd4b7c",
+          "tool": "search"
+        },
+        "severity": 1,
+        "subcategory": "gate_skipped"
+      }
+    ],
+    "acceptance:acceptance.stdio-gate.stale-surface:epoch-1": [
+      {
+        "annotator": "glassport.detectors",
+        "category": null,
+        "event_id": 4,
+        "explanation": "tools/list surface changed mid-session; delta: ['fetch', 'search']",
+        "kind": "divergence",
+        "metadata": {
+          "delta": [
+            "fetch",
+            "search"
+          ],
+          "seq": 4,
+          "stable_id": "abdda637f9e8538addfcdac8"
+        },
+        "severity": 2,
+        "subcategory": "surface_change"
+      },
+      {
+        "annotator": "glassport.detectors",
+        "category": "tool_use",
+        "event_id": 5,
+        "explanation": "tools/call 'search' is outside the declared surface",
+        "kind": "hallucination",
+        "metadata": {
+          "declaration_seq": 4,
+          "no_declaration_seen": false,
+          "seq": 5,
+          "stable_id": "d896b176944e35a74aa2242a",
+          "tool": "search"
+        },
+        "severity": 3,
+        "subcategory": "fabricated_tool_call"
+      },
+      {
+        "annotator": "glassport.detectors",
+        "category": null,
+        "event_id": 5,
+        "explanation": "tools/call 'search' before notifications/initialized",
+        "kind": "anomaly",
+        "metadata": {
+          "seq": 5,
+          "stable_id": "135568c502a3b81e702f07a0"
+        },
+        "severity": 2,
+        "subcategory": "premature_call"
+      },
+      {
+        "annotator": "glassport.detectors",
+        "category": null,
+        "event_id": 5,
+        "explanation": "gate blocked tools/call 'search' \u2014 outside the declared surface; the server never saw this frame",
+        "kind": "info",
+        "metadata": {
+          "reason": null,
+          "seq": 5,
+          "stable_id": "983a60ecfa18ae617c920254",
+          "tool": "search"
+        },
+        "severity": 1,
+        "subcategory": "gate_blocked"
+      },
+      {
+        "annotator": "glassport.detectors",
+        "category": null,
+        "event_id": 6,
+        "explanation": "error response synthesized by the gate for blocked call 'search'; the server never sent this frame",
+        "kind": "info",
+        "metadata": {
+          "seq": 6,
+          "stable_id": "3e916e63bb594ef051467221",
+          "tool": "search"
+        },
+        "severity": 1,
+        "subcategory": "gate_injected_response"
+      }
+    ],
+    "detector:credential-call": [
+      {
+        "annotator": "glassport.detectors",
+        "category": "tool_use",
+        "event_id": 6,
+        "explanation": "'web_search': unexpected argument 'url' (additionalProperties: false)",
+        "kind": "divergence",
+        "metadata": {
+          "seq": 6,
+          "stable_id": "616a90acce668c90a93fca0a"
+        },
+        "severity": 2,
+        "subcategory": "schema_violation"
+      },
+      {
+        "annotator": "glassport.detectors",
+        "category": "tool_use",
+        "event_id": 6,
+        "explanation": "tools/call 'web_search' argument contains Anthropic API key: [anthropic_key redacted \u00b7 103 chars]",
+        "kind": "divergence",
+        "metadata": {
+          "pii_category": "anthropic_key",
+          "seq": 6,
+          "stable_id": "3dbd0638d631df14d9fd655a",
+          "tool": "web_search"
+        },
+        "severity": 3,
+        "subcategory": "pii_anthropic_key"
+      },
+      {
+        "annotator": "glassport.detectors",
+        "category": null,
+        "event_id": 6,
+        "explanation": "tools/call 'web_search' reaches undeclared.example (undeclared) CARRYING SENSITIVE DATA",
+        "kind": "anomaly",
+        "metadata": {
+          "has_pii": true,
+          "host": "undeclared.example",
+          "seq": 6,
+          "stable_id": "6adb21c39ac802d4f28e9c6c",
+          "tool": "web_search",
+          "trusted": false
+        },
+        "severity": 3,
+        "subcategory": "unexpected_egress_host"
+      }
+    ],
+    "detector:credential-result": [
+      {
+        "annotator": "glassport.detectors",
+        "category": "tool_use",
+        "event_id": 7,
+        "explanation": "tool result leaks Anthropic API key",
+        "kind": "divergence",
+        "metadata": {
+          "pii_category": "anthropic_key",
+          "seq": 7,
+          "stable_id": "9c03c4029c5ccf25929e5791"
+        },
+        "severity": 3,
+        "subcategory": "pii_in_result_anthropic_key"
+      }
+    ],
+    "detector:unicode-obfuscation": [
+      {
+        "annotator": "glassport.detectors",
+        "category": "tool_use",
+        "event_id": 6,
+        "explanation": "tools/call 'web_search' argument contains Anthropic API key: [anthropic_key redacted \u00b7 103 chars]",
+        "kind": "divergence",
+        "metadata": {
+          "pii_category": "anthropic_key",
+          "seq": 6,
+          "stable_id": "3dbd0638d631df14d9fd655a",
+          "tool": "web_search"
+        },
+        "severity": 3,
+        "subcategory": "pii_anthropic_key"
+      }
+    ],
+    "detector:unknown-tool": [
+      {
+        "annotator": "glassport.detectors",
+        "category": "tool_use",
+        "event_id": 6,
+        "explanation": "tools/call 'ghost' is outside the declared surface",
+        "kind": "hallucination",
+        "metadata": {
+          "declaration_seq": 5,
+          "no_declaration_seen": false,
+          "seq": 6,
+          "stable_id": "13d378bd4aaea3e39649520f",
+          "tool": "ghost"
+        },
+        "severity": 3,
+        "subcategory": "fabricated_tool_call"
+      }
+    ],
+    "encoded:base64-alignment-0": [
+      {
+        "annotator": "glassport.detectors",
+        "category": "tool_use",
+        "event_id": 6,
+        "explanation": "'web_search': missing required argument 'query'",
+        "kind": "divergence",
+        "metadata": {
+          "seq": 6,
+          "stable_id": "616a90acce668c90a93fca0a"
+        },
+        "severity": 2,
+        "subcategory": "schema_violation"
+      },
+      {
+        "annotator": "glassport.detectors",
+        "category": "tool_use",
+        "event_id": 6,
+        "explanation": "'web_search': unexpected argument 'payload' (additionalProperties: false)",
+        "kind": "divergence",
+        "metadata": {
+          "seq": 6,
+          "stable_id": "8a36480b863806efb283622c"
+        },
+        "severity": 2,
+        "subcategory": "schema_violation"
+      },
+      {
+        "annotator": "glassport.detectors",
+        "category": "tool_use",
+        "event_id": 6,
+        "explanation": "Encoded Anthropic API key in tools/call argument (field_path in metadata): [anthropic_key redacted \u00b7 103 chars]",
+        "kind": "divergence",
+        "metadata": {
+          "encoding": "base64",
+          "field_path": "payload",
+          "pii_category": "anthropic_key",
+          "seq": 6,
+          "stable_id": "e8ea2fbf777f29a0cfac335d",
+          "tool": "web_search"
+        },
+        "severity": 2,
+        "subcategory": "pii_encoded_anthropic_key"
+      }
+    ],
+    "encoded:base64-alignment-1": [
+      {
+        "annotator": "glassport.detectors",
+        "category": "tool_use",
+        "event_id": 6,
+        "explanation": "'web_search': missing required argument 'query'",
+        "kind": "divergence",
+        "metadata": {
+          "seq": 6,
+          "stable_id": "616a90acce668c90a93fca0a"
+        },
+        "severity": 2,
+        "subcategory": "schema_violation"
+      },
+      {
+        "annotator": "glassport.detectors",
+        "category": "tool_use",
+        "event_id": 6,
+        "explanation": "'web_search': unexpected argument 'payload' (additionalProperties: false)",
+        "kind": "divergence",
+        "metadata": {
+          "seq": 6,
+          "stable_id": "8a36480b863806efb283622c"
+        },
+        "severity": 2,
+        "subcategory": "schema_violation"
+      },
+      {
+        "annotator": "glassport.detectors",
+        "category": "tool_use",
+        "event_id": 6,
+        "explanation": "Encoded Anthropic API key in tools/call argument (field_path in metadata): [anthropic_key redacted \u00b7 103 chars]",
+        "kind": "divergence",
+        "metadata": {
+          "encoding": "base64",
+          "field_path": "payload",
+          "pii_category": "anthropic_key",
+          "seq": 6,
+          "stable_id": "e8ea2fbf777f29a0cfac335d",
+          "tool": "web_search"
+        },
+        "severity": 2,
+        "subcategory": "pii_encoded_anthropic_key"
+      }
+    ],
+    "encoded:base64-alignment-2": [
+      {
+        "annotator": "glassport.detectors",
+        "category": "tool_use",
+        "event_id": 6,
+        "explanation": "'web_search': missing required argument 'query'",
+        "kind": "divergence",
+        "metadata": {
+          "seq": 6,
+          "stable_id": "616a90acce668c90a93fca0a"
+        },
+        "severity": 2,
+        "subcategory": "schema_violation"
+      },
+      {
+        "annotator": "glassport.detectors",
+        "category": "tool_use",
+        "event_id": 6,
+        "explanation": "'web_search': unexpected argument 'payload' (additionalProperties: false)",
+        "kind": "divergence",
+        "metadata": {
+          "seq": 6,
+          "stable_id": "8a36480b863806efb283622c"
+        },
+        "severity": 2,
+        "subcategory": "schema_violation"
+      }
+    ]
+  },
+  "normalized_fields": [
+    "annotation.id",
+    "annotation.event_id"
+  ],
+  "redaction": [
+    {
+      "lenient": "ordinary text",
+      "strict": "ordinary text"
+    },
+    {
+      "lenient": "[anthropic_key redacted \u00b7 103 chars]",
+      "strict": "[anthropic_key redacted \u00b7 103 chars]"
+    },
+    {
+      "lenient": "[anthropic_key redacted \u00b7 103 chars]",
+      "strict": "[anthropic_key redacted \u00b7 103 chars]"
+    },
+    {
+      "lenient": "[email_address redacted \u00b7 23 chars]",
+      "strict": "[email_address redacted \u00b7 23 chars]"
+    },
+    {
+      "lenient": "x\u200b[anthropic_key redacted \u00b7 103 chars]",
+      "strict": "x\u200b[anthropic_key redacted \u00b7 103 chars]"
+    }
+  ]
+}
