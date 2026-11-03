@@ -565,6 +565,10 @@ PII_PATTERNS: list[PIIPattern] = [
 # Each literal below is necessary for its built-in regex to match. Apply by
 # object identity: custom patterns, even with the same category, keep their
 # full scan. Values are alternatives; at least one must occur in the text.
+# Hold the built-in objects for the life of the process: the table is keyed by
+# id(), and a freed built-in's id could be reused by a later custom pattern if
+# someone edits PII_PATTERNS in place, which would wrongly skip that pattern.
+_BUILTIN_PREFILTER_PATTERNS = tuple(PII_PATTERNS)
 _BUILTIN_REQUIRED_LITERALS: dict[int, tuple[str, ...]] = {
     id(pat): literals for pat, literals in (
         (PII_PATTERNS[0], ("-----BEGIN ",)),
