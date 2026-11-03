@@ -7,9 +7,18 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versions follow 
 ## [Unreleased]
 
 ### Fixed
+- keep built-in PII patterns alive for the id-keyed prefilter
+
+### Changed
+- keep stdio analysis ahead of large ASCII results (#131)
+
+## [0.10.0] - 2026-11-01
+
+### Fixed
 - wait for the server's last output before plain wrap exits (#129)
 
 ### Changed
+- 0.10.0 — provable stdio bundles (#130)
 - buffer stdio server-output reads instead of one syscall per byte (#128)
 - Move stdio analysis off the relay path (#127)
 - Add stdio decision journals and replayable bundle evidence (#126)
