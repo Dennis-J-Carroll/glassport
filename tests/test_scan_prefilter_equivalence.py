@@ -36,3 +36,11 @@ class TestScanPrefilterEquivalence(unittest.TestCase):
                                       None, "custom")
         self.assertEqual(_signature(detectors._scan_normalized("NO_AT_SIGN", (custom,))),
                          [("email_address", "NO_AT_SIGN", 0, 10)])
+
+    def test_prefilter_keys_belong_to_live_builtins(self):
+        # The skip table is keyed by id(); every key must name a built-in the
+        # module keeps alive, even if PII_PATTERNS is later edited in place.
+        held = {id(pat) for pat in detectors._BUILTIN_PREFILTER_PATTERNS}
+        keys = set(detectors._BUILTIN_REQUIRED_LITERALS) | {detectors._BUILTIN_AWS_SECRET_ID}
+        self.assertLessEqual(keys, held)
+        self.assertEqual(detectors._BUILTIN_PREFILTER_PATTERNS, tuple(detectors.PII_PATTERNS))
