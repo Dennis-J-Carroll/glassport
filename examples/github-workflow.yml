@@ -1,0 +1,36 @@
+# Copy into .github/workflows/glassport.yml in a repository with MCP source.
+# Requires glassport v0.11.0 or a later action ref; prefer a full commit SHA.
+name: Glassport
+on:
+  pull_request:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Dennis-J-Carroll/glassport@v0.11.0
+        id: glassport
+        with:
+          audit-path: src
+          fail-on-findings: none
+      # Optional: save steps.glassport.outputs.sarif-file as an artifact,
+      # especially on fork PRs where code scanning upload cannot write.
+
+  verify-bundles:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Replace evidence/bundle with a bundle created by your capture pipeline.
+      # This example assumes a committed or previously downloaded bundle.
+      - uses: Dennis-J-Carroll/glassport@v0.11.0
+        if: hashFiles('evidence/bundle/manifest.json') != ''
+        with:
+          bundle: evidence/bundle
+          fail-on-bundle: contradicted
