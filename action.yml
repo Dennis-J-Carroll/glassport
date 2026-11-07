@@ -44,6 +44,9 @@ outputs:
   bundle-worst:
     description: '0 proven, 1 contradicted, 2 evidence unavailable'
     value: ${{ steps.bundles.outputs.bundle-worst }}
+  upload-outcome:
+    description: success, failure, or skipped for SARIF upload
+    value: ${{ steps.upload.outcome }}
 runs:
   using: composite
   steps:

@@ -1,0 +1,179 @@
+name: Action self-test
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  audit-clean:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - id: scan
+        uses: ./
+        with:
+          audit-path: tests/fixtures/action/clean
+          fail-on-findings: high
+          upload-sarif: 'false'
+      - name: Assert clean SARIF and Python runtime
+        shell: bash
+        env:
+          AUDIT_EXIT: ${{ steps.scan.outputs.audit-exit }}
+          SARIF_FILE: ${{ steps.scan.outputs.sarif-file }}
+        run: |
+          set -euo pipefail
+          test "$AUDIT_EXIT" = 0
+          python -c 'import json, os; p=os.environ["SARIF_FILE"]; assert os.path.isfile(p); d=json.load(open(p, encoding="utf-8")); assert d["version"] == "2.1.0"'
+          python --version
+
+  audit-findings:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - id: observe
+        uses: ./
+        with:
+          audit-path: tests/fixtures/action/findings
+          fail-on-findings: none
+          category: glassport-action-selftest
+      - name: Assert findings and upload outcome
+        shell: bash
+        env:
+          AUDIT_EXIT: ${{ steps.observe.outputs.audit-exit }}
+          UPLOAD_OUTCOME: ${{ steps.observe.outputs.upload-outcome }}
+          SAME_REPO: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+        run: |
+          set -euo pipefail
+          test "$AUDIT_EXIT" = 1
+          if [ "$SAME_REPO" = true ]; then test "$UPLOAD_OUTCOME" = success; fi
+      - id: enforce
+        continue-on-error: true
+        uses: ./
+        with:
+          audit-path: tests/fixtures/action/findings
+          fail-on-findings: high
+          upload-sarif: 'false'
+      - name: Assert high policy fails after audit
+        shell: bash
+        env:
+          OUTCOME: ${{ steps.enforce.outcome }}
+          AUDIT_EXIT: ${{ steps.enforce.outputs.audit-exit }}
+        run: |
+          set -euo pipefail
+          test "$OUTCOME" = failure
+          test "$AUDIT_EXIT" = 1
+
+  bundles:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-python@e797f83bcb11b83ae66e0230d6156d7c80228e7c # v6.0.0
+        with:
+          python-version: '3.12'
+      - name: Build fresh HTTP and stdio bundles
+        shell: bash
+        run: |
+          set -euo pipefail
+          PYTHONPATH=src python scripts/build_ci_bundle.py --out ci-bundle
+          PYTHONPATH=src python scripts/build_ci_bundle.py --transport stdio --out ci-bundle-stdio
+      - id: valid
+        uses: ./
+        with:
+          setup-python: 'false'
+          bundle: |
+            ci-bundle
+            ci-bundle-stdio
+      - name: Tamper wire or journal byte
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          import shutil
+          shutil.copytree('ci-bundle', 'ci-bundle-tampered')
+          target = next(Path('ci-bundle-tampered').rglob('*.jsonl'))
+          data = target.read_bytes()
+          target.write_bytes(data[:-1] + bytes([data[-1] ^ 1]))
+          PY
+      - id: tampered
+        continue-on-error: true
+        uses: ./
+        with:
+          setup-python: 'false'
+          bundle: ci-bundle-tampered
+          fail-on-bundle: contradicted
+      - name: Assert bundle decisions
+        shell: bash
+        env:
+          VALID_WORST: ${{ steps.valid.outputs.bundle-worst }}
+          VALID_RESULTS: ${{ steps.valid.outputs.bundle-results }}
+          TAMPERED_WORST: ${{ steps.tampered.outputs.bundle-worst }}
+          TAMPERED_RESULTS: ${{ steps.tampered.outputs.bundle-results }}
+          TAMPERED_OUTCOME: ${{ steps.tampered.outcome }}
+        run: |
+          set -euo pipefail
+          test "$VALID_WORST" = 0
+          test "$TAMPERED_WORST" = 1
+          test "$TAMPERED_OUTCOME" = failure
+          python -c 'import json, os; assert len(json.loads(os.environ["VALID_RESULTS"])) == 2; assert json.loads(os.environ["TAMPERED_RESULTS"])[0]["status"] == "contradicted"'
+
+  injection:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - id: quote
+        continue-on-error: true
+        uses: ./
+        with:
+          audit-path: 'tests/fixtures/action/clean"; echo INJECTED > /tmp/pwned; #'
+      - id: substitution
+        continue-on-error: true
+        uses: ./
+        with:
+          audit-path: 'tests/fixtures/action/clean$(touch /tmp/pwned2)'
+      - id: backtick
+        continue-on-error: true
+        uses: ./
+        with:
+          audit-path: 'tests/fixtures/action/clean`touch /tmp/pwned3`'
+      - name: Assert rejection without execution
+        shell: bash
+        env:
+          QUOTE: ${{ steps.quote.outcome }}
+          SUBSTITUTION: ${{ steps.substitution.outcome }}
+          BACKTICK: ${{ steps.backtick.outcome }}
+        run: |
+          set -euo pipefail
+          test "$QUOTE" = failure
+          test "$SUBSTITUTION" = failure
+          test "$BACKTICK" = failure
+          test ! -e /tmp/pwned
+          test ! -e /tmp/pwned2
+          test ! -e /tmp/pwned3
+
+  usage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - id: empty
+        continue-on-error: true
+        uses: ./
+      - name: Assert usage failure
+        shell: bash
+        env:
+          OUTCOME: ${{ steps.empty.outcome }}
+        run: |
+          set -euo pipefail
+          test "$OUTCOME" = failure
+          # Validate action inputs logs: Set audit-path or bundle (or both).
