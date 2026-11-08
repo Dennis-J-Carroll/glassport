@@ -1,0 +1,136 @@
+name: Glassport audit and bundle verification
+description: Audit MCP server source and verify Glassport evidence bundles
+branding:
+  icon: shield
+  color: blue
+inputs:
+  audit-path:
+    description: Workspace-relative path to MCP server source
+    default: ''
+  bundle:
+    description: Newline-separated bundle directories to verify
+    default: ''
+  bundle-public:
+    description: Verify public-tier bundles
+    default: 'false'
+  fail-on-findings:
+    description: none or high
+    default: none
+  fail-on-bundle:
+    description: contradicted, unproven, or none
+    default: contradicted
+  upload-sarif:
+    description: Upload audit SARIF to GitHub code scanning
+    default: 'true'
+  category:
+    description: Code scanning category
+    default: glassport-audit
+  python-version:
+    description: Python version for setup-python
+    default: '3.12'
+  setup-python:
+    description: Set false when caller provides Python 3.10 or newer
+    default: 'true'
+outputs:
+  sarif-file:
+    description: Absolute path to generated SARIF file, empty without audit
+    value: ${{ steps.audit.outputs.sarif-file }}
+  audit-exit:
+    description: Audit exit code, empty without audit
+    value: ${{ steps.audit.outputs.audit-exit }}
+  bundle-results:
+    description: JSON array of bundle path, exit, status and verdict fields
+    value: ${{ steps.bundles.outputs.bundle-results }}
+  bundle-worst:
+    description: '0 proven, 1 contradicted, 2 evidence unavailable'
+    value: ${{ steps.bundles.outputs.bundle-worst }}
+  upload-outcome:
+    description: success, failure, or skipped for SARIF upload
+    value: ${{ steps.upload.outcome }}
+runs:
+  using: composite
+  steps:
+    - name: Set up Python
+      if: inputs.setup-python == 'true'
+      uses: actions/setup-python@e797f83bcb11b83ae66e0230d6156d7c80228e7c # v6.0.0
+      with:
+        python-version: ${{ inputs.python-version }}
+    - name: Validate action inputs
+      id: validate
+      shell: bash
+      env:
+        AUDIT_PATH: ${{ inputs.audit-path }}
+        BUNDLE_PATHS: ${{ inputs.bundle }}
+        BUNDLE_PUBLIC: ${{ inputs.bundle-public }}
+        FAIL_ON_FINDINGS: ${{ inputs.fail-on-findings }}
+        FAIL_ON_BUNDLE: ${{ inputs.fail-on-bundle }}
+        UPLOAD_SARIF: ${{ inputs.upload-sarif }}
+        SETUP_PYTHON: ${{ inputs.setup-python }}
+      run: |
+        set -euo pipefail
+        python -I "$GITHUB_ACTION_PATH/scripts/action_helper.py" validate
+    - name: Audit source
+      id: audit
+      if: inputs.audit-path != ''
+      shell: bash
+      working-directory: ${{ github.workspace }}
+      env:
+        AUDIT_PATH: ${{ inputs.audit-path }}
+      run: |
+        set -euo pipefail
+        set +e
+        python "$GITHUB_ACTION_PATH/glassport_tap.py" audit "$AUDIT_PATH" --sarif > glassport.sarif.json
+        audit_exit=$?
+        set -e
+        SARIF_FILE="$(python -I -c 'import os; print(os.path.abspath("glassport.sarif.json"))')"
+        printf 'sarif-file=%s\n' "$SARIF_FILE" >> "$GITHUB_OUTPUT"
+        printf 'audit-exit=%s\n' "$audit_exit" >> "$GITHUB_OUTPUT"
+        if [ "$audit_exit" -eq 2 ]; then
+          echo 'glassport action: audit usage or path error (exit 2).' >&2
+          exit 2
+        fi
+        if [ "$audit_exit" -ne 0 ] && [ "$audit_exit" -ne 1 ]; then
+          echo "glassport action: unexpected audit exit $audit_exit." >&2
+          exit "$audit_exit"
+        fi
+    - name: Upload audit SARIF
+      id: upload
+      if: always() && steps.audit.outputs.audit-exit != '' && steps.audit.outputs.audit-exit != '2' && inputs.upload-sarif == 'true'
+      continue-on-error: true
+      uses: github/codeql-action/upload-sarif@3599b3baa15b485a2e49ef411a7a4bb2452e7f93 # v3.30.5
+      with:
+        sarif_file: ${{ steps.audit.outputs.sarif-file }}
+        category: ${{ inputs.category }}
+    - name: Verify bundles
+      id: bundles
+      if: inputs.bundle != ''
+      shell: bash
+      working-directory: ${{ github.workspace }}
+      env:
+        BUNDLE_PATHS: ${{ inputs.bundle }}
+        BUNDLE_PUBLIC: ${{ inputs.bundle-public }}
+      run: |
+        set -euo pipefail
+        python -I "$GITHUB_ACTION_PATH/scripts/action_helper.py" bundles
+    - name: Write job summary
+      shell: bash
+      if: always() && steps.validate.outcome == 'success' && (steps.audit.outcome == 'success' || steps.bundles.outcome == 'success')
+      env:
+        AUDIT_EXIT: ${{ steps.audit.outputs.audit-exit }}
+        SARIF_FILE: ${{ steps.audit.outputs.sarif-file }}
+        BUNDLE_RESULTS: ${{ steps.bundles.outputs.bundle-results }}
+      run: |
+        set -euo pipefail
+        python -I "$GITHUB_ACTION_PATH/scripts/action_helper.py" summary
+    - name: Enforce policy
+      shell: bash
+      if: always() && steps.validate.outcome == 'success' && (steps.audit.outcome == 'success' || steps.bundles.outcome == 'success')
+      env:
+        AUDIT_EXIT: ${{ steps.audit.outputs.audit-exit }}
+        BUNDLE_WORST: ${{ steps.bundles.outputs.bundle-worst }}
+        FAIL_ON_FINDINGS: ${{ inputs.fail-on-findings }}
+        FAIL_ON_BUNDLE: ${{ inputs.fail-on-bundle }}
+        UPLOAD_OUTCOME: ${{ steps.upload.outcome }}
+      run: |
+        set -euo pipefail
+        python -I "$GITHUB_ACTION_PATH/scripts/action_helper.py" enforce

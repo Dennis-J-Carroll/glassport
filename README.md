@@ -27,4 +27,19 @@ glassport probe -- npx -y @modelcontextprotocol/server-filesystem /tmp
 - **Decision bundles:** `glassport bundle` packages wire logs, journals, SARIF, limits, and optional signatures. Clean HTTP, stdio gate, and `wrap --journal` captures can verify analysis and delivery linkage. Plain stdio wrap remains passive without a journal. Stdio-only gate checks carry an explicit replay limit. See [bundle format and verification](docs/bundle.md).
 - **CI:** `glassport audit <path> --sarif` reads server source without running it and uploads to the GitHub Security tab.
 
+## GitHub Action
+
+```yaml
+permissions:
+  contents: read
+  security-events: write
+steps:
+  - uses: actions/checkout@v4
+  - uses: Dennis-J-Carroll/glassport@v0.11.0
+    with:
+      audit-path: src
+```
+
+Pin the action to a full commit SHA for stable builds; a release tag also works. The caller grants `security-events: write`. See the [CI guide](docs/guide.md#ci-integration) for bundle verification, failure policies, and fork PR behavior.
+
 **[Deeper docs →](https://github.com/Dennis-J-Carroll/glassport/blob/main/docs/guide.md)** · MIT · Python 3.10+ · runs in Termux

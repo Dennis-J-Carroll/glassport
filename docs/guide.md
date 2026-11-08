@@ -563,7 +563,7 @@ Scope this release: npm + PyPI. GitHub provenance (stars, archived, release sign
 
 `--sarif` emits a SARIF 2.1.0 document over the audit findings. Result locations are **repo-root-relative** (the audited path is folded back in), so GitHub code scanning annotates the offending line on the diff rather than pointing at nothing. One severity vocabulary maps both the audit's string severities and the runtime detectors' integer severities onto SARIF `error` / `warning` / `note`, so a single report can carry both without two scales fighting.
 
-The shipped GitHub Actions workflow (`.github/workflows/ci.yml`) runs `audit --sarif` and uploads to the Security tab; point `AUDIT_TARGET` at your server directory. The upload runs even when the audit exits non-zero — a high or critical finding is exactly what the Security tab is for.
+The repository's own GitHub Actions workflow (`.github/workflows/ci.yml`) runs `audit --sarif` and uploads to the Security tab. Consumers can use the root [composite action](../action.yml), which runs Glassport from the action's pinned checkout without a package install. A high or critical audit finding does not skip the upload.
 
 The *runtime* side has a SARIF path too: both `glassport detect <session>.jsonl --sarif` (runs every behavioral detector) and `glassport summarize <session>.jsonl --sarif` emit a SARIF 2.1.0 document over the **detector annotations** of a session — fabricated calls, data exfiltration, drift, gate actions. Unlike the audit (which locates into repo source), these results locate into the session `.jsonl` itself (`region.startLine` is the wire event's line in the log), since a behavioral finding's evidence lives on the wire, not in a source file. Same severity vocabulary; consume it as a generic SARIF artifact.
 
@@ -574,9 +574,55 @@ The CI workflow uploads the runtime SARIF too — a `detect --sarif` over a comm
 glassport's static audit drops into any pipeline as a gate (exit 1 on
 critical/high) or a SARIF artifact.
 
-**GitHub Actions** — shipped in `.github/workflows/ci.yml` (`security-scan` job):
-`audit --sarif` → Security tab (`glassport-audit`), and `detect --sarif` over a
-session fixture → Security tab (`glassport-runtime`).
+**GitHub Actions** — use `Dennis-J-Carroll/glassport@v0.11.0` with
+`audit-path: src`; see the [two-job caller example](../examples/github-workflow.yml).
+Pin to a full commit SHA when stability matters. The release tag is an action
+version as well as a package version. The caller's audit job needs
+`contents: read` and `security-events: write`; an action cannot grant permissions.
+The action runs its own checked-out `glassport_tap.py` using `python` from
+`actions/setup-python`, without `pip install` or PyPI. It never executes an MCP
+server. It omits `detect --sarif` because static audit and bundle verification
+are the two scoped, independently useful features; the repository's own CI
+still uploads runtime SARIF from its committed fixture.
+
+| Input | Default | Purpose |
+| --- | --- | --- |
+| `audit-path` | empty | Workspace-relative source path; enables audit |
+| `bundle` | empty | Newline-separated existing bundle directories; enables verification |
+| `bundle-public` | `false` | Pass `--public` to each bundle verification |
+| `fail-on-findings` | `none` | `none` reports; `high` fails on audit exit `1` after upload |
+| `fail-on-bundle` | `contradicted` | `contradicted` fails on `1`; `unproven` fails on `1` or `2`; `none` reports |
+| `upload-sarif` | `true` | Upload audit SARIF to code scanning |
+| `category` | `glassport-audit` | Code scanning category for uploaded SARIF |
+| `python-version` | `3.12` | Python selected by `actions/setup-python` |
+| `setup-python` | `true` | Set `false` if caller already provides Python 3.10+ |
+
+At least one of `audit-path` and `bundle` is required. `audit-path` must exist
+inside `$GITHUB_WORKSPACE` and be relative to it; absolute paths lose the source
+prefix used for SARIF result URIs. The action rejects absolute and escaping
+paths before scanning. Bundle paths may be absolute or workspace-relative, but
+must exist as directories. Each path occupies one line in `bundle`.
+
+| Output | Meaning |
+| --- | --- |
+| `sarif-file` | Absolute path to SARIF, empty when audit did not run |
+| `audit-exit` | `0` clean or lower-severity findings; `1` high/critical; `2` usage/path error |
+| `bundle-results` | JSON array with `path`, `exit`, `status`, and integrity/analysis/delivery statuses |
+| `bundle-worst` | `1` if any contradiction, otherwise `2` if any evidence unavailable, otherwise `0` |
+| `upload-outcome` | `success`, `failure`, or `skipped`; exposed for CI checks |
+
+Bundle exit `0` means analysis and delivery evidence verified; `1` means
+contradiction; `2` means evidence unavailable. A public-tier bundle can return
+`2` because redaction withholds proof material, even when its public-copy
+integrity passes. A nonexistent bundle path is rejected by the action before
+the CLI runs (the CLI itself currently returns `1` and `bundle_unreadable`).
+The job summary lists SARIF finding counts and each bundle's status.
+
+On fork pull requests, `GITHUB_TOKEN` normally cannot write security events.
+The upload step can fail, but with default `fail-on-findings: none` the action
+warns and keeps the SARIF file at `sarif-file` for artifact upload. With
+`fail-on-findings: high`, an upload failure fails the action. For same-repo PRs,
+grant `security-events: write` in the caller job to upload under `category`.
 
 **GitLab CI** — copy [`examples/gitlab-ci.yml`](../examples/gitlab-ci.yml) to your
 repo root as `.gitlab-ci.yml`. Two jobs mirroring the GitHub workflow:

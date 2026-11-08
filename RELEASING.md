@@ -31,6 +31,8 @@ Semver: new features (like `serve`, `sarif`) → minor bump. Bugfix only → pat
 
 ### Primary path — tag-triggered trusted publishing (no token)
 
+Release tags also version the root GitHub Action; pushing `vX.Y.Z` makes `Dennis-J-Carroll/glassport@vX.Y.Z` available without a separate publish step.
+
 `.github/workflows/release.yml` triggers on a `v*` tag: it runs the test matrix,
 builds, checks the tag matches `pyproject.toml`, and publishes to PyPI via
 **trusted publishing (OIDC)** — no API token, no local `twine`.
