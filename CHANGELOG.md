@@ -6,10 +6,19 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versions follow 
 
 ## [Unreleased]
 
+### Added
+- add reusable audit and bundle GitHub Action (#133)
+
+### Changed
+- prepare 0.11.0 action release
+
+## [0.10.1] - 2026-11-03
+
 ### Fixed
 - keep built-in PII patterns alive for the id-keyed prefilter
 
 ### Changed
+- 0.10.1 — stdio analysis keeps up with large ASCII results (#132)
 - keep stdio analysis ahead of large ASCII results (#131)
 
 ## [0.10.0] - 2026-11-01
