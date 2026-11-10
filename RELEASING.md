@@ -1,17 +1,7 @@
 # Releasing glassport
 
-Runbook for cutting a PyPI release. Written at the 0.2.0 cut; keep it current.
-
-## State at 0.2.0 (2026-06-23)
-
-- **PyPI has 0.1.0** — predates `serve` (the MCP server) and `sarif.py` (SARIF export).
-  Installing 0.1.0 and running `glassport serve` falls through to *wrap* mode and
-  spawns whatever other `serve` is on PATH (e.g. Ray Serve) — not a glassport bug,
-  just a stale package.
-- **0.2.0 is built but unpublished.** Artifacts in `dist/`. Version bumped in
-  `pyproject.toml` + `src/glassport/__init__.py`. Lives on branch
-  `docs/document-serve-command` (PR #4), which carries both the README docs and
-  the bump — effectively the release PR.
+Runbook for cutting a PyPI release and versioning the root GitHub Action.
+The same `vX.Y.Z` tag triggers package publication and becomes the action ref.
 
 ## Version lives in two places — bump both
 
@@ -23,11 +13,13 @@ Semver: new features (like `serve`, `sarif`) → minor bump. Bugfix only → pat
 
 ## Release steps
 
-- [ ] Land the code first — merge the release PR (#4) into `main` so `main` matches
-      what ships. Tag after: `git tag v0.2.0 && git push --tags`.
-- [ ] Bump version in **both** files above (skip if already done), commit, and
-      push to `main`. The bump MUST be on `main` before the tag — the release
-      workflow's build job fails if `tag != pyproject version`.
+- [ ] Prepare a release PR from current `main`: bump both version fields above,
+      run `python scripts/gen_changelog.py --write` from a full-history clone,
+      and review the generated notes. Run the full suite as non-root and wait
+      for PR CI before merging.
+- [ ] Merge the release PR into `main`. Confirm both version fields and the
+      release notes on `main` before creating the tag. The release workflow's
+      build job fails if the tag does not match `pyproject.toml`.
 
 ### Primary path — tag-triggered trusted publishing (no token)
 
@@ -37,7 +29,8 @@ Release tags also version the root GitHub Action; pushing `vX.Y.Z` makes `Dennis
 builds, checks the tag matches `pyproject.toml`, and publishes to PyPI via
 **trusted publishing (OIDC)** — no API token, no local `twine`.
 
-- [ ] Push the tag (THIS is the irreversible publish step):
+- [ ] Push the tag from the verified `main` commit (THIS is the irreversible
+      publish step):
   - `git tag vX.Y.Z && git push origin vX.Y.Z`
   - The workflow creates the GitHub release with generated notes and attaches
     `dist/`. Edit those notes afterwards; if a release for the tag already
