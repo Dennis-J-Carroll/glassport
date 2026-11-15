@@ -344,34 +344,57 @@ def _launch_status(res: ProbeResult) -> Optional[int]:
     return res.tap_returncode if res.launch_proven else None
 
 
+def _has_path_separator(target: str) -> bool:
+    return os.sep in target or (os.altsep is not None and os.altsep in target)
+
+
 def _spawn_refusal_hint(res: ProbeResult, name: str) -> Optional[str]:
-    """The tap refused to launch anything (no log, exit 127)."""
+    """The tap refused to launch anything (no log, exit 127). A bare name is
+    looked up on PATH only, so a file of that name in the current directory
+    does not make it launchable and chmod +x would not help."""
     if res.log_path is not None or res.tap_returncode != 127 or not res.cmd:
         return None
     target = res.cmd[0]
+    not_found = (f"hint: command not found: {name}; check the spelling, "
+                 "or that it is installed and on PATH")
     try:
-        if os.path.isfile(target) and not os.access(target, os.X_OK):
-            return (f"hint: {name} exists but is not executable; check its "
-                    "permissions or run it through its interpreter")
-        if shutil.which(target) is None and not os.path.exists(target):
-            return (f"hint: command not found: {name}; check the spelling, "
-                    "or that it is installed and on PATH")
+        if _has_path_separator(target):
+            if os.path.isfile(target) and not os.access(target, os.X_OK):
+                return (f"hint: {name} exists but is not executable; check "
+                        "its permissions or run it through its interpreter")
+            if not os.path.exists(target):
+                return not_found
+        elif shutil.which(target) is None:
+            return not_found
     except (OSError, ValueError):
         pass
     return None
 
 
+def _server_status(res: ProbeResult) -> Optional[int]:
+    """The server's own exit status: only when the log proves launch and the
+    tap's status is in the range a process can exit with (the tap ends with
+    os._exit(rc), so a signal-killed server shows up as 256 - N > 128)."""
+    status = res.tap_returncode if res.launch_proven else None
+    return status if status is not None and 0 <= status <= 128 else None
+
+
 def _exited_hint(res: ProbeResult, name: str) -> str:
-    status = _launch_status(res)
-    if status is not None and status >= 0:
+    status = _server_status(res)
+    if status is not None:
         return (f"hint: {name} started but exited with status {status} "
                 "before answering initialize; run the command by itself to "
                 "see its startup error, and check its arguments and "
                 "environment variables")
-    if status is not None:
-        return (f"hint: {name} started but was terminated by signal "
-                f"{-status} before answering initialize; run the command by "
-                "itself to see what happens")
+    if res.launch_proven:
+        tap = res.tap_returncode
+        if tap is not None and tap > 128:
+            return (f"hint: {name} started but ended before answering "
+                    f"initialize; glassport's tap reported status {tap}, "
+                    "which can mean the server was killed by a signal. Run "
+                    "the command by itself to see what happens")
+        return (f"hint: {name} started but ended before answering "
+                "initialize; run the command by itself to see what happens")
     with_status = (f" with status {res.tap_returncode}"
                    if res.tap_returncode is not None else "")
     return ("hint: no initialize response; glassport's tap process exited"
@@ -380,8 +403,8 @@ def _exited_hint(res: ProbeResult, name: str) -> str:
 
 
 def _status_suffix(res: ProbeResult) -> str:
-    status = _launch_status(res)
-    return f" (status {status})" if status is not None and status >= 0 else ""
+    status = _server_status(res)
+    return f" (status {status})" if status is not None else ""
 
 
 def _incomplete_hint(res: ProbeResult) -> Optional[str]:
