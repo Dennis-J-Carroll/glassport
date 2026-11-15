@@ -338,12 +338,6 @@ def _display_name(cmd: list[str]) -> str:
     return name if len(name) <= _NAME_MAX else name[:_NAME_MAX - 1] + "…"
 
 
-def _launch_status(res: ProbeResult) -> Optional[int]:
-    """The server's own exit status, only when the log proves the tap is
-    passing it through."""
-    return res.tap_returncode if res.launch_proven else None
-
-
 def _has_path_separator(target: str) -> bool:
     return os.sep in target or (os.altsep is not None and os.altsep in target)
 
@@ -461,7 +455,11 @@ def _render_text(res: ProbeResult) -> str:
         hint = _incomplete_hint(res)
         if hint:
             lines.append(hint)
-        if res.stderr_tail.strip():
+        # When the tap refused to launch anything, the only captured stderr
+        # is glassport's own line repeating the hint: no pointer needed.
+        refused = (hs["failed_at"] == "spawn" and hs["reason"] == "exited"
+                   and _spawn_refusal_hint(res, "") is not None)
+        if res.stderr_tail.strip() and not refused:
             lines.append("details: captured stderr is in the --json output "
                          "(stderr_tail); rerun with --json")
     if hs["completed"] or res.log_path is not None:

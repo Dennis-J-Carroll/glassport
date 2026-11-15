@@ -245,7 +245,10 @@ class TestIncompleteHints(_FakeServer, unittest.TestCase):
         r = self.run_cli(_NO_SUCH)
         self.assertEqual(r.returncode, 3, r.stdout + r.stderr)
         self.assertIn(f"command not found: {_NO_SUCH}", r.stdout)
-        for bad in ("None", "log:", "report:", "exited with status"):
+        # nothing launched: the only stderr is glassport's own refusal line,
+        # so there are no further details to point at
+        for bad in ("None", "log:", "report:", "exited with status",
+                    "details:"):
             self.assertNotIn(bad, r.stdout)
 
     def test_launched_process_exiting_127_is_not_blamed_on_the_command(self):
@@ -280,6 +283,7 @@ class TestIncompleteHints(_FakeServer, unittest.TestCase):
         self.assertEqual(r.returncode, 3, r.stdout + r.stderr)
         self.assertIn("exists but is not executable", r.stdout)
         self.assertNotIn("command not found", r.stdout)
+        self.assertNotIn("details:", r.stdout)
 
     @unittest.skipIf(os.name != "posix", "needs POSIX permission bits")
     def test_bare_name_in_cwd_is_not_found_not_non_executable(self):
