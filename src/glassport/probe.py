@@ -27,6 +27,7 @@ from __future__ import annotations
 import json
 import os
 import queue
+import shutil
 import signal
 import subprocess
 import sys
@@ -58,6 +59,9 @@ class ProbeResult:
     max_severity: int = 0
     stderr_tail: str = ""
     exit_code: int = 2
+    # terminal-hint inputs only; deliberately not part of to_json()
+    tap_returncode: Optional[int] = None
+    launch_proven: bool = False
 
     def to_json(self) -> dict:
         return {
@@ -241,6 +245,26 @@ def _find_log(log_dir: Path, tap_pid: int) -> Optional[Path]:
     return files[-1] if files else None
 
 
+def _log_proves_launch(log_path: Optional[Path]) -> bool:
+    """True when the session log holds the tap's own `glassport.metrics`
+    record: the server process was launched and has exited. Server output
+    can't forge it (server frames are nested under "frame"). Any read or
+    parse error means "not proven"."""
+    if log_path is None:
+        return False
+    try:
+        with open(log_path, encoding="utf-8") as fh:
+            for line in fh:
+                if '"glassport.metrics"' not in line:
+                    continue
+                rec = json.loads(line)
+                if isinstance(rec, dict) and rec.get("type") == "glassport.metrics":
+                    return True
+    except (OSError, ValueError):
+        return False
+    return False
+
+
 def probe(cmd: list[str], calls: Optional[list[tuple[str, dict]]] = None,
           log_dir: Optional[Path] = None, out_path: Optional[Path] = None,
           startup_timeout: float = 60.0, timeout: float = 15.0) -> ProbeResult:
@@ -273,7 +297,9 @@ def probe(cmd: list[str], calls: Optional[list[tuple[str, dict]]] = None,
     stderr_tail = "".join(client.stderr)[-_STDERR_TAIL:]
     log_path = _find_log(log_dir, proc.pid)
     result = ProbeResult(cmd=list(cmd), handshake=handshake, log_path=log_path,
-                         report_path=None, stderr_tail=stderr_tail)
+                         report_path=None, stderr_tail=stderr_tail,
+                         tap_returncode=proc.returncode,
+                         launch_proven=_log_proves_launch(log_path))
     if log_path is None:
         # the tap refuses a missing binary before opening a log; that is
         # still "handshake incomplete" (3), not a probe usage error (2)
@@ -301,6 +327,117 @@ def probe(cmd: list[str], calls: Optional[list[tuple[str, dict]]] = None,
     return result
 
 
+_NAME_MAX = 120
+
+
+def _display_name(cmd: list[str]) -> str:
+    """The executable name, safe for one terminal line: redacted, whitespace
+    (incl. CR/LF) collapsed, capped."""
+    from glassport import detectors
+    name = " ".join(detectors.redact_display(cmd[0] if cmd else "").split())
+    return name if len(name) <= _NAME_MAX else name[:_NAME_MAX - 1] + "…"
+
+
+def _has_path_separator(target: str) -> bool:
+    return os.sep in target or (os.altsep is not None and os.altsep in target)
+
+
+def _spawn_refusal_hint(res: ProbeResult, name: str) -> Optional[str]:
+    """The tap refused to launch anything (no log, exit 127). A bare name is
+    looked up on PATH only, so a file of that name in the current directory
+    does not make it launchable and chmod +x would not help."""
+    if res.log_path is not None or res.tap_returncode != 127 or not res.cmd:
+        return None
+    target = res.cmd[0]
+    not_found = (f"hint: command not found: {name}; check the spelling, "
+                 "or that it is installed and on PATH")
+    try:
+        if _has_path_separator(target):
+            if os.path.isfile(target) and not os.access(target, os.X_OK):
+                return (f"hint: {name} exists but is not executable; check "
+                        "its permissions or run it through its interpreter")
+            if not os.path.exists(target):
+                return not_found
+        elif shutil.which(target) is None:
+            return not_found
+    except (OSError, ValueError):
+        pass
+    return None
+
+
+def _server_status(res: ProbeResult) -> Optional[int]:
+    """The server's own exit status: only when the log proves launch and the
+    tap's status is in the range a process can exit with (the tap ends with
+    os._exit(rc), so a signal-killed server shows up as 256 - N > 128)."""
+    status = res.tap_returncode if res.launch_proven else None
+    return status if status is not None and 0 <= status <= 128 else None
+
+
+def _exited_hint(res: ProbeResult, name: str) -> str:
+    status = _server_status(res)
+    if status is not None:
+        return (f"hint: {name} started but exited with status {status} "
+                "before answering initialize; run the command by itself to "
+                "see its startup error, and check its arguments and "
+                "environment variables")
+    if res.launch_proven:
+        tap = res.tap_returncode
+        if tap is not None and tap > 128:
+            return (f"hint: {name} started but ended before answering "
+                    f"initialize; glassport's tap reported status {tap}, "
+                    "which can mean the server was killed by a signal. Run "
+                    "the command by itself to see what happens")
+        return (f"hint: {name} started but ended before answering "
+                "initialize; run the command by itself to see what happens")
+    with_status = (f" with status {res.tap_returncode}"
+                   if res.tap_returncode is not None else "")
+    return ("hint: no initialize response; glassport's tap process exited"
+            f"{with_status} before the server answered. Check that {name} "
+            "runs by itself")
+
+
+def _status_suffix(res: ProbeResult) -> str:
+    status = _server_status(res)
+    return f" (status {status})" if status is not None else ""
+
+
+def _incomplete_hint(res: ProbeResult) -> Optional[str]:
+    """One actionable line for an incomplete handshake. Names the command
+    only after redact_display; never echoes server-controlled text."""
+    stage, reason = res.handshake.get("failed_at"), res.handshake.get("reason")
+    name = _display_name(res.cmd)
+    if stage in ("spawn", "initialize"):
+        if reason == "exited":
+            return (stage == "spawn" and _spawn_refusal_hint(res, name)
+                    or _exited_hint(res, name))
+        if stage == "initialize" and reason == "timeout":
+            return ("hint: no initialize response before the startup "
+                    "timeout; a first run through npx or uvx may still be "
+                    "downloading, so raise --startup-timeout, and check "
+                    f"that {name} speaks MCP over stdio")
+        if stage == "initialize" and reason == "error_response":
+            return ("hint: the server answered initialize with a JSON-RPC "
+                    "error; the reply is in the report timeline")
+    elif stage == "tools_list":
+        if reason == "exited":
+            return (f"hint: {name} answered initialize but exited before "
+                    f"answering tools/list{_status_suffix(res)}")
+        if reason == "timeout":
+            return ("hint: no tools/list response before the timeout; "
+                    "raise --timeout")
+        if reason == "error_response":
+            return ("hint: the server answered tools/list with a JSON-RPC "
+                    "error; the reply is in the report timeline")
+    elif stage == "call":
+        if reason == "exited":
+            return (f"hint: {name} exited before answering a tools/call"
+                    f"{_status_suffix(res)}")
+        if reason == "timeout":
+            return ("hint: no tools/call response before the timeout; "
+                    "raise --timeout")
+    return None
+
+
 def _render_text(res: ProbeResult) -> str:
     hs = res.handshake
     lines = []
@@ -308,12 +445,27 @@ def _render_text(res: ProbeResult) -> str:
         lines.append(f"handshake: complete · {len(res.declared_tools)} tool(s) "
                      f"declared · {len(res.called_tools)} called")
     else:
-        lines.append(f"handshake: INCOMPLETE at {hs['failed_at']} "
-                     f"({hs['reason']})")
+        stage = hs["failed_at"]
+        if stage == "spawn" and res.launch_proven:
+            stage = "initialize"    # the label says spawn; the log says it ran
+        lines.append(f"handshake: INCOMPLETE at {stage} ({hs['reason']})")
     lines.append(f"findings: {res.findings}"
                  + (f" (max severity {res.max_severity})" if res.findings else ""))
-    lines.append(f"log:    {res.log_path}")
-    lines.append(f"report: {res.report_path}")
+    if not hs["completed"]:
+        hint = _incomplete_hint(res)
+        if hint:
+            lines.append(hint)
+        # When the tap refused to launch anything, the only captured stderr
+        # is glassport's own line repeating the hint: no pointer needed.
+        refused = (hs["failed_at"] == "spawn" and hs["reason"] == "exited"
+                   and _spawn_refusal_hint(res, "") is not None)
+        if res.stderr_tail.strip() and not refused:
+            lines.append("details: captured stderr is in the --json output "
+                         "(stderr_tail); rerun with --json")
+    if hs["completed"] or res.log_path is not None:
+        lines.append(f"log:    {res.log_path}")
+    if hs["completed"] or res.report_path is not None:
+        lines.append(f"report: {res.report_path}")
     return "\n".join(lines)
 
 

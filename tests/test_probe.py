@@ -12,6 +12,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import time
@@ -26,7 +27,7 @@ from glassport.interaction_trace import (
 )
 
 FAKE_SERVER = r'''
-import json, os, sys, time
+import json, os, signal, sys, time
 mode = sys.argv[1]
 if len(sys.argv) > 2:   # side channel for the test: pid + inherited env
     with open(sys.argv[2], "w") as f:
@@ -39,6 +40,11 @@ for line in sys.stdin:
     rid, method = msg.get("id"), msg.get("method")
     if mode == "die_on_init":
         sys.exit(1)
+    if mode == "kill_self":
+        os.kill(os.getpid(), signal.SIGKILL)
+    if mode == "stderr_die":
+        sys.stderr.write("STDERR-MARKER-9f2c41\n"); sys.stderr.flush()
+        sys.exit(3)
     if method == "initialize":
         if mode == "init_error":
             send({"jsonrpc": "2.0", "id": rid,
@@ -50,6 +56,8 @@ for line in sys.stdin:
     elif method == "tools/list":
         if mode == "hang_list":
             time.sleep(60)
+        if mode == "exit_on_list":
+            sys.exit(3)
         send({"jsonrpc": "2.0", "id": rid, "result": {"tools": [
             {"name": "echo", "description": "echo text",
              "inputSchema": {"type": "object",
@@ -211,6 +219,167 @@ class TestProbeCli(_FakeServer, unittest.TestCase):
                      ["--timeout", "nope", "--", "x"]):
             with self.subTest(argv=argv), redirect_stdout(io.StringIO()):
                 self.assertEqual(probe_mod.main(argv), 2)
+
+
+SRC = str(Path(__file__).resolve().parent.parent / "src")
+_NO_SUCH = "glassport-no-such-binary-xyz"
+
+
+class TestIncompleteHints(_FakeServer, unittest.TestCase):
+    """The terminal summary says what to do next, never echoes server text."""
+
+    def run_cli(self, *server_cmd, opts=(), cwd=None):
+        env = {**os.environ, "PYTHONPATH": SRC}
+        return subprocess.run(
+            [sys.executable, "-m", "glassport.tap", "probe",
+             "--log-dir", str(self.log_dir), *opts, "--", *server_cmd],
+            capture_output=True, text=True, env=env, timeout=60, cwd=cwd)
+
+    def text(self, mode, **kw):
+        kw.setdefault("startup_timeout", 15)
+        kw.setdefault("timeout", 5)
+        res = probe_mod.probe(self.cmd(mode), log_dir=self.log_dir, **kw)
+        return res, probe_mod._render_text(res)
+
+    def test_missing_command_via_cli(self):
+        r = self.run_cli(_NO_SUCH)
+        self.assertEqual(r.returncode, 3, r.stdout + r.stderr)
+        self.assertIn(f"command not found: {_NO_SUCH}", r.stdout)
+        # nothing launched: the only stderr is glassport's own refusal line,
+        # so there are no further details to point at
+        for bad in ("None", "log:", "report:", "exited with status",
+                    "details:"):
+            self.assertNotIn(bad, r.stdout)
+
+    def test_launched_process_exiting_127_is_not_blamed_on_the_command(self):
+        r = self.run_cli(sys.executable, "-c", "import sys; sys.exit(127)")
+        self.assertEqual(r.returncode, 3, r.stdout + r.stderr)
+        self.assertIn("started but exited with status 127", r.stdout)
+        self.assertIn("INCOMPLETE at initialize", r.stdout)
+        self.assertNotIn("command not found", r.stdout)
+        self.assertNotIn("not executable", r.stdout)
+        self.assertIn("log:", r.stdout)
+        self.assertIn("report:", r.stdout)
+
+    def test_json_contract_keeps_spawn_label_and_ten_keys(self):
+        r = self.run_cli(sys.executable, "-c", "import sys; sys.exit(127)",
+                         opts=("--json",))
+        self.assertEqual(r.returncode, 3, r.stdout + r.stderr)
+        out = json.loads(r.stdout)
+        self.assertEqual(set(out), {"cmd", "handshake", "log", "report",
+                                    "declared", "called", "findings",
+                                    "max_severity", "stderr_tail",
+                                    "exit_code"})
+        self.assertEqual(out["handshake"], {"completed": False,
+                                            "failed_at": "spawn",
+                                            "reason": "exited"})
+
+    @unittest.skipIf(os.name != "posix", "needs POSIX permission bits")
+    def test_existing_non_executable_file(self):
+        f = self.log_dir / "plain_file"
+        f.write_text("not a program\n", encoding="utf-8")
+        f.chmod(0o644)
+        r = self.run_cli(str(f))
+        self.assertEqual(r.returncode, 3, r.stdout + r.stderr)
+        self.assertIn("exists but is not executable", r.stdout)
+        self.assertNotIn("command not found", r.stdout)
+        self.assertNotIn("details:", r.stdout)
+
+    @unittest.skipIf(os.name != "posix", "needs POSIX permission bits")
+    def test_bare_name_in_cwd_is_not_found_not_non_executable(self):
+        with tempfile.TemporaryDirectory() as cwd:
+            f = Path(cwd) / "glassport-bare-name-xyz.py"
+            f.write_text("print(1)\n", encoding="utf-8")
+            f.chmod(0o644)
+            r = self.run_cli("glassport-bare-name-xyz.py", cwd=cwd)
+        self.assertEqual(r.returncode, 3, r.stdout + r.stderr)
+        self.assertIn("command not found: glassport-bare-name-xyz.py",
+                      r.stdout)
+        self.assertNotIn("not executable", r.stdout)
+
+    @unittest.skipIf(os.name != "posix", "needs POSIX shebang handling")
+    def test_unlaunchable_script_gets_tap_attributed_fallback(self):
+        f = self.log_dir / "badinterp.sh"
+        f.write_text("#!/nonexistent/interp\n", encoding="utf-8")
+        f.chmod(0o755)
+        r = self.run_cli(str(f))
+        self.assertEqual(r.returncode, 3, r.stdout + r.stderr)
+        self.assertIn("glassport's tap process exited with status 127",
+                      r.stdout)
+        self.assertNotIn("command not found", r.stdout)
+        self.assertNotIn("not executable", r.stdout)
+
+    @unittest.skipIf(os.name != "posix", "needs POSIX signals")
+    def test_signal_killed_server_is_not_reported_as_an_exit_status(self):
+        _, out = self.text("kill_self")
+        self.assertIn("glassport's tap reported status", out)
+        self.assertNotIn("exited with status", out)
+
+    def test_status_suffix_on_tools_list_exit(self):
+        _, out = self.text("exit_on_list")
+        self.assertIn("answered initialize but exited before answering "
+                      "tools/list (status 3)", out)
+
+    def test_log_proves_launch(self):
+        proves = probe_mod._log_proves_launch
+        d = self.log_dir
+        real = d / "real.jsonl"
+        real.write_text('{"seq": 1}\n{"type": "glassport.metrics", '
+                        '"frames_blocked": 0}\n', encoding="utf-8")
+        nested = d / "nested.jsonl"
+        nested.write_text('{"seq": 1, "dir": "s2c", "frame": '
+                          '{"type": "glassport.metrics"}}\n', encoding="utf-8")
+        junk = d / "junk.jsonl"
+        junk.write_bytes(b"\xff\xfe not json \x00\n{{{\n")
+        self.assertTrue(proves(real))
+        self.assertFalse(proves(nested))
+        self.assertFalse(proves(d / "missing.jsonl"))
+        self.assertFalse(proves(junk))
+        self.assertFalse(proves(None))
+
+    def test_stderr_is_pointed_to_never_printed(self):
+        res, out = self.text("stderr_die")
+        self.assertIn("started but exited with status 3 before answering "
+                      "initialize", out)
+        self.assertIn("details: captured stderr is in the --json output "
+                      "(stderr_tail); rerun with --json", out)
+        self.assertIn("STDERR-MARKER-9f2c41", res.stderr_tail)
+        self.assertNotIn("STDERR-MARKER-9f2c41", out)
+        self.assertNotIn("STDERR-MARKER-9f2c41",
+                         res.report_path.read_text(encoding="utf-8"))
+
+    def test_error_response_hint_hides_server_message(self):
+        _, out = self.text("init_error")
+        self.assertIn("answered initialize with a JSON-RPC error", out)
+        self.assertNotIn("missing API key", out)
+
+    def test_tools_list_timeout_hint(self):
+        _, out = self.text("hang_list", timeout=1)
+        self.assertIn("hint: no tools/list response before the timeout; "
+                      "raise --timeout", out)
+
+    def test_completed_handshake_output_is_unchanged(self):
+        res, out = self.text("ok")
+        self.assertEqual(out, "\n".join([
+            "handshake: complete \u00b7 1 tool(s) declared \u00b7 0 called",
+            "findings: 0",
+            f"log:    {res.log_path}",
+            f"report: {res.report_path}"]))
+
+    def test_name_is_sanitized_to_one_line(self):
+        res = probe_mod.ProbeResult(
+            cmd=["\x1b[31mevil\r\nname\tx" + "y" * 200],
+            handshake={"completed": False, "failed_at": "spawn",
+                       "reason": "exited"},
+            log_path=None, report_path=None, tap_returncode=127)
+        out = probe_mod._render_text(res)
+        self.assertNotIn("\x1b", out)
+        self.assertNotIn("\r", out)
+        hints = [ln for ln in out.splitlines() if ln.startswith("hint:")]
+        self.assertEqual(len(hints), 1)
+        self.assertIn("command not found: ", hints[0])
+        self.assertLess(len(hints[0]), 300)
+        self.assertEqual(len(out.splitlines()), 3)
 
 
 class TestIncompleteVerdict(unittest.TestCase):
