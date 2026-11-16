@@ -73,6 +73,21 @@ class TestContent(unittest.TestCase):
         self.assertIn("CLEAN", h)
         # no annotation boxes rendered (CSS may still mention the selector)
         self.assertNotIn('class="ann"', h)
+        self.assertIn("behavior matched declaration", h)
+        self.assertNotIn("no tools were called", h)
+
+    def test_clean_verdict_with_nothing_called_says_so(self):
+        """Absence is reported as absence: with no tools/call on the wire
+        there was no behavior to match against the declaration."""
+        h = render(handshake())
+        self.assertIn("CLEAN", h)
+        self.assertIn("no tools were called", h)
+        self.assertNotIn("behavior matched declaration", h)
+
+    def test_findings_without_calls_keep_their_own_verdict_text(self):
+        h = render(handshake() + [call(6, 3, "ghost", {})])
+        self.assertNotIn("CLEAN", h)
+        self.assertNotIn("no tools were called", h)
 
     def test_result_links_back_to_call_seq(self):
         h = render(handshake() + [call(6, 3, "web_search", {"query": "x"}),

@@ -427,7 +427,7 @@ JWTs are detected by default — and the `eyJ…` pattern is now gated by the `j
   <img src="screenshots/report.png" alt="glassport session report: verdict, declared vs called surface, and a timeline with gate blocks and a quarantined resource read" width="720">
 </p>
 
-- **Verdict** — `CLEAN` / `WORTH A LOOK` / `SHOULD NOT HAPPEN` / `HOSTILE OR HALLUCINATED`
+- **Verdict** — `CLEAN` / `WORTH A LOOK` / `SHOULD NOT HAPPEN` / `HOSTILE OR HALLUCINATED`. `CLEAN` with no tool calls on the wire says so: only the handshake and declaration were checked.
 - **Surface** — declared tools vs. called tools; fabricated calls highlighted
 - **Timeline** — every wire event in sequence, request/response pairs linked, JSON payloads in collapsible `<details>` blocks, detector annotations inline
 - **Footer** — event count, annotation count, generation timestamp, severity key

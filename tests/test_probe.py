@@ -358,13 +358,59 @@ class TestIncompleteHints(_FakeServer, unittest.TestCase):
         self.assertIn("hint: no tools/list response before the timeout; "
                       "raise --timeout", out)
 
-    def test_completed_handshake_output_is_unchanged(self):
+    def test_list_only_output_says_nothing_was_exercised(self):
         res, out = self.text("ok")
         self.assertEqual(out, "\n".join([
             "handshake: complete \u00b7 1 tool(s) declared \u00b7 0 called",
+            "declared: echo",
+            "findings: 0",
+            "note: no tools were called, so only the handshake and "
+            "declaration were checked; exercise one with "
+            "--call NAME '{\"arg\": \"value\"}'",
+            f"log:    {res.log_path}",
+            f"report: {res.report_path}"]))
+        self.assertEqual(res.exit_code, 0)
+
+    def test_output_with_a_call_has_no_untested_note(self):
+        res, out = self.text("ok", calls=[("echo", {"text": "hi"})])
+        self.assertEqual(out, "\n".join([
+            "handshake: complete \u00b7 1 tool(s) declared \u00b7 1 called",
+            "declared: echo",
             "findings: 0",
             f"log:    {res.log_path}",
             f"report: {res.report_path}"]))
+
+    def test_list_only_note_through_the_cli(self):
+        r = self.run_cli(*self.cmd("ok"))
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("declared: echo", r.stdout)
+        self.assertIn("note: no tools were called", r.stdout)
+
+    def _completed(self, declared, called=()):
+        return probe_mod.ProbeResult(
+            cmd=["x"], handshake={"completed": True, "failed_at": None,
+                                  "reason": None},
+            log_path=Path("l.jsonl"), report_path=Path("l.html"),
+            declared_tools=list(declared), called_tools=list(called),
+            exit_code=0)
+
+    def test_declared_names_are_sanitized_and_capped(self):
+        hostile = "\x1b[31mevil\r\nname" + "z" * 200
+        names = [hostile] + [f"t{i}" for i in range(30)]
+        out = probe_mod._render_text(self._completed(names))
+        self.assertNotIn("\x1b", out)
+        self.assertNotIn("\r", out)
+        declared = [ln for ln in out.split("\n") if ln.startswith("declared:")]
+        self.assertEqual(len(declared), 1)
+        self.assertLess(len(declared[0]), 600)
+        self.assertIn("more", declared[0])
+
+    def test_no_declared_tools_gets_its_own_note(self):
+        out = probe_mod._render_text(self._completed([]))
+        self.assertNotIn("declared:", out)
+        self.assertIn("note: the server declared no tools, so there was "
+                      "nothing to call", out)
+        self.assertNotIn("--call", out)
 
     def test_name_is_sanitized_to_one_line(self):
         res = probe_mod.ProbeResult(
