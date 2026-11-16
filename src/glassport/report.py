@@ -42,6 +42,11 @@ VERDICTS = {
     3: ("HOSTILE OR HALLUCINATED", "calls or requests outside any declaration"),
 }
 
+# Verdict 0 with no tools/call on the wire: nothing diverged, but nothing was
+# exercised either. Absence is reported as absence, not as a match.
+NOTHING_CALLED_TEXT = ("no findings; no tools were called, so only the "
+                       "handshake and declaration were checked")
+
 # Stages a driven session (`glassport probe`) can stop at. The renderer
 # echoes only these fixed names: anything else in trace metadata renders as
 # "unknown", so the banner stays static text like the tail-only one.
@@ -204,6 +209,8 @@ def render_html(trace: InteractionTrace, source_name: str = "") -> str:
         # no findings in a partial capture is not "clean"
         w('<div class="dim">no findings in the captured traffic</div>')
     else:
+        if not max_sev and not called:
+            verdict_text = NOTHING_CALLED_TEXT
         w(f'<div class="verdict v{max_sev}">{verdict}</div>')
         w(f'<div class="dim">{_esc(verdict_text)}{counts}</div>')
 

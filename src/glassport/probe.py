@@ -330,12 +330,28 @@ def probe(cmd: list[str], calls: Optional[list[tuple[str, dict]]] = None,
 _NAME_MAX = 120
 
 
-def _display_name(cmd: list[str]) -> str:
-    """The executable name, safe for one terminal line: redacted, whitespace
+_TOOL_NAME_MAX = 48
+_TOOLS_SHOWN = 8
+
+
+def _one_line(text: str, limit: int) -> str:
+    """External text made safe for one terminal line: redacted, whitespace
     (incl. CR/LF) collapsed, capped."""
     from glassport import detectors
-    name = " ".join(detectors.redact_display(cmd[0] if cmd else "").split())
-    return name if len(name) <= _NAME_MAX else name[:_NAME_MAX - 1] + "…"
+    flat = " ".join(detectors.redact_display(text).split())
+    return flat if len(flat) <= limit else flat[:limit - 1] + "…"
+
+
+def _display_name(cmd: list[str]) -> str:
+    """The executable name, safe for one terminal line."""
+    return _one_line(cmd[0] if cmd else "", _NAME_MAX)
+
+
+def _declared_line(names: list[str]) -> str:
+    """Declared tool names are server-controlled: sanitize each, show a few."""
+    shown = ", ".join(_one_line(n, _TOOL_NAME_MAX) for n in names[:_TOOLS_SHOWN])
+    more = len(names) - _TOOLS_SHOWN
+    return f"declared: {shown}" + (f", … +{more} more" if more > 0 else "")
 
 
 def _has_path_separator(target: str) -> bool:
@@ -449,8 +465,19 @@ def _render_text(res: ProbeResult) -> str:
         if stage == "spawn" and res.launch_proven:
             stage = "initialize"    # the label says spawn; the log says it ran
         lines.append(f"handshake: INCOMPLETE at {stage} ({hs['reason']})")
+    if hs["completed"] and res.declared_tools:
+        lines.append(_declared_line(res.declared_tools))
     lines.append(f"findings: {res.findings}"
                  + (f" (max severity {res.max_severity})" if res.findings else ""))
+    if hs["completed"] and not res.called_tools:
+        # list-only is the default: zero findings here is not a clean bill
+        if res.declared_tools:
+            lines.append("note: no tools were called, so only the handshake "
+                         "and declaration were checked; exercise one with "
+                         "--call NAME '{\"arg\": \"value\"}'")
+        else:
+            lines.append("note: the server declared no tools, so there was "
+                         "nothing to call")
     if not hs["completed"]:
         hint = _incomplete_hint(res)
         if hint:
